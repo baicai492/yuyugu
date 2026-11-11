@@ -50,6 +50,11 @@ export class Engine {
     if (st.stealSchedule && typeof st.stealSchedule === 'object') this.memo.stealSchedule = st.stealSchedule
     if (st.helpStall) this.memo.helpStall = st.helpStall
     if (st.gomokuStall) this.memo.gomokuStall = st.gomokuStall
+    if (st.stolenAt) this.memo.stolenAt = st.stolenAt
+    // 擂台今日场次：重启后不用等打完一轮才知道擂台有没有做完
+    if (st.arenaDay) this.memo.arenaDay = st.arenaDay
+    if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
+    if (st.arenaMax) this.memo.arenaMax = st.arenaMax
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -89,6 +94,10 @@ export class Engine {
         gomokuStall: this.memo.gomokuStall || 0,
         // 最近一次被偷的时刻：之后 24 小时都要续守家道具
         stolenAt: this.memo.stolenAt || 0,
+        // 擂台今日场次（只从 /battle/gear 拿得到）：nextWake 靠它判断擂台是否打完
+        arenaDay: this.memo.arenaDay || '',
+        arenaToday: this.memo.arenaToday || 0,
+        arenaMax: this.memo.arenaMax || 0,
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -215,12 +224,19 @@ export class Engine {
     try {
       const exp = M.expectedPrices(R, w.now, w.prices, { outlook: cfg.sell?.outlookDays ?? 3, external: w.externalSoldRatio || {} })
       const d = decisionSnapshot(R, s, w.now, w.prices, exp, cfg)
+      // 每项后面带上本岛日剩余额度。「炸矿 2,952」只是单价，不代表还能炸；
+      // 额度打完时写成「剩 0」，一眼就知道为什么没动作。
+      const q = d.quota || {}
       const jobs = []
-      if (cfg.work?.fish) jobs.push(`钓鱼 ${fmt(d.fish)}`)
-      if (cfg.work?.mine) jobs.push(`挖矿 ${fmt(d.mine)}`)
-      if (cfg.work?.bomb) jobs.push(`炸矿 ${fmt(d.bomb)}`)
+      if (cfg.work?.fish) jobs.push(`钓鱼 ${fmt(d.fish)}${q.fish <= 0 ? '(剩0)' : `(剩${q.fish})`}`)
+      if (cfg.work?.mine) jobs.push(`挖矿 ${fmt(d.mine)}${q.mine <= 0 ? '(剩0)' : `(剩${q.mine})`}`)
+      if (cfg.work?.bomb) jobs.push(`炸矿 ${fmt(d.bomb)}${q.bomb <= 0 ? '(剩0)' : `(剩${q.bomb})`}`)
+      // 全部没额度时说清楚「等换岛日」，而不是继续报「当前最优 炸矿」
+      const verdict = d.allWorkDone
+        ? '本岛日体力活额度已用尽，等换岛日'
+        : `当前最优 ${d.bestJob}${d.worthWorking ? '' : '（不值得，收益低于口粮）'}`
       this.log(`每点体力收益：${jobs.join('  ')}｜口粮成本 ${d.foodName ? `${fmt(d.foodCost)}（${d.foodName}）` : '库存无口粮'}` +
-        `｜当前最优 ${d.bestJob}${d.worthWorking ? '' : '（不值得，收益低于口粮）'}` +
+        `｜${verdict}` +
         `｜地块 ${d.plotN - d.empty}/${d.plotN} 已种（${d.topCrop}）｜空 ${d.empty} 块`)
     } catch (e) { /* 决策依据只是辅助信息，算不出来不影响主流程 */ }
 
@@ -276,10 +292,17 @@ export class Engine {
     if (cfg.arena?.enabled && !cfg.dry) {
       try {
         this.setStep('擂台')
-        await arenaDaily(w, cfg, this.log.bind(this), {
+        const ar = await arenaDaily(w, cfg, this.log.bind(this), {
           // 擂台每场 8.5 秒，30 场要 4 分钟。逐场回报进度，GUI 才不会看着像卡死。
           onBattle: (n, need) => this.setStep(`擂台 · 第 ${n}/${need} 场`),
         })
+        // 今日已打场次只在这里拿得到（要发 /battle/gear）。存进 memo，
+        // nextWake 才能判断「擂台是不是也打完了」，进而决定要不要长睡。
+        if (ar) {
+          this.memo.arenaDay = ar.day
+          this.memo.arenaToday = ar.today ?? 0
+          this.memo.arenaMax = ar.maxBattles ?? 30
+        }
       } catch (e) { this.log('擂台出错：' + e.message, 'err') }
     }
 
@@ -408,10 +431,12 @@ export class Engine {
     const until = Date.now() + sleepSec * 1000
     // 巡检间隔跟随等待时长：
     //   等 60~120 秒时，本来马上就要醒，再 20 秒一轮纯属浪费请求；
-    //   等 900 秒的退避时，20 秒一轮才值得（尽早发现突发）。
-    // 规则：间隔 = 等待时长的 1/3，夹在 [20, 120] 秒之间。
+    //   等 900 秒的退避时，20 秒一轮才值得（尽早发现突发）；
+    //   等 1800 秒（额度全刷完后的空闲）时，5 分钟一轮就够了——
+    //   这段时间里没有本地事件会变，巡检只是为了盯「被偷」这类外部突发。
+    // 规则：间隔 = 等待时长的 1/10，夹在 [20, 300] 秒之间。
     const base = this.cfg.loop?.watchInterval ?? 20
-    const interval = Math.max(base, Math.min(120, Math.round(sleepSec / 3))) * 1000
+    const interval = Math.max(base, Math.min(300, Math.round(sleepSec / 10))) * 1000
     let lastCheck = 0
     while (this.running && Date.now() < until) {
       const step = Math.min(2000, until - Date.now())

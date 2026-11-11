@@ -184,5 +184,7 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) 
     } catch (e) { log('训练读取失败：' + e.message) }
   }
 
-  return { battles }
+  // today / maxBattles 一起返回：这两个数只在这里拿得到（要发 /battle/gear 请求），
+  // nextWake 是纯函数不能发请求，只能靠调用方把它们缓存进 memo。
+  return { battles, today: gear.daily?.battles ?? 0, maxBattles: a.battles ?? 30, day: world.R.worldDay(world.now) }
 }

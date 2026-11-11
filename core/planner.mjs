@@ -285,6 +285,17 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
   const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick), R.WORLD.cost.mine) : 0
   const bomb = cfg.work?.bomb ? perE(mineEV(R, s, expPrices, true), R.WORLD.cost.bomb) : 0
 
+  // 本岛日还剩下多少额度。日志里必须写清楚——「每点体力收益 炸矿 2,952」
+  // 和「这个岛日已经炸满 10 次了」是两回事，只打前者会让人以为程序一直在炸矿。
+  const quotaLeft = (k) => {
+    const iq = s.iq
+    const used = (iq && iq.d === R.isleIndex(t)) ? (iq[k] || 0) : 0
+    return Math.max(0, (R.WORLD.daily[k] || 0) - used)
+  }
+  const quota = { fish: quotaLeft('fish'), mine: quotaLeft('mine'), bomb: quotaLeft('bomb'), craft: quotaLeft('craft') }
+  // 所有「花体力换钱」的活都没额度了 → 这个岛日已经没事可做，只能等换岛日
+  const allWorkDone = quota.fish <= 0 && quota.mine <= 0 && quota.bomb <= 0
+
   // 当前地里种得最多的作物 / 口粮地
   const plantCount = {}
   let empty = 0
@@ -301,7 +312,7 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
 
   return {
     season: R.SEASONS[season], weather: R.WEATHERS[R.weatherOf(R.isleDay(t))], hour: R.isleHour(t),
-    fish, mine, bomb, foodCost, foodName,
+    fish, mine, bomb, foodCost, foodName, quota, allWorkDone,
     bestJob: jobs[0]?.[0] || '无',
     // 赚的还不够口粮钱 → 不值得干
     worthWorking: jobs.length ? jobs[0][1] > foodCost * (cfg.work?.minValueRatio ?? 1.2) : false,
@@ -1054,11 +1065,17 @@ export function nextWake(world, cfg, memo = {}) {
   const stalling = (memo.helpStall || 0) >= stallThreshold || (memo.gomokuStall || 0) >= stallThreshold
   const idleWaitSec = Math.min(w.idleStall ?? 900, dayLeft)
 
+  // 记录「还有没有值得马上回来做的事」。全都没有时，就一路睡到换岛日——
+  // 凌晨把额度刷完之后，以前会每 1~2 分钟醒一次、每次发一堆请求，
+  // 纯粹空转（实测 01:13 到 08:00 全是无效巡视）。
+  let hasPending = false
+
   // 帮忙：每天 N 家，还有剩就尽快
   if (cfg.social?.help?.enabled) {
     const done = (memo.helpDay === day ? (memo.helpCount || 0) : 0)
     const need = (cfg.social.help.perDay ?? 10) - done
     if (need > 0 && s.en >= (cfg.social.help.minEnergy ?? 20)) {
+      hasPending = true
       if (stalling) pushBackoff(idleWaitSec)
       else push(w.help ?? 60)
     }
@@ -1070,16 +1087,52 @@ export function nextWake(world, cfg, memo = {}) {
     const paid = s.cnt?.gomokuPaid || 0
     const left = Math.min((cfg.npc.gomokuMaxGames ?? 10) - paid, R.NPC.daily - used)
     if (left > 0) {
+      hasPending = true
       if (stalling) pushBackoff(idleWaitSec)
       else push(w.gomoku ?? 60)
     }
   }
 
   // 擂台：每天 N 场有掉落，没打完就尽快
-  // 打满之后 arenaDaily 会直接返回，所以给个宽一点的间隔即可。
+  //
+  // 今日已打场次不在 world.state 里（站点放在 /battle/gear 的 gear.daily.battles），
+  // 而 nextWake 是纯函数不能发请求，所以读 engine 缓存进 memo 的值。
+  // 没有缓存（比如刚启动还没打过）时按「没打完」处理，保守一点。
   if (cfg.arena?.enabled) {
-    if (stalling) pushBackoff(idleWaitSec)
-    else push(w.arena ?? 300)
+    const maxB = cfg.arena.battles ?? 30
+    const today = (memo.arenaDay === day ? (memo.arenaToday ?? 0) : 0)
+    if (today < maxB) {
+      hasPending = true
+      if (stalling) pushBackoff(idleWaitSec)
+      else push(w.arena ?? 300)
+    }
+  }
+
+  // 花体力换钱的活（钓/挖/炸）：还有额度就该去做。
+  // 这三项以前完全没进候选集，导致「体力满满但额度已用完」时，
+  // 判断不出「其实没事可做」，还是按 maxSleep/额度驱动空转。
+  {
+    const iqLeft = (k) => {
+      const iq = s.iq
+      const used = (iq && iq.d === R.isleIndex(t)) ? (iq[k] || 0) : 0
+      return Math.max(0, (R.WORLD.daily[k] || 0) - used)
+    }
+    const workLeft = (cfg.work?.fish ? iqLeft('fish') : 0) +
+      (cfg.work?.mine ? iqLeft('mine') : 0) +
+      (cfg.work?.bomb ? iqLeft('bomb') : 0)
+    if (workLeft > 0 && s.en >= Math.min(R.WORLD.cost.fish ?? 4, R.WORLD.cost.mine ?? 3, R.WORLD.cost.bomb ?? 6)) {
+      hasPending = true
+      if (stalling) pushBackoff(idleWaitSec)
+      else push(w.work ?? 60)
+    }
+  }
+
+  // 当季田里还有空地可种 / 有熟了的没收 → 也算有事可做
+  for (let i = 0; i < s.plotN; i++) {
+    const p = s.plots[i]
+    if (!p) { if (cfg.farm?.enabled) hasPending = true; continue }
+    const st = R.cropStage(p, t, R.sprinkled(s, i) || weather === 1)
+    if (st.stage === 3) hasPending = true
   }
 
   // 偷菜：扫描间隔到了就该去（不加这个会一直等 maxSleep，实际扫描被拖慢）
@@ -1095,9 +1148,13 @@ export function nextWake(world, cfg, memo = {}) {
     if (nx) {
       // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
       push(Math.min(left > 0 ? left : 5, nx.wakeIn))
-    } else {
-      push(left > 0 ? left : 5)
+    } else if (left > 0) {
+      push(left)
     }
+    // 没有解禁记录、扫描间隔也过了（left<=0）时不推候选：
+    // 以前这里写 push(5)，含义是「扫描间隔到了就该去」，
+    // 但 stealScanAt 为 0（刚重启）时 left 是负数，于是每次推送 5 秒，
+    // 造成「5 秒醒一次」的死循环。
   }
 
   // 兜底：没有更早的事件时也别睡太久
@@ -1113,5 +1170,16 @@ export function nextWake(world, cfg, memo = {}) {
   const raw = cands.length ? Math.min(...cands) : maxSleep
   // 选中的值若与某个退避候选相等（说明是它赢的），就套退避上限
   const wonByBackoff = backoffCands.length && raw === Math.min(...backoffCands)
+
+  // 什么都没得做（额度全刷完、没有熟的地、没有空位可种，也没有物理事件在等）：
+  // 睡到换岛日，但封顶 idleSleepCap。
+  //
+  // 为什么不能直接睡满 dayLeft：等待期虽然是只读巡检，但它同时负责发现
+  // 「被偷了」「有突发」。睡 6 小时不醒，就等于放弃了这层保护。
+  // 30 分钟醒一次，一晚从 ~300 轮请求降到 ~14 轮，够用了。
+  if (!hasPending && raw >= maxSleep) {
+    const cap = w.idleSleepCap ?? 1800
+    return Math.max(maxSleep, Math.min(cap, Math.ceil(dayLeft)))
+  }
   return Math.min(raw, wonByBackoff ? backoffCap : maxSleep)
 }

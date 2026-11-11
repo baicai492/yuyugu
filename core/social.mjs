@@ -4,7 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock } from './steal-schedule.mjs'
+import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC } from './steal-schedule.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -208,9 +208,11 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   //   1. 调度表里某处刚好到解禁时刻（这是精确调度，不能等下一个扫描周期）
   //   2. 调度表里记着的解禁时刻已经过去但还没去偷（刚醒过来，别再过 30 分钟）
   const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec: st.prepLeadSec ?? 8 })
-  const snipeReady = !!nx && nx.at - world.now <= (st.prepLeadSec ?? 8) + 5
+  // 「到点了」必须是「还没过点」才算：nx.at 已经过去时（负数差值）也满足 <= 13，
+  // 会让每一轮都打断扫描间隔，配合 nextWake 的 1 秒候选变成几秒一醒的空转。
+  const snipeReady = !!nx && nx.at >= world.now - (st.prepLeadSec ?? 8) && nx.at - world.now <= (st.prepLeadSec ?? 8) + 5
   const overdue = Object.values(memo.stealSchedule || {})
-    .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - 300))
+    .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - EXPIRED_GRACE_SEC))
 
   if (world.now - lastScan < every && !snipeReady && !overdue) return { stolen: 0, value: 0 }
   if (snipeReady) log(`偷菜：精确解禁时刻已到，提前打断扫描间隔`)
@@ -264,6 +266,14 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
       }
     } catch (e) {
       log(`偷 ${tg.name} 出错：${e.message}`)
+    }
+    // 这座岛已经处理过了：把它的解禁记录从调度表里删掉。
+    // 不删的话，那个「解禁时刻」还留在表里，nextWake 会一直把它当成
+    // 「马上要解禁」来唤醒，造成几秒一次的循环唤醒。
+    // 下次真正扫到这座岛时 updateIsleSchedule 会重新算出新的解禁点。
+    if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
+      const rec = memo.stealSchedule[tg.id]
+      rec.upcoming = (rec.upcoming || []).filter((u) => !tg.targets?.some((x) => x.kind === u.kind && x.i === u.i))
     }
     await sleep(1500)
   }
