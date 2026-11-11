@@ -25,7 +25,7 @@ export class Engine {
     this.logs = []
     this.memo = {}                 // 跨轮记忆（今日已帮谁、上次扫偷菜…）
     this.ledger = { day: '', earn: 0, spend: 0, tax: 0, startCoins: 0, startStock: 0 }
-    this.status = { state: 'idle', round: 0, nextAt: 0, lastError: '', lastRun: 0 }
+    this.status = { state: 'idle', step: '', round: 0, nextAt: 0, lastError: '', lastRun: 0 }
     this.externalSoldRatio = {}
     this.history = []
     this.stats = { totalRuns: 0, totalEarn: 0, firstRunAt: 0 }
@@ -76,6 +76,25 @@ export class Engine {
       }
       saveState(this.logDir, this.persist)
     } catch {}
+  }
+
+  /** 标记「当前正在做什么」。GUI 靠它显示「正在巡视：擂台」而不是干巴巴的「已暂停」。 */
+  setStep(step) {
+    this.status = { ...this.status, state: 'working', step }
+  }
+
+  /**
+   * 立刻把一笔收支记进今日账本。
+   * 巡视一轮可能要跑好几分钟（擂台 30 场要 8.5 秒/场），
+   * 如果等整轮结束才记账，GUI 上的「今日收支」会长时间停在 0，看着像没在工作。
+   */
+  credit(earn = 0, spend = 0, tax = 0) {
+    if (!earn && !spend && !tax) return
+    this.ledger.earn += earn
+    this.ledger.spend += spend
+    this.ledger.tax += tax
+    this.stats.totalEarn = (this.stats.totalEarn || 0) + earn
+    this.savePersist()
   }
 
   log(msg, level = 'info') {
@@ -135,6 +154,9 @@ export class Engine {
     const R = w.R
     const cfg = this.cfg
 
+    // 关键：一轮可能要跑好几分钟（擂台 30 场就要 4 分钟）。
+    // 必须一进来就把状态切成「工作中」，否则 GUI 整轮都显示上一轮留下的「已暂停」。
+    this.setStep('读取世界状态')
     await w.refresh()
     this.ensureLedger()
 
@@ -158,6 +180,7 @@ export class Engine {
     let rounds = 0
     let totalEarn = 0, totalSpend = 0, totalTax = 0
     while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
+      this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
       plan = planRound(w, cfg, this.log.bind(this))
       if (!plan.actions.length) break
       if (cfg.dry) {
@@ -165,10 +188,12 @@ export class Engine {
         break
       }
       try {
+        this.setStep('提交动作')
         const res = await w.act(plan.actions)
         totalEarn += res.earn || 0
         totalSpend += res.spend || 0
         totalTax += res.tax || 0
+        this.credit(res.earn || 0, res.spend || 0, res.tax || 0)   // 边赚边记，GUI 立刻能看到
         if (plan.summary.length) this.log(plan.summary.join('；'))
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
       } catch (e) {
@@ -181,50 +206,61 @@ export class Engine {
     if (cfg.npc?.enabled && !cfg.dry) {
       try {
         if (cfg.npc.gomoku) {
+          this.setStep('52弟 · 五子棋')
           const r = await playGomoku(w, cfg, this.log.bind(this))
           totalEarn += r.coins || 0
+          this.credit(r.coins || 0)
         }
-        if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) await playOther(w, cfg, this.log.bind(this))
+        if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) {
+          this.setStep('52弟 · 小游戏')
+          await playOther(w, cfg, this.log.bind(this))
+        }
       } catch (e) { this.log('52弟出错：' + e.message, 'err') }
     }
 
     // ---------- 擂台 ----------
     if (cfg.arena?.enabled && !cfg.dry) {
-      try { await arenaDaily(w, cfg, this.log.bind(this)) }
-      catch (e) { this.log('擂台出错：' + e.message, 'err') }
+      try {
+        this.setStep('擂台')
+        await arenaDaily(w, cfg, this.log.bind(this), {
+          // 擂台每场 8.5 秒，30 场要 4 分钟。逐场回报进度，GUI 才不会看着像卡死。
+          onBattle: (n, need) => this.setStep(`擂台 · 第 ${n}/${need} 场`),
+        })
+      } catch (e) { this.log('擂台出错：' + e.message, 'err') }
     }
 
     // ---------- 帮忙 ----------
     if (cfg.social?.help?.enabled && !cfg.dry) {
       try {
+        this.setStep('串门 · 帮忙')
         const r = await helpDaily(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.coins || 0
+        this.credit(r.coins || 0)
       } catch (e) { this.log('帮忙出错：' + e.message, 'err') }
     }
 
     // ---------- 偷菜 ----------
     if (cfg.social?.steal?.enabled && !cfg.dry) {
       try {
+        this.setStep('串门 · 偷菜')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.value || 0
+        this.credit(r.value || 0)
       } catch (e) { this.log('偷菜出错：' + e.message, 'err') }
     }
 
-    // ---------- 记账 ----------
-    this.ledger.earn += totalEarn
-    this.ledger.spend += totalSpend
-    this.ledger.tax += totalTax
-    this.stats.totalEarn = (this.stats.totalEarn || 0) + totalEarn
-    this.savePersist()
+    // ---------- 收尾 ----------
     if (totalEarn || totalSpend) {
       this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
     }
     this.snapshot()
 
     // ---------- 下次唤醒 ----------
+    this.setStep('计算下次巡视时间')
     const sleep = cfg.dry ? (cfg.loop?.maxSleep || 600) : nextWake(w, cfg)
     this.status = {
-      state: 'running',
+      state: 'waiting',
+      step: '',
       round: (this.status.round || 0) + 1,
       nextAt: Date.now() + sleep * 1000,
       sleep,
@@ -267,7 +303,7 @@ export class Engine {
     while (this.running && !this.halted) {
       try {
         if (!this.cfg.enabled) {
-          this.status = { ...this.status, state: 'paused' }
+          this.status = { ...this.status, state: 'paused', step: '' }
           await new Promise((r) => setTimeout(r, 3000))
           continue
         }
@@ -284,7 +320,7 @@ export class Engine {
         await new Promise((r) => setTimeout(r, 15000))
       }
     }
-    this.status = { ...this.status, state: 'stopped' }
+    this.status = { ...this.status, state: 'stopped', step: '' }
     this.log('托管已停止')
   }
 
@@ -296,9 +332,13 @@ export class Engine {
     const R = w.R
     const s = w.state
     const stockNow = w.ready ? w.stockValue() : 0
-    const dayNet = w.ready ? (w.coins - this.ledger.startCoins) + (stockNow - this.ledger.startStock) : 0
+    // 世界状态还没就绪时不要算净增——否则库存读成 0，dayNet 会瞬间变成一个大负数
+    const dayNet = (w.ready && stockNow > 0)
+      ? (w.coins - this.ledger.startCoins) + (stockNow - this.ledger.startStock)
+      : (w.ready ? w.coins - this.ledger.startCoins : 0)
     return {
       state: this.status.state,
+      step: this.status.step || '',
       running: this.running,
       dry: this.cfg.dry,
       round: this.status.round || 0,

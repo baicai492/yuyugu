@@ -56,24 +56,28 @@ try {
   log('\n[1] 初始状态（主程序未运行）')
   log(JSON.stringify(s))
 
-  // ---------- 2. 点「启动主程序」 ----------
-  log('\n[2] 点击「启动主程序」…')
-  await page.click('#btnLaunch')
-  // 最多等 20 秒
-  let launched = false
-  for (let i = 0; i < 40; i++) {
-    await page.waitForTimeout(500)
-    const st = await page.evaluate(() => ({
-      connVisible: !document.getElementById('connBox').hidden,
-      hint: document.getElementById('launchHint')?.textContent || '',
-      linkState: document.getElementById('linkState')?.textContent || '',
-    }))
-    if (!st.connVisible) { launched = true; log('  ✓ 已连接：' + st.linkState); break }
-    if (i % 6 === 5) log('  … ' + (st.hint || '等待中'))
-  }
-  if (!launched) {
-    const hint = await page.evaluate(() => document.getElementById('launchHint')?.textContent)
-    log('  ✗ 未能启动：' + hint)
+  // ---------- 2. 点「启动主程序」（主程序已在跑就跳过） ----------
+  if (s.connVisible) {
+    log('\n[2] 点击「启动主程序」…')
+    await page.click('#btnLaunch')
+    // 最多等 20 秒
+    let launched = false
+    for (let i = 0; i < 40; i++) {
+      await page.waitForTimeout(500)
+      const st = await page.evaluate(() => ({
+        connVisible: !document.getElementById('connBox').hidden,
+        hint: document.getElementById('launchHint')?.textContent || '',
+        linkState: document.getElementById('linkState')?.textContent || '',
+      }))
+      if (!st.connVisible) { launched = true; log('  ✓ 已连接：' + st.linkState); break }
+      if (i % 6 === 5) log('  … ' + (st.hint || '等待中'))
+    }
+    if (!launched) {
+      const hint = await page.evaluate(() => document.getElementById('launchHint')?.textContent)
+      log('  ✗ 未能启动：' + hint)
+    }
+  } else {
+    log('\n[2] 主程序已在运行，跳过启动步骤（状态：' + s.linkState + '）')
   }
 
   // ---------- 3. 概览 ----------
@@ -86,9 +90,14 @@ try {
     dayNet: document.getElementById('dayNet')?.textContent,
     dayNetSub: document.getElementById('dayNetSub')?.textContent,
     statusLine: document.getElementById('statusline')?.textContent,
+    linkState: document.getElementById('linkState')?.textContent,
+    earn: document.getElementById('earn')?.textContent,
+    spend: document.getElementById('spend')?.textContent,
   }))
   log('\n[3] 概览页')
   log(JSON.stringify(s, null, 2))
+  // 「已暂停」只在总开关关掉时才该出现；开关开着时应是「巡视中/托管中」
+  log('  状态标签：' + (s.linkState === '已暂停' ? '✗ 开关开着却显示已暂停' : '✓ ' + s.linkState))
 
   // ---------- 4. 市场页 ----------
   await page.click('button[data-tab="market"]')
@@ -105,12 +114,24 @@ try {
   // ---------- 5. 设置页 ----------
   await page.click('button[data-tab="settings"]')
   await page.waitForTimeout(1500)
-  s = await page.evaluate(() => ({
-    groups: document.querySelectorAll('#settings .grp').length,
-    fields: document.querySelectorAll('#settings .field').length,
-  }))
+  s = await page.evaluate(() => {
+    const groups = [...document.querySelectorAll('#settings .grp')]
+    return {
+      groups: groups.length,
+      fields: document.querySelectorAll('#settings .field').length,
+      // 标签必须全是中文，不能出现 enabled / maxPaybackDays 这种英文键名
+      titles: groups.map((g) => g.querySelector('h3')?.textContent),
+      labels: groups.flatMap((g) => [...g.querySelectorAll('.field label')].map((x) => x.textContent)),
+      hints: document.querySelectorAll('#settings .field-hint').length,
+      hasStealGroup: groups.some((g) => /偷菜/.test(g.querySelector('h3')?.textContent || '')),
+    }
+  })
   log('\n[5] 设置页')
-  log(JSON.stringify(s))
+  log(JSON.stringify(s, null, 2))
+  const badLabels = s.labels.filter((x) => /^[A-Za-z][A-Za-z0-9.]*$/.test(x))
+  log('  中文标签：' + (badLabels.length ? '✗ 还有英文 ' + badLabels.join(', ') : '✓ 全部中文'))
+  log('  偷菜设置：' + (s.hasStealGroup ? '✓ 有独立分组' : '✗ 找不到'))
+  await page.screenshot({ path: path.join(ROOT, 'research', 'gui-settings.png'), fullPage: true })
 
   // ---------- 6. 日志页：本次 + 历史 ----------
   await page.click('button[data-tab="logs"]')

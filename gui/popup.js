@@ -34,7 +34,9 @@ async function api(path, opts = {}) {
 
 async function getStatus() { return api('/api/status') }
 async function getMarket() {
-  const d = Number($('mDays').value) || 12
+  // 面板上的两个参数就是策略实际用的参数（读写同一份配置），
+  // 保证「你看到的建议」和「程序真正照做的」是同一套数。
+  const d = Number($('mDays').value) || Number(config?.sell?.horizonDays) || 12
   const m = Number($('mMark').value) || 0
   return api(`/api/market?days=${d}&markdown=${m}`)
 }
@@ -92,12 +94,25 @@ function renderOverview() {
   if (!status) return
   const w = status.world
   const enabled = !!config?.enabled
-  const active = status.running && enabled
+  // 三种运行态：working（正在巡视）/ waiting（巡视完，等下次）/ paused（总开关关着）
+  const working = status.running && enabled && status.state === 'working'
+  const waiting = status.running && enabled && status.state === 'waiting'
   $('enabled').checked = enabled
   $('dry').checked = !!config?.dry
-  $('dot').className = 'dot ' + (active ? 'on' : '')
-  $('linkState').textContent = active ? '托管中' : (status.running ? '已暂停' : '已连接')
-  $('linkState').className = 'pill' + (active ? '' : ' bad')
+  $('dot').className = 'dot ' + (working || waiting ? 'on' : status.running ? '' : 'err')
+  if (!enabled) {
+    $('linkState').textContent = status.running ? '已暂停' : '已连接'
+    $('linkState').className = 'pill bad'
+  } else if (working) {
+    $('linkState').textContent = '巡视中'
+    $('linkState').className = 'pill'
+  } else if (waiting) {
+    $('linkState').textContent = '托管中'
+    $('linkState').className = 'pill'
+  } else {
+    $('linkState').textContent = '已连接'
+    $('linkState').className = 'pill bad'
+  }
   if (!w) { $('statusline').textContent = '世界状态尚未就绪'; return }
 
   const net = status.ledger?.dayNet ?? 0
@@ -130,11 +145,13 @@ function renderOverview() {
 
   const st = status.state
   const bits = []
-  if (st === 'paused') bits.push('已暂停')
-  else if (st === 'running') bits.push(`第 ${status.round} 轮`)
-  if (status.nextAt) {
+  if (st === 'paused') bits.push('总开关已关，未在做任何事')
+  else if (st === 'working') bits.push(status.step ? `正在${status.step}` : '正在巡视')
+  else if (st === 'waiting') bits.push(`第 ${status.round} 轮已完成`)
+  else if (st === 'error') bits.push('出错')
+  if (waiting && status.nextAt) {
     const left = Math.max(0, Math.round((status.nextAt - Date.now()) / 1000))
-    bits.push(`${left} 秒后下次巡视`)
+    bits.push(left > 90 ? `${Math.round(left / 60)} 分钟后巡视` : `${left} 秒后巡视`)
   }
   if (status.lastError) bits.push('⚠ ' + status.lastError)
   $('statusline').textContent = bits.join(' · ')
@@ -143,6 +160,11 @@ function renderOverview() {
 // ---------- 渲染：市场 ----------
 function renderMarket() {
   if (!market) return
+  // 面板参数以配置为准（在设置页改过之后切过来也能对上）
+  if (config?.sell) {
+    if (document.activeElement !== $('mDays')) $('mDays').value = config.sell.horizonDays ?? 12
+    if (document.activeElement !== $('mMark')) $('mMark').value = config.sell.markdownPct ?? 6
+  }
   $('mForecast').replaceChildren(...(market.forecast || []).map((f) => {
     const el = document.createElement('div')
     el.className = 'fc'
@@ -175,17 +197,97 @@ async function refreshMarket() {
 }
 
 // ---------- 渲染：设置 ----------
+// labels：字段 → 中文含义；hints：字段 → 一句话解释（鼠标悬停可见）
 const FIELD_GROUPS = [
-  { title: '托管', fields: ['enabled', 'dry'] },
-  { title: '投资', fields: ['invest.enabled', 'invest.maxPaybackDays', 'invest.reserveCoins'], nums: ['invest.maxPaybackDays', 'invest.reserveCoins'] },
-  { title: '农田', fields: ['farm.enabled', 'farm.water', 'farm.foodPlots'], nums: ['farm.foodPlots'] },
-  { title: '体力', fields: ['energy.eat', 'energy.coffee'] },
-  { title: '钓鱼 / 挖矿', fields: ['work.fish', 'work.mine', 'work.bomb', 'work.bait'] },
-  { title: '卖货', fields: ['sell.enabled', 'sell.horizonDays', 'sell.markdownPct', 'sell.respectTiers'], nums: ['sell.horizonDays', 'sell.markdownPct'] },
-  { title: '货船', fields: ['cargo.enabled', 'cargo.minMargin'], nums: ['cargo.minMargin'] },
-  { title: '52弟', fields: ['npc.enabled', 'npc.gomoku', 'npc.gomokuLevel', 'npc.gomokuBudgetMs'], nums: ['npc.gomokuLevel', 'npc.gomokuBudgetMs'] },
-  { title: '擂台', fields: ['arena.enabled', 'arena.battles', 'arena.openChests', 'arena.autoEquip'], nums: ['arena.battles'] },
-  { title: '串门', fields: ['social.help.enabled', 'social.steal.enabled'], },
+  {
+    title: '总开关',
+    fields: ['enabled', 'dry'],
+    labels: { enabled: '启用托管', dry: '演练模式' },
+    hints: { enabled: '关掉后主程序仍在运行，但不再做任何动作', dry: '只计算并打印计划，不向站点提交任何动作' },
+  },
+  {
+    title: '投资',
+    fields: ['invest.enabled', 'invest.maxPaybackDays', 'invest.reserveCoins'],
+    labels: { 'invest.enabled': '自动扩建', 'invest.maxPaybackDays': '回本天数上限', 'invest.reserveCoins': '保留现金' },
+    hints: { 'invest.maxPaybackDays': '预计多少天内回本才买（天）', 'invest.reserveCoins': '账上至少留这么多 D 币不动用' },
+  },
+  {
+    title: '农田',
+    fields: ['farm.enabled', 'farm.water', 'farm.foodPlots'],
+    labels: { 'farm.enabled': '自动种植', 'farm.water': '自动浇水', 'farm.foodPlots': '口粮地数量' },
+    hints: { 'farm.foodPlots': '留几块地专门种回体力的作物' },
+  },
+  {
+    title: '体力',
+    fields: ['energy.eat', 'energy.coffee'],
+    labels: { 'energy.eat': '吃作物回体力', 'energy.coffee': '喝咖啡回体力' },
+    hints: { 'energy.coffee': '咖啡 +60 体力且可超过上限，每天 3 杯' },
+  },
+  {
+    title: '钓鱼 / 挖矿',
+    fields: ['work.fish', 'work.mine', 'work.bomb', 'work.bait'],
+    labels: { 'work.fish': '钓鱼', 'work.mine': '挖矿', 'work.bomb': '炸矿', 'work.bait': '自动用鱼饵' },
+    hints: { 'work.bomb': '炸矿消耗炸药，单次收益更高但需要库存里有炸药' },
+  },
+  {
+    title: '卖货',
+    fields: ['sell.enabled', 'sell.horizonDays', 'sell.markdownPct', 'sell.respectTiers'],
+    labels: { 'sell.enabled': '自动卖货', 'sell.horizonDays': '往后看几个岛日', 'sell.markdownPct': '离峰值几个点就卖', 'sell.respectTiers': '遵守阶梯价' },
+    hints: {
+      'sell.horizonDays': '在这段时间内找最高价，决定现在卖还是等',
+      'sell.markdownPct': '卖线 = 未来峰值 × (1 − 这个百分比)',
+      'sell.respectTiers': '超出每日全价额度的部分留到明天卖，避免被压价',
+    },
+  },
+  {
+    title: '囤货仓库',
+    fields: ['vault.enabled', 'vault.keepPeakAhead'],
+    labels: { 'vault.enabled': '启用仓库', 'vault.keepPeakAhead': '峰值在几个岛日内就囤' },
+    hints: { 'vault.enabled': '把「等涨更划算」的货锁进仓库，防止被管家低价卖掉' },
+  },
+  {
+    title: '货船',
+    fields: ['cargo.enabled', 'cargo.minMargin'],
+    labels: { 'cargo.enabled': '自动进货', 'cargo.minMargin': '最低预期利润' },
+    hints: { 'cargo.minMargin': '预期能加价多少才买（0.08 = 8%）' },
+  },
+  {
+    title: '52弟 · 五子棋',
+    fields: ['npc.enabled', 'npc.gomoku', 'npc.gomokuLevel', 'npc.gomokuBudgetMs'],
+    labels: { 'npc.enabled': '启用 52弟', 'npc.gomoku': '打五子棋', 'npc.gomokuLevel': '难度档位', 'npc.gomokuBudgetMs': '每局思考上限' },
+    hints: {
+      'npc.gomokuLevel': '1 简单×0.8 / 2 普通×1.2 / 3 困难×1.5',
+      'npc.gomokuBudgetMs': '超过这个时间还没搜到必胜棋谱就跳过重开（毫秒）',
+    },
+  },
+  {
+    title: '擂台',
+    fields: ['arena.enabled', 'arena.battles', 'arena.openChests', 'arena.autoEquip'],
+    labels: { 'arena.enabled': '打擂台', 'arena.battles': '每天场次', 'arena.openChests': '自动开宝箱', 'arena.autoEquip': '自动换装' },
+    hints: { 'arena.battles': '前 30 场有掉落，每场间隔 8.5 秒' },
+  },
+  {
+    title: '串门 · 帮忙',
+    fields: ['social.help.enabled', 'social.help.perDay'],
+    labels: { 'social.help.enabled': '自动帮忙', 'social.help.perDay': '每天帮几家' },
+    hints: { 'social.help.perDay': '每家 1 体力，得 200 D + 2 经验' },
+  },
+  {
+    title: '串门 · 偷菜',
+    fields: ['social.steal.enabled', 'social.steal.minValue', 'social.steal.maxEnergy', 'social.steal.visitsPerScan', 'social.steal.scanEvery'],
+    labels: {
+      'social.steal.enabled': '开启偷菜',
+      'social.steal.minValue': '最低目标价值',
+      'social.steal.maxEnergy': '单次体力上限',
+      'social.steal.visitsPerScan': '每轮去几家',
+      'social.steal.scanEvery': '扫描间隔（秒）',
+    },
+    hints: {
+      'social.steal.enabled': '风险高：被发现要打守家战，输了按市价 1.2 倍赔（默认关闭）',
+      'social.steal.minValue': '一批货市价低于这个值就不去偷',
+      'social.steal.scanEvery': '多久重新扫一遍邻居目录',
+    },
+  },
 ]
 
 const getPath = (obj, path) => path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj)
@@ -210,27 +312,37 @@ function renderSettings() {
       const row = document.createElement('div')
       row.className = 'field'
       const lab = document.createElement('label')
-      lab.textContent = path.split('.').pop()
+      lab.textContent = g.labels?.[path] || path.split('.').pop()
+      const hint = g.hints?.[path]
+      if (hint) { lab.title = hint; lab.classList.add('has-hint') }
       let input
       if (typeof v === 'boolean') {
         input = document.createElement('input')
         input.type = 'checkbox'
         input.checked = v
         input.onchange = () => setPath(config, path, input.checked)
-      } else if ((g.nums || []).includes(path) || typeof v === 'number') {
+      } else if (typeof v === 'number') {
         input = document.createElement('input')
         input.type = 'number'
         input.step = 'any'
         input.value = v
+        input.title = hint || ''
         input.onchange = () => setPath(config, path, Number(input.value))
       } else {
         input = document.createElement('input')
         input.type = 'text'
         input.value = v ?? ''
+        input.title = hint || ''
         input.onchange = () => setPath(config, path, input.value)
       }
       row.append(lab, input)
       grp.append(row)
+      if (hint) {
+        const note = document.createElement('div')
+        note.className = 'field-hint'
+        note.textContent = hint
+        grp.append(note)
+      }
     }
     return grp
   }))
@@ -327,8 +439,15 @@ function bind() {
   $('btnOnce').onclick = async () => { try { await cmd('once'); setTimeout(loadStatus, 1500) } catch (e) { $('statusline').textContent = e.message } }
 
   $('mRefresh').onclick = refreshMarket
-  $('mDays').onchange = refreshMarket
-  $('mMark').onchange = refreshMarket
+  // 改了参数就同步写回配置——策略与面板共用一个数，不会各走各的
+  $('mDays').onchange = async () => {
+    if (config) { setPath(config, 'sell.horizonDays', Number($('mDays').value) || 12); await saveCfg(config).catch(() => {}) }
+    await refreshMarket()
+  }
+  $('mMark').onchange = async () => {
+    if (config) { setPath(config, 'sell.markdownPct', Number($('mMark').value) || 0); await saveCfg(config).catch(() => {}) }
+    await refreshMarket()
+  }
 
   $('cfgSave').onclick = async () => {
     try {
@@ -401,10 +520,10 @@ function sendNative(msg) {
 function startAuto() {
   clearInterval(autoTimer)
   autoTimer = setInterval(async () => {
-    if (!$('logAuto').checked) return
-    await loadLogs()
-    if (!$('tab-overview').hidden) await loadStatus()
-  }, 3000)
+    if ($('logAuto').checked) await loadLogs()
+    // 概览页要看到「正在做什么」和逐笔收支，1.5 秒刷一次
+    if (!$('tab-overview').hidden && alive) await loadStatus()
+  }, 1500)
 }
 
 async function main() {

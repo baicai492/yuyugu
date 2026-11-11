@@ -95,10 +95,11 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
   const out = []
   const pages = cfg.social?.steal?.pages ?? 6
   let cursor = null, scanned = 0, skipped = 0
+  // 是否成功用上了「只看可偷」筛选。必须声明在循环外——循环末尾的日志要用它。
+  let usedFilter = true
   for (let p = 0; p < pages; p++) {
     let d
     // 站点 a4a62d77 起支持只列可偷的岛；列表是「生成时」的快照，抵达后仍需核对
-    let usedFilter = true
     try { d = await neighbors(world, { cursor, limit: 20, stealable: true }) }
     catch (e) {
       // 老版本站点不支持这个参数，退回全量扫描

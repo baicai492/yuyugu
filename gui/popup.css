@@ -93,6 +93,9 @@ table.tbl tr.sell td { background: color-mix(in srgb, var(--up) 10%, transparent
 .settings .grp h3 { margin: 0 0 6px; font-size: 12px; color: var(--accent); }
 .settings .field { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 12px; }
 .settings .field label { color: var(--muted); }
+.settings .field label.has-hint { border-bottom: 1px dotted var(--line); cursor: help; }
+.settings .field-hint { color: var(--muted); opacity: .75; font-size: 11px; line-height: 1.35; margin: -1px 0 4px; }
+.settings .grp h3 .tag-risk { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 400; background: color-mix(in srgb, var(--down) 15%, transparent); color: var(--down); }
 .settings input[type=number], .settings input[type=text], .settings input[type=time], .settings select {
   width: 110px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; font-size: 12px;
 }

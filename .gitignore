@@ -17,8 +17,14 @@ ledger.csv
 # 站点源码快照（体积大，可随时重新下载；需要时用 scripts/fetch-live.mjs 拉）
 live/
 new/
+new2/
 cache/
 research/ref/
+research/pet-*.js
+research/pets.*
+research/_read_*.txt
+research/sim*.txt
+research/*.png
 research/live-*.json
 research/*-sample.json
 research/world.json

@@ -77,7 +77,7 @@ export async function openChests(world, gear, log = () => {}) {
  * 擂台日常：打满有掉落的场次、开宝箱、换装、加点。
  * 每场之间必须间隔 8 秒（服务端限制），这里用 8.5 秒留余量。
  */
-export async function arenaDaily(world, cfg, log = () => {}) {
+export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) {
   const a = cfg.arena || {}
   if (!a.enabled) return { battles: 0 }
 
@@ -133,6 +133,7 @@ export async function arenaDaily(world, cfg, log = () => {}) {
         const r = await api(world, '/api/pet/battle', { opponent_id: o.id, operation: randomUUID() })
         if (r.battle) battles++
         if (r.gear) gear = r.gear
+        onBattle?.(battles, need)
       } catch (e) {
         if (e.status === 429) { await sleep(3000); k--; continue }
         log('擂台挑战失败：' + e.message)
