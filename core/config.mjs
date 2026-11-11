@@ -20,9 +20,12 @@ export const DEFAULTS = {
     // （cli/live-daemon.mjs: deltaSec = min(120, nextWakeSec - now)）。
     // 等待期我们已经每 20 秒只读巡检一次，所以 120 秒不会漏掉突发。
     maxSleep: 120,
+    // 退避（连续没进展时）允许睡到多久。不受 maxSleep 约束，
+    // 否则退避值会被截回 120 秒，等于没退避。
+    maxSleepForBackoff: 1800,
     postGap: 2.2,                // 提交间隔
     maxRoundsPerTick: 8,         // 单次巡视最多几轮「规划→提交」
-    watchInterval: 20,           // 等待期多久巡检一次世界状态（秒）
+    watchInterval: 20,           // 等待期巡检的最小间隔（秒）；实际按等待时长自动放大到最多 120
   },
 
   // 还有额度没做完时，多快回来继续做一轮（秒）。
@@ -32,8 +35,8 @@ export const DEFAULTS = {
     gomoku: 60,                  // 五子棋计奖局没打完
     arena: 300,                  // 擂台（打完会立刻返回，成本低）
     // 连续几轮都没进展时的退避（避免「没对象可帮」还每 60 秒空转）
-    helpStall: 900,
-    gomokuStall: 900,
+    stallThreshold: 3,           // 连续几次没进展算「卡住」
+    idleStall: 900,              // 卡住后所有额度驱动一起放宽到这个间隔（秒）
   },
 
   // 投资

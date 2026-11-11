@@ -55,35 +55,48 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
   if (world.state.en < (g.minEnergy ?? 20)) return { helped: 0, coins: 0 }
 
   let cursor = null
-  let pages = 0
-  while (helped < perDay - (memo.helpCount || 0) && pages++ < 6) {
+  let pages = 0, scanned = 0, skippedNewbie = 0, tried = 0
+  const need = () => perDay - (memo.helpCount || 0)
+  while (helped < need() && pages++ < (g.maxPages ?? 8)) {
     let d
     try { d = await neighbors(world, { cursor, limit: 20 }) } catch (e) { log('读邻居失败：' + e.message); break }
     for (const o of d.neighbors || []) {
+      scanned++
+      if (helped >= need()) break
       if (memoHelp.has(o.id)) continue
       if (world.state.en < (g.minEnergy ?? 20)) break
-      // 需要有可帮的东西（有地或窝）
-      if (!(o.plots + o.pens)) continue
+      if (o.newbie) { skippedNewbie++; continue }        // 新手 24 小时内不可互动
+      // 关键：能不能帮，以服务端的 canHelp 为准。
+      // 旧代码用 `if (!(o.plots + o.pens)) continue` ——
+      // 但列表里的 plots/pens 表示「当前有可偷/可采的东西」，不是「能帮忙」。
+      // 实测 120 个邻居里 canHelp=true 的有 118 个，而 plots+pens>0 的只有 2 个，
+      // 也就是说 116 个能帮的岛被那句判断全部跳过了。
+      const canHelp = o.canHelp !== undefined ? !!o.canHelp : true
+      if (!canHelp) continue
+      tried++
       try {
         const res = await helpIsle(world, o.id)
         memoHelp.add(o.id)
         memo.helpCount = (memo.helpCount || 0) + 1
         helped++
         coins += res.coins || 0
-        if (res.energy) world.state.en -= res.energy
-        if (res.energy != null) world.state.en = Math.max(0, (world.state.en || 0) - 0)
+        if (res.energy != null) world.state.en = Math.max(0, (world.state.en || 0) - res.energy)
       } catch (e) {
-        if (e.status === 409 || /今天帮过|已经帮/.test(e.message)) memoHelp.add(o.id)
+        // 今天帮过 / 已达上限 → 记为已处理，别再试
+        if (e.status === 409 || /今天帮过|已经帮|上限|额度/.test(e.message)) memoHelp.add(o.id)
         else log(`帮 ${o.name} 失败：${e.message}`)
       }
       await sleep(1200)
-      if (helped >= perDay - (memo.helpCount - helped)) break
     }
     cursor = d.nextCursor
     if (!cursor) break
   }
-  if (helped) log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D（今日累计 ${memo.helpCount || 0}/${perDay}）`)
-  else log(`帮忙：扫了 ${pages} 页没找到可帮的岛（今日 ${memo.helpCount || 0}/${perDay}），稍后再试`)
+  if (helped) {
+    log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D（今日累计 ${memo.helpCount || 0}/${perDay}）`)
+  } else {
+    log(`帮忙：扫了 ${pages} 页 ${scanned} 家（尝试 ${tried} 家` +
+      `${skippedNewbie ? `，跳过新手 ${skippedNewbie}` : ''}）没帮到，今日 ${memo.helpCount || 0}/${perDay}，稍后再试`)
+  }
   return { helped, coins }
 }
 

@@ -399,7 +399,12 @@ export class Engine {
    */
   async idleWait(sleepSec) {
     const until = Date.now() + sleepSec * 1000
-    const interval = Math.max(15, this.cfg.loop?.watchInterval ?? 20) * 1000
+    // 巡检间隔跟随等待时长：
+    //   等 60~120 秒时，本来马上就要醒，再 20 秒一轮纯属浪费请求；
+    //   等 900 秒的退避时，20 秒一轮才值得（尽早发现突发）。
+    // 规则：间隔 = 等待时长的 1/3，夹在 [20, 120] 秒之间。
+    const base = this.cfg.loop?.watchInterval ?? 20
+    const interval = Math.max(base, Math.min(120, Math.round(sleepSec / 3))) * 1000
     let lastCheck = 0
     while (this.running && Date.now() < until) {
       const step = Math.min(2000, until - Date.now())

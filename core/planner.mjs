@@ -493,7 +493,13 @@ export function nextWake(world, cfg, memo = {}) {
   const t = world.now
   const s = world.state
   const cands = []
+  const backoffCands = []      // 退避候选单独放，免得被 maxSleep 截断（见函数末尾）
   const push = (sec) => { if (sec != null && sec >= 0 && Number.isFinite(sec)) cands.push(Math.max(1, Math.ceil(sec))) }
+  const pushBackoff = (sec) => {
+    if (sec == null || !(sec >= 0) || !Number.isFinite(sec)) return
+    const v = Math.max(1, Math.ceil(sec))
+    cands.push(v); backoffCands.push(v)
+  }
 
   const weather = R.weatherOf(R.isleDay(t))
   // 作物成熟
@@ -597,19 +603,26 @@ export function nextWake(world, cfg, memo = {}) {
 
   // ---------- 每日额度没做完：缩短间隔（wake 参数由调用方传入） ----------
   // 这些事不受「作物成熟」等物理事件驱动，只要还有额度就该去做，
-  // 否则会一直落到 maxSleep（10 分钟），白白空转。
+  // 否则会一直落到 maxSleep，白白空转。
   const day = R.worldDay(t)
   const dayLeft = Math.max(1, R.b12NextIsleBoundary(t) - t)
   const w = cfg.wake || {}
 
-  // 帮忙：每天 N 家，还有剩就尽快（每轮做完可继续，间隔取 minSleep）
-  // 但如果连续几轮都没帮到人（目录里没有可帮的），就退避，别每 60 秒空转。
+  // 退避是「全局」的：帮忙连续几轮没进展、或五子棋连续解不出棋谱，
+  // 都说明**当前没有什么值得马上回来做的事**。这时如果只让出问题的那一个模块退避，
+  // 其余模块仍会每 60 秒把整体唤醒一次，退避就白做了。
+  // 所以：任何一个模块连续卡住，就把所有「额度驱动」的间隔一起放宽。
+  const stallThreshold = w.stallThreshold ?? 3
+  const stalling = (memo.helpStall || 0) >= stallThreshold || (memo.gomokuStall || 0) >= stallThreshold
+  const idleWaitSec = Math.min(w.idleStall ?? 900, dayLeft)
+
+  // 帮忙：每天 N 家，还有剩就尽快
   if (cfg.social?.help?.enabled) {
     const done = (memo.helpDay === day ? (memo.helpCount || 0) : 0)
     const need = (cfg.social.help.perDay ?? 10) - done
-    const stall = memo.helpStall || 0
     if (need > 0 && s.en >= (cfg.social.help.minEnergy ?? 20)) {
-      push(stall >= 3 ? Math.min(w.helpStall ?? 900, dayLeft) : (w.help ?? 60))
+      if (stalling) pushBackoff(idleWaitSec)
+      else push(w.help ?? 60)
     }
   }
 
@@ -618,15 +631,17 @@ export function nextWake(world, cfg, memo = {}) {
     const used = (s.enDay === day ? (s.cnt?.npc || 0) : 0)
     const paid = s.cnt?.gomokuPaid || 0
     const left = Math.min((cfg.npc.gomokuMaxGames ?? 10) - paid, R.NPC.daily - used)
-    const stall = memo.gomokuStall || 0
-    // 连续解不出棋谱时也别空转
-    if (left > 0) push(stall >= 3 ? Math.min(w.gomokuStall ?? 900, dayLeft) : (w.gomoku ?? 60))
+    if (left > 0) {
+      if (stalling) pushBackoff(idleWaitSec)
+      else push(w.gomoku ?? 60)
+    }
   }
 
   // 擂台：每天 N 场有掉落，没打完就尽快
   // 打满之后 arenaDaily 会直接返回，所以给个宽一点的间隔即可。
   if (cfg.arena?.enabled) {
-    push(w.arena ?? 300)
+    if (stalling) pushBackoff(idleWaitSec)
+    else push(w.arena ?? 300)
   }
 
   // 偷菜：扫描间隔到了就该去（不加这个会一直等 maxSleep，实际扫描被拖慢）
@@ -648,6 +663,17 @@ export function nextWake(world, cfg, memo = {}) {
   }
 
   // 兜底：没有更早的事件时也别睡太久
-  cands.push(cfg.loop?.maxSleep || 120)
-  return Math.min(...cands, cfg.loop?.maxSleep || 120)
+  //
+  // 上限的算法要小心：退避（helpStall / gomokuStall）本来是想「这次别再来烦」，
+  // 但如果无脑 Math.min(...cands, maxSleep)，退避值会被截回 120 秒，等于没做。
+  //
+  // 做法：退避候选单独记一个集合 backoffCands。
+  // 如果最终选中的就是某个退避候选，就允许睡到退避上限；
+  // 否则（说明有别的事更早）按正常 maxSleep 走。
+  const maxSleep = cfg.loop?.maxSleep || 120
+  const backoffCap = cfg.loop?.maxSleepForBackoff ?? 1800
+  const raw = cands.length ? Math.min(...cands) : maxSleep
+  // 选中的值若与某个退避候选相等（说明是它赢的），就套退避上限
+  const wonByBackoff = backoffCands.length && raw === Math.min(...backoffCands)
+  return Math.min(raw, wonByBackoff ? backoffCap : maxSleep)
 }
