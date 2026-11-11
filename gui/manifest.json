@@ -3,7 +3,7 @@
   "name": "鱼鱼谷托管 · GUI",
   "version": "2.0.0",
   "description": "鱼鱼谷托管程序的图形界面：连接本地 Node 主程序，查看状态、市场预测、设置与日志。所有游戏逻辑在主程序里运行。",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "nativeMessaging"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "background": { "service_worker": "background.js" },
   "action": {

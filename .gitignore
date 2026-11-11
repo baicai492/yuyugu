@@ -33,3 +33,10 @@ _tmp_*
 *.png
 !extension/icons/*.png
 !gui/icons/*.png
+
+# Native Messaging 生成物（路径与本机相关）
+native/yuyugu-host.bat
+native/com.*.yuyugu.json
+logs/state.json
+logs/yuyugu.pid
+logs/host-*.log

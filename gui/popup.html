@@ -20,12 +20,16 @@
     </div>
   </header>
 
-  <div class="conn" id="connBox" hidden>
-    <p>主程序没有运行。先在项目目录执行：</p>
-    <code>node yuyugu2.mjs</code>
+  <div class="conn launch-box" id="connBox" hidden>
+    <p><b>主程序没有运行。</b>点下面的按钮直接拉起（无需开机自启，也不用敲命令）：</p>
     <div class="row">
+      <button id="btnLaunch">启动主程序</button>
+      <button id="reconnect" class="ghost">已启动，重新连接</button>
+    </div>
+    <p class="muted" id="launchHint" style="margin-top:8px"></p>
+    <code>如果按钮无效：在项目目录执行 node yuyugu2.mjs</code>
+    <div class="row" style="margin-top:8px">
       <label>端口 <input type="number" id="port" value="8787" min="1" max="65535" /></label>
-      <button id="reconnect">重新连接</button>
     </div>
   </div>
 
@@ -108,7 +112,23 @@
   <!-- 日志 -->
   <section id="tab-logs" class="tab" hidden>
     <div class="log-toolbar">
+      <div class="seg">
+        <button id="logModeNow" class="on">本次运行</button>
+        <button id="logModeHist">历史记录</button>
+      </div>
       <label class="chk"><input type="checkbox" id="logAuto" checked /> 自动刷新</label>
+    </div>
+    <div class="log-toolbar" id="histBar" hidden>
+      <label class="chk">读取最近
+        <select id="histDays">
+          <option value="1">1 天</option>
+          <option value="3" selected>3 天</option>
+          <option value="7">7 天</option>
+          <option value="14">14 天</option>
+          <option value="30">30 天</option>
+        </select>
+      </label>
+      <span class="muted" id="histInfo"></span>
       <button id="logClear" class="ghost">清屏</button>
     </div>
     <div class="logs" id="logs"></div>

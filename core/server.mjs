@@ -2,6 +2,7 @@
 // 只监听 127.0.0.1，且要求 Origin 白名单 + 可选 token，防止被网页里的脚本乱调。
 import { createServer } from 'node:http'
 import { saveConfig } from './config.mjs'
+import { readLogHistory, logInventory } from './logfile.mjs'
 
 const ALLOW_ORIGIN = [
   'chrome-extension://',
@@ -79,10 +80,21 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
         return send(res, 200, snap)
       }
 
-      // ---------- 日志 ----------
+      // ---------- 日志（本次运行） ----------
       if (req.method === 'GET' && path === '/api/logs') {
         const since = Number(url.searchParams.get('since')) || 0
         return send(res, 200, { logs: engine.logs.filter((l) => l.t > since) })
+      }
+
+      // ---------- 日志（历史，从磁盘读） ----------
+      if (req.method === 'GET' && path === '/api/logs/history') {
+        const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 3))
+        const maxLines = Math.max(50, Math.min(5000, Number(url.searchParams.get('max')) || 800))
+        const dir = engine.logDir
+        return send(res, 200, {
+          days: logInventory(dir),
+          logs: readLogHistory(dir, { days, maxLines }),
+        })
       }
 
       // ---------- 配置 ----------

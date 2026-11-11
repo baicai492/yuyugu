@@ -98,7 +98,16 @@ table.tbl tr.sell td { background: color-mix(in srgb, var(--up) 10%, transparent
 }
 .settings input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
 
-.log-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.log-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--card); color: var(--muted); border-radius: 0; padding: 5px 10px; font-size: 12px; font-weight: 500; }
+.seg button.on { background: var(--accent); color: #fff; }
+.seg button + button { border-left: 1px solid var(--line); }
+.log-toolbar select { padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); font: inherit; font-size: 12px; }
+.launch-box { margin: 10px 12px; padding: 12px; background: var(--warn-bg, #fff6de); border: 1px solid var(--warn-line, #e6c669); border-radius: 10px; }
+.launch-box p { margin: 0 0 8px; font-size: 12px; }
+.launch-box .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.launch-box code { display: block; padding: 6px 8px; background: var(--soft); border-radius: 6px; font-size: 11px; margin-top: 8px; word-break: break-all; }
 .logs { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px; font: 11px/1.5 ui-monospace, Consolas, monospace; max-height: 420px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
 .logs .err { color: var(--down); }
 .logs .time { color: var(--muted); }

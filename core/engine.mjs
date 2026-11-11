@@ -4,6 +4,8 @@ import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
 import { planRound, nextWake } from './planner.mjs'
+import { todayStartFromLedger } from './logfile.mjs'
+import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
@@ -17,6 +19,7 @@ export class Engine {
     this.world = world
     this.cfg = cfg
     this.logDir = logDir || resolve(ROOT, 'logs')
+    if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true })
     this.running = false
     this.halted = false
     this.logs = []
@@ -25,7 +28,52 @@ export class Engine {
     this.status = { state: 'idle', round: 0, nextAt: 0, lastError: '', lastRun: 0 }
     this.externalSoldRatio = {}
     this.history = []
-    if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true })
+    this.stats = { totalRuns: 0, totalEarn: 0, firstRunAt: 0 }
+    this.restore()
+  }
+
+  /** 从磁盘恢复跨重启的状态（今日收支、帮忙记录、资产曲线） */
+  restore() {
+    const st = loadState(this.logDir)
+    this.persist = st
+    this.stats = st.stats || this.stats
+    // 帮忙记录 / 偷菜扫描时间
+    if (Array.isArray(st.helped) && st.helped.length) this.memo.helpedIds = new Set(st.helped)
+    if (st.helpCount) this.memo.helpCount = st.helpCount
+    if (st.stealScanAt) this.memo.stealScanAt = st.stealScanAt
+    if (st.helpDay) this.memo.helpDay = st.helpDay
+    // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
+    try { this.history = readLedger(this.logDir, 240) } catch {}
+    // 今日累计收支
+    if (st.daily) {
+      this.ledger = {
+        ...this.ledger,
+        day: st.day || '',
+        earn: st.daily.earn || 0,
+        spend: st.daily.spend || 0,
+        tax: st.daily.tax || 0,
+      }
+    }
+    this.stats.totalRuns = (this.stats.totalRuns || 0) + 1
+    this.stats.firstRunAt ||= Date.now()
+    this.savePersist()
+    // 启动时立刻记一行，保证「今日起点」有据可查
+    if (this.world?.ready) this.snapshot(true)
+  }
+
+  savePersist() {
+    try {
+      this.persist = {
+        day: this.ledger.day,
+        daily: { earn: this.ledger.earn, spend: this.ledger.spend, tax: this.ledger.tax },
+        helped: [...(this.memo.helpedIds || [])],
+        helpCount: this.memo.helpCount || 0,
+        helpDay: this.memo.helpDay || '',
+        stealScanAt: this.memo.stealScanAt || 0,
+        stats: this.stats,
+      }
+      saveState(this.logDir, this.persist)
+    } catch {}
   }
 
   log(msg, level = 'info') {
@@ -39,19 +87,31 @@ export class Engine {
     } catch {}
   }
 
-  /** 开始今天的账本（自然日切换时重置） */
+  /**
+   * 开始今天的账本（自然日切换时重置）。
+   * 重启程序时，如果 ledger.csv 里今天已经有更早的记录，就用那条作为起点，
+   * 这样「今日净增」不会因为重启而清零。
+   */
   ensureLedger() {
     const R = this.world.R
     const day = R.worldDay(this.world.now)
-    if (this.ledger.day !== day) {
-      this.ledger = {
-        day,
-        earn: 0, spend: 0, tax: 0,
-        startCoins: this.world.coins,
-        startStock: this.world.stockValue(),
-      }
-      this.log(`—— 新的一天 ${day}：D币 ${fmt(this.world.coins)}，库存 ${fmt(this.world.stockValue())} ——`)
+    if (this.ledger.day === day) return
+
+    const coinsNow = this.world.coins
+    const stockNow = this.world.stockValue()
+    const fromFile = todayStartFromLedger(this.logDir)
+    // 只有当磁盘上的起点早于现在、并且数值合理时才用（防止 CSV 被手工改坏）
+    const usable = fromFile && fromFile.startCoins > 0 && fromFile.startCoins < coinsNow * 5
+
+    this.ledger = {
+      day,
+      earn: 0, spend: 0, tax: 0,
+      startCoins: usable ? fromFile.startCoins : coinsNow,
+      startStock: usable ? fromFile.startStock : stockNow,
+      resumedFrom: usable ? fromFile.firstTime : '',
     }
+    this.log(`—— ${day}：D币 ${fmt(coinsNow)}，库存 ${fmt(stockNow)}` +
+      (usable ? `（今日起点取自 ${fromFile.firstTime}，净增从那时算起）` : '') + ' ——')
   }
 
   /** 一轮完整的巡视 */
@@ -139,6 +199,8 @@ export class Engine {
     this.ledger.earn += totalEarn
     this.ledger.spend += totalSpend
     this.ledger.tax += totalTax
+    this.stats.totalEarn = (this.stats.totalEarn || 0) + totalEarn
+    this.savePersist()
     if (totalEarn || totalSpend) {
       this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
     }
@@ -158,10 +220,10 @@ export class Engine {
   }
 
   /** 每轮记一行资产到 ledger.csv（每小时最多一次） */
-  snapshot() {
+  snapshot(force = false) {
     const w = this.world
     const last = this.history[this.history.length - 1]
-    if (last && Date.now() - last.t < 3600_000) return
+    if (!force && last && Date.now() - last.t < 3600_000) return
     const s = w.state
     const row = {
       t: Date.now(),
@@ -258,7 +320,13 @@ export class Engine {
           gomokuPaid: { used: s.cnt?.gomokuPaid || 0, max: R.GOMOKU_PAID },
         },
       } : null,
-      ledger: { ...this.ledger, stockNow, dayNet },
+      ledger: {
+        ...this.ledger,
+        stockNow,
+        dayNet,
+        resumedFrom: this.ledger.resumedFrom || '',
+      },
+      stats: this.stats,
       history: this.history.slice(-240),
     }
   }

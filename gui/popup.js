@@ -14,6 +14,8 @@ let config = null
 let logSince = 0
 let logLines = []
 let autoTimer = 0
+let logMode = 'now'          // 'now' 本次运行 / 'hist' 历史
+let histLines = []
 
 // ---------- 通信 ----------
 async function api(path, opts = {}) {
@@ -36,6 +38,7 @@ async function getMarket() {
   return api(`/api/market?days=${d}&markdown=${m}`)
 }
 async function getLogs(since) { return api(`/api/logs?since=${since}`) }
+async function getLogHistory(days) { return api(`/api/logs/history?days=${days}&max=800`) }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
 
@@ -86,10 +89,13 @@ async function loadConfig() {
 function renderOverview() {
   if (!status) return
   const w = status.world
-  $('enabled').checked = !!config?.enabled
+  const enabled = !!config?.enabled
+  const active = status.running && enabled
+  $('enabled').checked = enabled
   $('dry').checked = !!config?.dry
-  $('dot').className = 'dot ' + (status.running ? 'on' : '')
-  $('linkState').textContent = status.running ? '托管中' : '已连接'
+  $('dot').className = 'dot ' + (active ? 'on' : '')
+  $('linkState').textContent = active ? '托管中' : (status.running ? '已暂停' : '已连接')
+  $('linkState').className = 'pill' + (active ? '' : ' bad')
   if (!w) { $('statusline').textContent = '世界状态尚未就绪'; return }
 
   const net = status.ledger?.dayNet ?? 0
@@ -99,7 +105,10 @@ function renderOverview() {
   $('coins').textContent = fmt(w.coins)
   $('stock').textContent = '库存 ' + fmt(w.stock)
   $('isleTime').textContent = `第 ${w.isleNo} 天 · ${w.season}·${w.weather} · ${String(w.hour).padStart(2, '0')}:00${w.longNight ? ' · 长夜' : ''}`
-  $('energy').textContent = `${Math.floor(w.energy)} / ${w.energyMax}`
+  // 咖啡可以让体力超过上限，超上限时标注一下，避免看着像 bug
+  $('energy').textContent = w.energy > w.energyMax
+    ? `${Math.floor(w.energy)} / ${w.energyMax}（超上限）`
+    : `${Math.floor(w.energy)} / ${w.energyMax}`
   $('scale').textContent = `${w.plots} / ${w.barn}/${w.barnN} / ${w.traps}`
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
 
@@ -229,14 +238,43 @@ function renderSettings() {
 function renderLogs() {
   const box = $('logs')
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20
-  box.replaceChildren(...logLines.slice(-500).map((l) => {
+  const src = logMode === 'hist' ? histLines : logLines
+  box.replaceChildren(...src.slice(-600).map((l) => {
     const div = document.createElement('div')
     if (l.level === 'err') div.className = 'err'
-    const t = new Date(l.t).toLocaleTimeString('zh-CN', { hour12: false })
+    let t
+    if (l.ts) t = l.ts.slice(5)                       // 历史：MM-DD HH:MM:SS
+    else if (l.t) t = new Date(l.t).toLocaleTimeString('zh-CN', { hour12: false })
+    else t = ''
     div.innerHTML = `<span class="time">${t}</span> ${escapeHtml(l.msg)}`
     return div
   }))
   if (atBottom) box.scrollTop = box.scrollHeight
+}
+
+async function loadLogHistory() {
+  if (!alive) return
+  const days = Number($('histDays').value) || 3
+  try {
+    const j = await getLogHistory(days)
+    histLines = j.logs || []
+    const inv = j.days || []
+    $('histInfo').textContent = inv.length
+      ? `${inv.length} 天有记录（${inv[inv.length - 1].day} ~ ${inv[0].day}），共 ${histLines.length} 行`
+      : '没有历史日志'
+    if (logMode === 'hist') renderLogs()
+  } catch (e) {
+    $('histInfo').textContent = '读取失败：' + e.message
+  }
+}
+
+function setLogMode(mode) {
+  logMode = mode
+  $('logModeNow').classList.toggle('on', mode === 'now')
+  $('logModeHist').classList.toggle('on', mode === 'hist')
+  $('histBar').hidden = mode !== 'hist'
+  if (mode === 'hist') loadLogHistory().then(() => renderLogs())
+  else renderLogs()
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) }
 
@@ -285,6 +323,52 @@ function bind() {
     logSince = 0; logLines = []
     await connect()
   }
+
+  // 用 Native Messaging 拉起主程序（不需要开机自启，也不用敲命令）
+  $('btnLaunch').onclick = async () => {
+    const hint = $('launchHint')
+    const btn = $('btnLaunch')
+    btn.disabled = true
+    hint.textContent = '正在启动…'
+    try {
+      port = Number($('port').value) || 8787
+      await chrome.storage.local.set({ port })
+      const res = await sendNative({ cmd: 'launch', port })
+      if (res?.ok) {
+        hint.textContent = res.msg || '已启动'
+        // 等端口就绪后连接
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 500))
+          try { await api('/api/ping'); await connect(); hint.textContent = ''; break }
+          catch { if (i === 29) hint.textContent = '已启动但连不上，检查端口 ' + port }
+        }
+      } else {
+        hint.textContent = '启动失败：' + (res?.msg || '宿主没有响应')
+      }
+    } catch (e) {
+      hint.textContent = '无法调用本地宿主：' + e.message +
+        '（需要先运行 node scripts/install-host.mjs --ext-id=' + chrome.runtime.id + '）'
+    } finally {
+      btn.disabled = false
+    }
+  }
+
+  $('logModeNow').onclick = () => setLogMode('now')
+  $('logModeHist').onclick = () => setLogMode('hist')
+  $('histDays').onchange = () => loadLogHistory().then(() => renderLogs())
+}
+
+/** 调用 Native Messaging 宿主 */
+function sendNative(msg) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendNativeMessage('com.baicai492.yuyugu', msg, (res) => {
+        const err = chrome.runtime.lastError
+        if (err) reject(new Error(err.message))
+        else resolve(res)
+      })
+    } catch (e) { reject(e) }
+  })
 }
 
 function startAuto() {
