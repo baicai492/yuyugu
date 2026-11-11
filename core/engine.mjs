@@ -4,11 +4,12 @@ import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
 import { planRound, nextWake, decisionSnapshot } from './planner.mjs'
-import { todayStartFromLedger } from './logfile.mjs'
+import { todayStartFromLedger, todayBookFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
+import { nextUnlock } from './steal-schedule.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -45,6 +46,10 @@ export class Engine {
     if (st.helpCount) this.memo.helpCount = st.helpCount
     if (st.stealScanAt) this.memo.stealScanAt = st.stealScanAt
     if (st.helpDay) this.memo.helpDay = st.helpDay
+    // 偷菜解禁调度表（重启后继续用，不必重新扫一遍才知道什么时候能偷）
+    if (st.stealSchedule && typeof st.stealSchedule === 'object') this.memo.stealSchedule = st.stealSchedule
+    if (st.helpStall) this.memo.helpStall = st.helpStall
+    if (st.gomokuStall) this.memo.gomokuStall = st.gomokuStall
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -61,7 +66,10 @@ export class Engine {
     }
     this.stats.totalRuns = (this.stats.totalRuns || 0) + 1
     this.stats.firstRunAt ||= Date.now()
-    this.savePersist()
+    // 注意：这里不调 savePersist()。
+    // 此刻 ledger.day 还没确定（要等 ensureLedger 从 ledger.csv 推算），
+    // 提前存盘会把 day 写成空字符串，下次启动 restore() 就拿不到有效的 day。
+    // 计数变化（totalRuns）在下一次 tick 收尾时自然落盘。
     // 启动时立刻记一行，保证「今日起点」有据可查
     if (this.world?.ready) this.snapshot(true)
   }
@@ -75,6 +83,10 @@ export class Engine {
         helpCount: this.memo.helpCount || 0,
         helpDay: this.memo.helpDay || '',
         stealScanAt: this.memo.stealScanAt || 0,
+        // 解禁调度表：重启后不用重新扫一遍才知道什么时候能偷
+        stealSchedule: this.memo.stealSchedule || {},
+        helpStall: this.memo.helpStall || 0,
+        gomokuStall: this.memo.gomokuStall || 0,
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -134,12 +146,25 @@ export class Engine {
     // 磁盘上的起点必须合理：正数、且不超过当前余额的 5 倍（防 CSV 被改坏）
     const usable = fromFile && fromFile.startCoins > 0 && fromFile.startCoins < coinsNow * 5
 
+    // 收支累计：优先用 state.json 恢复值；如果它是 0（或者这次启动是「新的一天」），
+    // 就从今天的日志文件里重算——日志只追加不覆盖，是唯一可信的历史。
+    let earn = this.ledger.earn || 0
+    let spend = this.ledger.spend || 0
+    let tax = this.ledger.tax || 0
+    if (!earn && !spend && !tax) {
+      const book = todayBookFromLog(this.logDir)
+      if (book.rounds > 0) {
+        earn = book.earn; spend = book.spend; tax = book.tax
+        this.log(`今日收支从日志重建：+${fmt(earn)} / −${fmt(spend)}（税 ${fmt(tax)}，${book.rounds} 轮）`)
+      }
+    }
+
     this.ledger = {
       ...this.ledger,
       day,
-      earn: this.ledger.earn || 0,
-      spend: this.ledger.spend || 0,
-      tax: this.ledger.tax || 0,
+      earn,
+      spend,
+      tax,
       startCoins: usable ? fromFile.startCoins : coinsNow,
       startStock: usable ? fromFile.startStock : stockNow,
       resumedFrom: usable ? fromFile.firstTime : '',
@@ -149,6 +174,7 @@ export class Engine {
       (usable
         ? `（起点取自 ${fromFile.firstTime} 的 ${fmt(fromFile.startCoins)}，${fromFile.from === 'yesterday' ? '昨天收盘' : '今天早些时候'}）`
         : '（首次运行，起点=当前值）') + ' ——')
+    this.savePersist()      // day 已确定，立刻落盘（否则重启后 restore 拿到空 day）
   }
 
   /** 一轮完整的巡视 */
@@ -279,6 +305,9 @@ export class Engine {
     if (totalEarn || totalSpend) {
       this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
     }
+    // 无论这轮有没有收支都要落盘：帮忙/偷菜的进度（helpCount、stealSchedule）
+    // 是「无收支」的，只在 credit() 里存会永远丢失。
+    this.savePersist()
     // 本次巡视小结：D币 + 库存 的变化（库存也要算，否则卖货那天会看着像亏了）
     try {
       await w.refresh()
@@ -295,7 +324,7 @@ export class Engine {
 
     // ---------- 下次唤醒 ----------
     this.setStep('计算下次巡视时间')
-    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 600) : nextWake(w, cfg, this.memo)
+    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 120) : nextWake(w, cfg, this.memo)
     this.status = {
       state: 'waiting',
       step: '',
@@ -431,7 +460,16 @@ export class Engine {
     }
     this.watchSnap = { stolen, coins: w.coins }
 
-    // 5. D币突然大幅变化（被罚 / 别人互动 / 结算）
+    // 5. 偷菜解禁时刻到了（精确调度，比「到点扫一遍」准得多）
+    if (this.cfg.social?.steal?.enabled) {
+      const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
+      const nx = nextUnlock(this.memo.stealSchedule || {}, t, { leadSec })
+      if (nx && nx.at - t <= leadSec) {
+        return `偷菜解禁：${nx.item || '目标'}（${nx.exact ? '时刻确定' : '估计'}）`
+      }
+    }
+
+    // 6. D币突然大幅变化（被罚 / 别人互动 / 结算）
     const dCoins = w.coins - (prev.coins || w.coins)
     if (prev.coins && Math.abs(dCoins) > 100000) {
       return `D币突变 ${dCoins > 0 ? '+' : ''}${Math.round(dCoins).toLocaleString('en-US')}`

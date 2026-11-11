@@ -4,6 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
+import { updateIsleSchedule, nextUnlock } from './steal-schedule.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -88,12 +89,15 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
 
 /**
  * 扫目录，找出「现在能偷」的岛：有成熟作物或窝里有产物，且过了保护期、不在新手保护。
+ * 同时把每座岛的「即将解禁」时刻记进 memo.stealSchedule，供 nextWake 精确唤醒。
  * 返回 [{ id, name, level, guard, targets: [...], value }]
  */
-export async function scanStealTargets(world, cfg, log = () => {}) {
+export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
   const R = world.R
   const t = world.now
   const out = []
+  const schedule = memo.stealSchedule || (memo.stealSchedule = {})
+  let upcomingCount = 0
   const pages = cfg.social?.steal?.pages ?? 6
   let cursor = null, scanned = 0, skipped = 0
   // 是否成功用上了「只看可偷」筛选。必须声明在循环外——循环末尾的日志要用它。
@@ -117,7 +121,15 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
       try { info = await visitInfo(world, o.id) } catch { skipped++; continue }
       const isle = info.isle || {}
       const rules = info.rules || {}
-      const protect = rules.protect ?? 1800
+
+      // 更新这座岛的解禁调度表（记录「还要多久成熟 / 保护期还剩多久」）
+      try {
+        const prev = schedule[o.id] || null
+        const { rec, upcoming } = updateIsleSchedule({ isle, rules, now: t, prev })
+        schedule[o.id] = rec
+        upcomingCount += upcoming.length
+      } catch { /* 调度只是优化，算不出来不影响正常扫描 */ }
+
       const targets = []
       let value = 0
       ;(isle.plots || []).forEach((pl, i) => {
@@ -145,6 +157,12 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
   out.sort((a, b) => (b.value / Math.max(1, b.energy)) - (a.value / Math.max(1, a.energy)))
   log(`扫了 ${scanned} 座岛${skipped ? `（跳过 ${skipped} 座）` : ''}，找到 ${out.length} 家可偷` +
     (usedFilter ? '（用了可偷筛选）' : ''))
+  // 提示「还有多少处正在保护期、什么时候解禁」——这是旧的到点扫描完全看不到的信息
+  if (upcomingCount > 0) {
+    const nx = nextUnlock(schedule, t)
+    log(`  ${upcomingCount} 处正在生长/保护期` +
+      (nx ? `，最近一处 ${nx.item} 在 ${Math.round(nx.at - t)} 秒后解禁${nx.exact ? '（时刻确定）' : '（估计）'}` : ''))
+  }
   // 把候选按性价比列出来，方便判断为什么去/不去某一家
   for (const tg of out.slice(0, 6)) {
     log(`  ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）` +
@@ -171,10 +189,22 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   if (!st?.enabled) return { stolen: 0, value: 0 }
   const R = world.R
   const lastScan = memo.stealScanAt || 0
-  if (world.now - lastScan < (st.scanEvery ?? 1800)) return { stolen: 0, value: 0 }
-  memo.stealScanAt = world.now
+  const every = st.scanEvery ?? 1800
 
-  const targets = await scanStealTargets(world, cfg, log)
+  // 有两种情况要绕过「扫描间隔」：
+  //   1. 调度表里某处刚好到解禁时刻（这是精确调度，不能等下一个扫描周期）
+  //   2. 调度表里记着的解禁时刻已经过去但还没去偷（刚醒过来，别再过 30 分钟）
+  const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec: st.prepLeadSec ?? 8 })
+  const snipeReady = !!nx && nx.at - world.now <= (st.prepLeadSec ?? 8) + 5
+  const overdue = Object.values(memo.stealSchedule || {})
+    .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - 300))
+
+  if (world.now - lastScan < every && !snipeReady && !overdue) return { stolen: 0, value: 0 }
+  if (snipeReady) log(`偷菜：精确解禁时刻已到，提前打断扫描间隔`)
+  else if (overdue && world.now - lastScan < every) log(`偷菜：有已解禁未处理的目标，提前扫描`)
+
+  memo.stealScanAt = world.now
+  const targets = await scanStealTargets(world, cfg, log, memo)
   let stolen = 0, value = 0, tried = 0
   for (const tg of targets) {
     if (tried >= (st.visitsPerScan ?? 8)) break

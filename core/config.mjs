@@ -16,9 +16,13 @@ export const DEFAULTS = {
   // 调度
   loop: {
     minSleep: 20,                // 无事可做时的最小间隔（秒）
-    maxSleep: 600,               // 无事可做时的最大间隔
+    // 最长等待。榜一（yuyugu-kernel）的主循环硬上限就是 120 秒
+    // （cli/live-daemon.mjs: deltaSec = min(120, nextWakeSec - now)）。
+    // 等待期我们已经每 20 秒只读巡检一次，所以 120 秒不会漏掉突发。
+    maxSleep: 120,
     postGap: 2.2,                // 提交间隔
     maxRoundsPerTick: 8,         // 单次巡视最多几轮「规划→提交」
+    watchInterval: 20,           // 等待期多久巡检一次世界状态（秒）
   },
 
   // 还有额度没做完时，多快回来继续做一轮（秒）。

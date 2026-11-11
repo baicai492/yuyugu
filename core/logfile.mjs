@@ -205,6 +205,39 @@ export function todayStartFromLedger(dir, nowMs = Date.now()) {
   return null
 }
 
+/**
+ * 从今天的日志文件里重建「今日收支」。
+ *
+ * 为什么需要这个：state.json 是覆盖写的，一旦某次写坏（比如 day 是空字符串
+ * 导致恢复失败），当天的收支累计就永久丢了。日志文件是只追加的，
+ * 每一轮的「本轮收支：+X / −Y（税 Z）」都留在里面，可以重算出来。
+ *
+ * 返回 { earn, spend, tax, rounds, from }
+ */
+export function todayBookFromLog(dir, nowMs = Date.now()) {
+  const empty = { earn: 0, spend: 0, tax: 0, rounds: 0, from: '' }
+  const todayBj = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10)
+  const file = resolve(dir, `yuyugu-${todayBj}.log`)
+  if (!existsSync(file)) return empty
+
+  let text = ''
+  try { text = readFileSync(file, 'utf8') } catch { return empty }
+  // 本轮收支：+45,200 / −2,700（税 0）
+  const re = /本轮收支：\+([\d,]+) \/ −([\d,]+)（税 ([\d,]+)）/
+  let earn = 0, spend = 0, tax = 0, rounds = 0
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith(todayBj)) continue
+    const m = re.exec(line)
+    if (!m) continue
+    earn += Number(m[1].replace(/,/g, '')) || 0
+    spend += Number(m[2].replace(/,/g, '')) || 0
+    tax += Number(m[3].replace(/,/g, '')) || 0
+    rounds++
+  }
+  if (!rounds) return empty
+  return { earn, spend, tax, rounds, from: file }
+}
+
 /** 日志目录概况（给 GUI 显示有哪些天可选） */
 export function logInventory(dir) {
   const days = listLogDays(dir)

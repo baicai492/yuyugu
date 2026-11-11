@@ -8,6 +8,7 @@
 //   4. 投资只看回本周期
 import * as M from './market.mjs'
 import { planVault } from './warehouse.mjs'
+import { nextUnlock } from './steal-schedule.mjs'
 
 const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -524,10 +525,29 @@ export function nextWake(world, cfg, memo = {}) {
     const st = R.trapReady(tr, t, weather === 2)
     if (st.n) push(1)
   }
-  // 体力回满
-  if (s.en < R.energyMax(s)) {
-    const n = Math.ceil((R.energyMax(s) - s.en) * R.WORLD.regen)
-    push(n)
+  // 体力回复（榜一的做法：体力见底时醒在「下一滴体力到账」的那一刻，而不是干等）
+  //
+  // 服务端 refresh()：s.enT 是回复周期的相位起点，
+  //   下一滴体力在 enT + regen 处到账，之后每隔 regen 到账 1 点。
+  // 旧写法是「按当前体力回满所需时间」算（(max-en)*180），
+  // 那等于要求「回满才值得醒」，但钓鱼一次只要 4 点体力——
+  // 现在有 1 点就能干活，等到回满完全是浪费。
+  const maxEn = R.energyMax(s)
+  if (s.en < maxEn) {
+    const regen = R.WORLD.regen || 180
+    const phase = Number(s.enT || s.now || t)
+    // 下一滴体力的到账时刻：enT 之后第 (floor((t-enT)/regen)+1) 个 regen 点。
+    // 例：enT=179 秒前、regen=180 → 下一滴在 1 秒后（不是 181 秒后）。
+    let nextDrop = phase + (Math.floor(Math.max(0, (t - phase) / regen)) + 1) * regen
+    if (nextDrop < t) nextDrop = t + 1
+    const waitSec = Math.max(1, nextDrop - t)
+    // 门槛用「有收益的活」里最便宜的那个（钓鱼 4），不能用 harvest/water 的 1 点——
+    // 那两件事随时都能做，拿它当门槛等于永远不触发。
+    const jobs = [R.WORLD.cost.fish ?? 4, R.WORLD.cost.mine ?? 3, R.WORLD.cost.bomb ?? 6].filter((x) => x > 0)
+    const cheapest = jobs.length ? Math.min(...jobs) : 4
+    if (s.en < cheapest) push(waitSec)                     // 一点有收益的活都干不了 → 醒在下一滴
+    else if (s.en < cheapest * 2) push(waitSec + regen)    // 只够干一次 → 攒两滴再醒
+    // 体力充足时不加这个候选：趟趟醒反而是浪费请求
   }
   // 换岛日（价格/额度刷新）
   push(R.b12NextIsleBoundary(t) - t)
@@ -583,10 +603,20 @@ export function nextWake(world, cfg, memo = {}) {
     const last = memo.stealScanAt || 0
     const every = cfg.social.steal.scanEvery ?? 1800
     const left = Math.max(0, every - (t - last))
-    push(left > 0 ? left : 5)
+
+    // 精确解禁调度：把「某块地/某个畜栏什么时候能偷」也算进唤醒时刻。
+    // 这是到点扫描做不到的——成熟后要过 protect(1800 秒) 才能偷，
+    // 到点扫描很容易每次都差几分钟，永远偷不到刚解禁的那批。
+    const nx = nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 })
+    if (nx) {
+      // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
+      push(Math.min(left > 0 ? left : 5, nx.wakeIn))
+    } else {
+      push(left > 0 ? left : 5)
+    }
   }
 
   // 兜底：没有更早的事件时也别睡太久
-  cands.push(cfg.loop?.maxSleep || 600)
-  return Math.min(...cands, cfg.loop?.maxSleep || 600)
+  cands.push(cfg.loop?.maxSleep || 120)
+  return Math.min(...cands, cfg.loop?.maxSleep || 120)
 }
