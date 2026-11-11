@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>鱼鱼谷托管</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="top">
+    <img src="icons/48.png" alt="" />
+    <div class="top-title">
+      <h1>鱼鱼谷托管</h1>
+      <div id="state" class="pill">读取中…</div>
+    </div>
+    <label class="switch big" title="托管总开关"><input type="checkbox" id="enabled" /><span></span></label>
+  </header>
+
+  <section id="confirm" class="card warn" hidden>
+    <p><b>首次开启会自动花 D币 升级小岛。</b>只买预计 <span id="confirm-days"></span> 天内回本的项目（地块、鱼竿、镐子、洒水器、蟹笼、动物），新岛大约花 800 万，始终保留 <span id="confirm-reserve"></span> 余额。</p>
+    <div class="row">
+      <button id="confirm-yes" class="primary">开启并投资</button>
+      <button id="confirm-noinvest">开启但不投资</button>
+      <button id="confirm-cancel" class="ghost">取消</button>
+    </div>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="home" aria-selected="true">概览</button>
+    <button role="tab" data-tab="settings" aria-selected="false">设置</button>
+    <button role="tab" data-tab="logs" aria-selected="false">日志</button>
+  </nav>
+
+  <main id="tab-home">
+    <section class="hero">
+      <small>今日净增（D币 + 库存）</small>
+      <strong id="net">—</strong>
+      <div class="hero-sub"><span>现金 <b id="net-cash">—</b></span><span>库存 <b id="net-stock">—</b></span></div>
+    </section>
+    <section class="tiles">
+      <div class="tile"><small>D币</small><b id="coins">—</b></div>
+      <div class="tile"><small>库存（现价）</small><b id="stock">—</b></div>
+      <div class="tile"><small>体力</small><b id="energy">—</b><i class="bar"><i id="energy-bar"></i></i></div>
+    </section>
+    <section class="card">
+      <h2>今日收支</h2>
+      <dl id="pnl" class="pnl"></dl>
+    </section>
+    <section class="card">
+      <h2>小岛</h2>
+      <div id="chips" class="chips"></div>
+      <dl id="isle" class="pnl"></dl>
+    </section>
+    <div class="row">
+      <button id="run" class="primary">立即巡视一次</button>
+      <button id="open">打开鱼鱼谷</button>
+    </div>
+  </main>
+
+  <main id="tab-settings" hidden>
+    <section class="card">
+      <h2>基本</h2>
+      <label class="opt"><span>演练模式<small>只算计划，不提交</small></span><i class="switch"><input type="checkbox" data-path="dry" /><span></span></i></label>
+      <label class="opt"><span>自动打开站点标签页<small>托管开着但没有标签页时</small></span><i class="switch"><input type="checkbox" data-path="autoTab" /><span></span></i></label>
+    </section>
+    <section class="card">
+      <h2>经营</h2>
+      <label class="opt"><span>自动投资升级</span><i class="switch"><input type="checkbox" data-path="invest.enabled" /><span></span></i></label>
+      <label class="opt"><span>回本期上限（天）</span><input type="number" min="1" max="60" step="1" data-path="invest.maxPaybackDays" /></label>
+      <label class="opt"><span>保留余额（D币）</span><input type="number" min="0" step="100000" data-path="invest.reserveCoins" /></label>
+      <label class="opt"><span>货船低买高卖</span><i class="switch"><input type="checkbox" data-path="cargo.enabled" /><span></span></i></label>
+      <label class="opt"><span>加工坊</span><i class="switch"><input type="checkbox" data-path="craft.enabled" /><span></span></i></label>
+      <label class="opt"><span>52弟 五子棋<small>每天 52 局，本地求必胜棋谱</small></span><i class="switch"><input type="checkbox" data-path="npc.enabled" /><span></span></i></label>
+      <label class="opt"><span>体力不够时买咖啡</span><i class="switch"><input type="checkbox" data-path="energy.coffee" /><span></span></i></label>
+    </section>
+    <section class="card">
+      <h2>卖货</h2>
+      <label class="opt"><span>自动卖货</span><i class="switch"><input type="checkbox" data-path="sell.enabled" /><span></span></i></label>
+      <label class="opt"><span>卖出门槛（%）<small>当前价 ÷ 未来最高价；0 = 有货就卖</small></span><input type="number" min="0" max="100" step="1" data-path="sell.ratio" data-scale="100" /></label>
+      <label class="opt"><span>行情预测范围（岛日）<small>越小囤货越少</small></span><input type="number" min="0" max="20" step="1" data-path="sell.horizonIsleDays" /></label>
+    </section>
+    <section class="card">
+      <h2>防偷</h2>
+      <label class="opt"><span>自动续守家道具<small>被偷后 24 小时内或设了离线时段时，约 2400 D/天</small></span><i class="switch"><input type="checkbox" data-path="defense.guardItems" /><span></span></i></label>
+      <label class="opt"><span>每天有固定时段关浏览器<small>种地会避开在这段时间成熟</small></span><i class="switch"><input type="checkbox" data-path="offline.enabled" /><span></span></i></label>
+      <label class="opt"><span>离线时段（北京时间）</span><span class="pair"><input type="time" data-path="offline.from" /> – <input type="time" data-path="offline.to" /></span></label>
+    </section>
+    <section class="card">
+      <h2>擂台</h2>
+      <label class="opt"><span>擂台日常<small>免费：每天 30 场 + 5 个宝箱，自动换装加点</small></span><i class="switch"><input type="checkbox" data-path="arena.enabled" /><span></span></i></label>
+      <label class="opt"><span>花 D币 养大肥鱼<small>训练、买史诗装备、强化；只影响守家和偷菜</small></span>
+        <select data-path="arena.spend"><option value="auto">开了偷菜或离线时才花</option><option value="on">总是</option><option value="off">从不</option></select></label>
+      <label class="opt"><span>每日上限（D币）</span><input type="number" min="0" step="10000" data-path="arena.dailyBudget" /></label>
+    </section>
+    <section class="card">
+      <h2>偷菜 <em>默认关</em></h2>
+      <label class="opt"><span>自动偷菜<small>盯着活跃小岛，保护期一过就去</small></span><i class="switch"><input type="checkbox" data-path="steal.enabled" /><span></span></i></label>
+      <label class="opt"><span>自动买斗篷和菜篮<small>3700 D/天</small></span><i class="switch"><input type="checkbox" data-path="steal.items" /><span></span></i></label>
+      <label class="opt"><span>一趟期望收益下限（D币）</span><input type="number" min="0" step="500" data-path="steal.minEV" /></label>
+      <label class="opt"><span>串门帮忙<small>每天最多约 4000 D，要花体力和饲料</small></span><i class="switch"><input type="checkbox" data-path="help.enabled" /><span></span></i></label>
+    </section>
+  </main>
+
+  <main id="tab-logs" hidden>
+    <div class="row end">
+      <button id="export" class="ghost small">导出每小时账本</button>
+      <button id="clear" class="ghost small">清空</button>
+    </div>
+    <div id="logs" class="logs"></div>
+  </main>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

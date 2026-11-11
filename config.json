@@ -1,0 +1,16 @@
+{
+  "baseUrl": "https://52dmeme.com",
+  "cookieFile": "../messages/cookie.txt",
+  "invest": { "enabled": true, "maxPaybackDays": 10, "reserveCoins": 3000000 },
+  "farm": { "water": true },
+  "food": { "reserveE": 600, "maxStockE": 2500 },
+  "energy": { "coffee": true },
+  "fish": { "enabled": true, "windowRatio": 0.97, "deadlineSec": 1200 },
+  "mine": { "enabled": true, "bomb": true },
+  "craft": { "enabled": true, "minMargin": 0.04, "hoardMax": 240 },
+  "sell": { "enabled": true, "horizonIsleDays": 7, "ratio": 0.97, "tier2Above": 450 },
+  "cargo": { "enabled": true, "minMargin": 0.1 },
+  "npc": { "enabled": true, "maxPerVisit": 60 },
+  "help": { "enabled": false, "perDay": 10, "maxPages": 5, "minEnergy": 30 },
+  "loop": { "minSleep": 20, "maxSleep": 600, "maxRounds": 30, "postGap": 2.3 }
+}

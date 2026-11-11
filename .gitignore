@@ -1,0 +1,34 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 会话与密钥（务必不要提交）
+.session.json
+*.session.json
+cookie.txt
+**/cookie.txt
+runtime.env
+
+# 运行产物
+logs/
+*.log
+ledger.csv
+
+# 站点源码快照（体积大，可随时重新下载；需要时用 scripts/fetch-live.mjs 拉）
+live/
+new/
+cache/
+research/ref/
+research/live-*.json
+research/*-sample.json
+research/world.json
+research/neighbors.json
+research/visit_sample.json
+
+# 临时与编辑器
+_tmp_*
+*.tmp
+.idea/
+.vscode/
+*.png
+!extension/icons/*.png

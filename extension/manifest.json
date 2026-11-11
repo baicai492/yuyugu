@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "鱼鱼谷托管",
+  "version": "1.0.0",
+  "description": "52dmeme 鱼鱼谷全自动托管：种地、牧场、钓鱼、挖矿、加工、看行情卖货、货船进货、52弟五子棋。",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["https://52dmeme.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "鱼鱼谷托管", "default_popup": "popup.html", "default_icon": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png" } },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "content_scripts": [
+    { "matches": ["https://52dmeme.com/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["page.mjs", "lib/*.mjs"], "matches": ["https://52dmeme.com/*"] }
+  ]
+}
