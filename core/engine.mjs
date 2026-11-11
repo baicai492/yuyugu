@@ -44,11 +44,13 @@ export class Engine {
     if (st.helpDay) this.memo.helpDay = st.helpDay
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
-    // 今日累计收支
-    if (st.daily) {
+    // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
+    // 起点一律交给 ensureLedger() 从 ledger.csv 重新推算，避免出现「起点=0」。
+    if (st.daily && st.day) {
       this.ledger = {
         ...this.ledger,
-        day: st.day || '',
+        // day 先留空，ensureLedger 会判断当前自然日；若同一天则保留累计值
+        pendingDay: st.day,
         earn: st.daily.earn || 0,
         spend: st.daily.spend || 0,
         tax: st.daily.tax || 0,
@@ -95,23 +97,36 @@ export class Engine {
   ensureLedger() {
     const R = this.world.R
     const day = R.worldDay(this.world.now)
-    if (this.ledger.day === day) return
+    // 已经算过今天就跳过——但 startCoins 必须是有效值（>0），
+    // 否则说明是从 state.json 恢复了一个只有 day 的空账本，需要重算。
+    if (this.ledger.day === day && this.ledger.startCoins > 0) return
+    // 从 state.json 恢复的累计值只在同一天有效
+    if (this.ledger.pendingDay && this.ledger.pendingDay !== day) {
+      this.ledger.earn = 0; this.ledger.spend = 0; this.ledger.tax = 0
+    }
+    delete this.ledger.pendingDay
 
     const coinsNow = this.world.coins
     const stockNow = this.world.stockValue()
     const fromFile = todayStartFromLedger(this.logDir)
-    // 只有当磁盘上的起点早于现在、并且数值合理时才用（防止 CSV 被手工改坏）
+    // 磁盘上的起点必须合理：正数、且不超过当前余额的 5 倍（防 CSV 被改坏）
     const usable = fromFile && fromFile.startCoins > 0 && fromFile.startCoins < coinsNow * 5
 
     this.ledger = {
+      ...this.ledger,
       day,
-      earn: 0, spend: 0, tax: 0,
+      earn: this.ledger.earn || 0,
+      spend: this.ledger.spend || 0,
+      tax: this.ledger.tax || 0,
       startCoins: usable ? fromFile.startCoins : coinsNow,
       startStock: usable ? fromFile.startStock : stockNow,
       resumedFrom: usable ? fromFile.firstTime : '',
+      startFrom: usable ? fromFile.from : 'now',
     }
     this.log(`—— ${day}：D币 ${fmt(coinsNow)}，库存 ${fmt(stockNow)}` +
-      (usable ? `（今日起点取自 ${fromFile.firstTime}，净增从那时算起）` : '') + ' ——')
+      (usable
+        ? `（起点取自 ${fromFile.firstTime} 的 ${fmt(fromFile.startCoins)}，${fromFile.from === 'yesterday' ? '昨天收盘' : '今天早些时候'}）`
+        : '（首次运行，起点=当前值）') + ' ——')
   }
 
   /** 一轮完整的巡视 */

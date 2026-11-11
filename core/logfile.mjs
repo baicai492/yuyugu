@@ -179,14 +179,30 @@ export function todayStartFromLedger(dir, nowMs = Date.now()) {
   const lines = text.split(/\r?\n/).filter(Boolean)
   if (lines.length < 2) return null
   const todayBj = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10)
-  let hit = null
+
+  let todayFirst = null      // 今天最早的一条
+  let prevLast = null        // 今天之前的最后一条
   for (const line of lines.slice(1)) {
     const [time, coins, stock] = line.split(',')
-    if (!time || !time.startsWith(todayBj)) continue
-    // 只认当天【第一条】：越早的越接近「今天开始时的资产」
-    if (!hit) hit = { day: todayBj, startCoins: Number(coins) || 0, startStock: Number(stock) || 0, firstTime: time }
+    if (!time) continue
+    const c = Number(coins)
+    if (!Number.isFinite(c) || c <= 0) continue      // 跳过脏数据（0 / NaN）
+    const rec = { time, coins: c, stock: Number(stock) || 0 }
+    if (time.startsWith(todayBj)) {
+      if (!todayFirst) todayFirst = rec
+    } else {
+      prevLast = rec                                 // 覆盖式，最终是今天之前最后一条
+    }
   }
-  return hit
+  // 今天已有记录 → 用今天第一条
+  if (todayFirst) {
+    return { day: todayBj, startCoins: todayFirst.coins, startStock: todayFirst.stock, firstTime: todayFirst.time, from: 'today' }
+  }
+  // 今天还没记录 → 用昨天收盘（=今天起点）
+  if (prevLast) {
+    return { day: todayBj, startCoins: prevLast.coins, startStock: prevLast.stock, firstTime: prevLast.time, from: 'yesterday' }
+  }
+  return null
 }
 
 /** 日志目录概况（给 GUI 显示有哪些天可选） */

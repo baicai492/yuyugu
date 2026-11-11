@@ -412,7 +412,9 @@ async function main() {
   port = Number(p) || 8787
   $('port').value = port
   bind()
-  await connect()
+  // 先把界面点亮（按钮要能点），再异步连接，避免未连接时界面长时间不响应
+  $('connBox').hidden = false
+  connect().catch(() => {})
   startAuto()
 }
 
