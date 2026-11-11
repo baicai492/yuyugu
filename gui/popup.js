@@ -14,8 +14,9 @@ let config = null
 let logSince = 0
 let logLines = []
 let autoTimer = 0
-let logMode = 'now'          // 'now' 本次运行 / 'hist' 历史
+let logMode = 'now'          // 'now' 本次运行 / 'hist' 历史 / 'legacy' 旧插件
 let histLines = []
+let legacyLines = []
 
 // ---------- 通信 ----------
 async function api(path, opts = {}) {
@@ -39,6 +40,7 @@ async function getMarket() {
 }
 async function getLogs(since) { return api(`/api/logs?since=${since}`) }
 async function getLogHistory(days) { return api(`/api/logs/history?days=${days}&max=800`) }
+async function getLegacyLogs() { return api('/api/logs/legacy?max=800') }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
 
@@ -238,7 +240,7 @@ function renderSettings() {
 function renderLogs() {
   const box = $('logs')
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20
-  const src = logMode === 'hist' ? histLines : logLines
+  const src = logMode === 'hist' ? histLines : logMode === 'legacy' ? legacyLines : logLines
   box.replaceChildren(...src.slice(-600).map((l) => {
     const div = document.createElement('div')
     if (l.level === 'err') div.className = 'err'
@@ -268,12 +270,35 @@ async function loadLogHistory() {
   }
 }
 
+async function loadLegacyLogs() {
+  if (!alive) return
+  const info = $('legacyInfo')
+  info.textContent = '正在读取浏览器里的旧插件记录…'
+  try {
+    const j = await getLegacyLogs()
+    legacyLines = (j.rows || []).map((r) => ({ ts: r.ts, msg: r.msg, level: r.level }))
+    if (j.error) {
+      info.textContent = j.error
+    } else {
+      const st = j.active || {}
+      info.textContent = `${st.browser || '?'} · ${st.profile || '?'} · ${j.total || 0} 条` +
+        `（显示最近 ${legacyLines.length}）` + (j.files ? `，${j.files} 个文件` : '')
+    }
+    if (logMode === 'legacy') renderLogs()
+  } catch (e) {
+    info.textContent = '读取失败：' + e.message
+  }
+}
+
 function setLogMode(mode) {
   logMode = mode
   $('logModeNow').classList.toggle('on', mode === 'now')
   $('logModeHist').classList.toggle('on', mode === 'hist')
+  $('logModeLegacy').classList.toggle('on', mode === 'legacy')
   $('histBar').hidden = mode !== 'hist'
+  $('legacyBar').hidden = mode !== 'legacy'
   if (mode === 'hist') loadLogHistory().then(() => renderLogs())
+  else if (mode === 'legacy') loadLegacyLogs().then(() => renderLogs())
   else renderLogs()
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) }
@@ -355,7 +380,9 @@ function bind() {
 
   $('logModeNow').onclick = () => setLogMode('now')
   $('logModeHist').onclick = () => setLogMode('hist')
+  $('logModeLegacy').onclick = () => setLogMode('legacy')
   $('histDays').onchange = () => loadLogHistory().then(() => renderLogs())
+  $('legacyRefresh').onclick = () => loadLegacyLogs().then(() => renderLogs())
 }
 
 /** 调用 Native Messaging 宿主 */

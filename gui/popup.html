@@ -115,6 +115,7 @@
       <div class="seg">
         <button id="logModeNow" class="on">本次运行</button>
         <button id="logModeHist">历史记录</button>
+        <button id="logModeLegacy">旧插件记录</button>
       </div>
       <label class="chk"><input type="checkbox" id="logAuto" checked /> 自动刷新</label>
     </div>
@@ -130,6 +131,10 @@
       </label>
       <span class="muted" id="histInfo"></span>
       <button id="logClear" class="ghost">清屏</button>
+    </div>
+    <div class="log-toolbar" id="legacyBar" hidden>
+      <span class="muted" id="legacyInfo"></span>
+      <button id="legacyRefresh" class="ghost">重新读取</button>
     </div>
     <div class="logs" id="logs"></div>
   </section>

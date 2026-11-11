@@ -2,7 +2,7 @@
 // 只监听 127.0.0.1，且要求 Origin 白名单 + 可选 token，防止被网页里的脚本乱调。
 import { createServer } from 'node:http'
 import { saveConfig } from './config.mjs'
-import { readLogHistory, logInventory } from './logfile.mjs'
+import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir } from './logfile.mjs'
 
 const ALLOW_ORIGIN = [
   'chrome-extension://',
@@ -94,6 +94,31 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
         return send(res, 200, {
           days: logInventory(dir),
           logs: readLogHistory(dir, { days, maxLines }),
+        })
+      }
+
+      // ---------- 旧插件（v1 Chrome 扩展）的浏览器内历史日志 ----------
+      if (req.method === 'GET' && path === '/api/logs/legacy') {
+        const cfgNow = engine.cfg
+        const extId = cfgNow.log?.legacyExtensionId
+        if (!extId) return send(res, 200, { stores: [], rows: [], error: '未配置旧插件扩展 ID' })
+        const manual = cfgNow.log?.legacyStoreDir
+        const stores = manual
+          ? [{ browser: '手动指定', profile: '-', dir: manual, size: 0 }]
+          : findLegacyExtensionStores(extId)
+        if (!stores.length) {
+          return send(res, 200, { stores: [], rows: [], error: `没在浏览器里找到插件 ${extId} 的存储（可能已卸载，或换过 profile）` })
+        }
+        const maxLines = Math.max(50, Math.min(5000, Number(url.searchParams.get('max')) || 800))
+        const st = stores[0]                       // 取最大的那份
+        const r = readLegacyDir(st.dir, { maxLines })
+        return send(res, 200, {
+          stores,
+          active: st,
+          rows: r.rows,
+          total: r.total,
+          files: r.files,
+          error: r.error || '',
         })
       }
 

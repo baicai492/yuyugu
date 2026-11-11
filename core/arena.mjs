@@ -101,13 +101,31 @@ export async function arenaDaily(world, cfg, log = () => {}) {
   const need = Math.max(0, (a.battles ?? 30) - today)
   if (need > 0) {
     let opponents = []
-    try {
-      const r = await api(world, '/api/pet/battle/opponents?limit=20&q=')
-      opponents = r.opponents || []
-    } catch (e) { log('读取对手失败：' + e.message) }
+    // 站点 a4a62d77 起支持 minLevel/maxLevel 筛选。先只取比我低 5 级以内的，
+    // 打不过再放开——低等级对手胜率高，掉落只看场次不看等级。
+    const myLevel = gear.level || 1
+    const queries = [
+      `minLevel=1&maxLevel=${Math.max(1, myLevel - 1)}`,
+      `minLevel=1&maxLevel=${Math.min(100, myLevel + 3)}`,
+      `minLevel=1&maxLevel=100`,
+    ]
+    for (const qs of queries) {
+      try {
+        const r = await api(world, `/api/pet/battle/opponents?limit=20&q=&${qs}`)
+        opponents = (r.opponents || []).filter((o) => (o.fought || 0) < 5)
+        if (opponents.length) { log(`擂台对手：等级筛选 ${qs}，共 ${opponents.length} 个`); break }
+      } catch (e) {
+        // 老版本不支持等级筛选时，退回不带参数的查询
+        try {
+          const r = await api(world, '/api/pet/battle/opponents?limit=20&q=')
+          opponents = r.opponents || []
+          if (opponents.length) break
+        } catch (e2) { log('读取对手失败：' + e2.message); break }
+      }
+    }
 
-    // 优先打等级低的
-    opponents.sort((x, y) => (x.level || 99) - (y.level || 99))
+    // 优先打等级低的、今天打得少的
+    opponents.sort((x, y) => (x.level || 99) - (y.level || 99) || (x.fought || 0) - (y.fought || 0))
     let idx = 0
     for (let k = 0; k < need && opponents.length; k++) {
       const o = opponents[idx++ % opponents.length]

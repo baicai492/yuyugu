@@ -111,12 +111,22 @@ export function planRound(world, cfg, log = () => {}) {
   const MAX = R.WORLD.maxActions
 
   let coins = world.coins
+  // 被服务端拒绝过的动作类型：本轮不再尝试，避免像旧版那样刷 20 多次无效请求
+  const blocked = new Set()
   const push = (a) => {
     if (actions.length >= MAX) return false
-    const before = { sp: coins }
+    const key = a.a + (a.a === 'plant' ? ':' + a.c : '')
+    if (blocked.has(key) || blocked.has(a.a)) return false
     const r = R.applyActions(s, [a], { t, day: R.worldDay(t), prices, coins, rand: () => 0.5 })
     const o = r.out[0]
-    if (!o?.ok) return false
+    if (!o?.ok) {
+      // 额度类/季节类失败，整类都别再试了
+      const msg = o?.msg || ''
+      if (/额度|已经钓了|已经挖了|忙不过来|用完|不是这个季节|满了|已经最大|不足/.test(msg)) {
+        blocked.add(key); blocked.add(a.a)
+      }
+      return false
+    }
     coins += (o.earn || 0) - (o.spend || 0)
     actions.push(a)
     return true

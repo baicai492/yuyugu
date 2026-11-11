@@ -4,7 +4,7 @@
 //   2026-11-11 23:50:27 消息内容
 // 时间是北京时间。
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { resolve, join } from 'node:path'
 
 const FILE_RE = /^yuyugu-(\d{4}-\d{2}-\d{2})\.log$/
 
@@ -16,6 +16,120 @@ export function listLogDays(dir) {
     .filter(Boolean)
     .sort()
     .reverse()
+}
+
+/**
+ * 旧版 Chrome 插件把日志存在浏览器的 Local Extension Settings（LevelDB）里。
+ * 这里只读地把它抠出来，供 GUI 的「旧插件记录」页展示。
+ *
+ * 不做完整的 LevelDB 解析：按「时间戳 → 下一个 \0」切块，再用正则抽单条日志。
+ */
+/**
+ * 自动找到旧插件（v1）在浏览器里的 Local Extension Settings 目录。
+ * 扫描 Chrome / Edge 的所有 profile；不写死 Profile 1。
+ * 返回 [{ browser, profile, dir, size }]，按文件大小倒序。
+ */
+export function findLegacyExtensionStores(extensionId, { extraRoots = [] } = {}) {
+  const localApp = process.env.LOCALAPPDATA || ''
+  const roots = [
+    ...extraRoots,
+    join(localApp, 'Google', 'Chrome', 'User Data'),
+    join(localApp, 'Microsoft', 'Edge', 'User Data'),
+    join(localApp, 'BraveSoftware', 'Brave-Browser', 'User Data'),
+  ].filter(Boolean)
+
+  const out = []
+  for (const root of roots) {
+    if (!existsSync(root)) continue
+    let profiles = []
+    try { profiles = readdirSync(root).filter((n) => n === 'Default' || /^Profile \d+$/.test(n)) } catch { continue }
+    for (const prof of profiles) {
+      const dir = join(root, prof, 'Local Extension Settings', extensionId)
+      if (!existsSync(dir)) continue
+      let size = 0
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!/\.(log|ldb)$/.test(f)) continue
+          try { size += statSync(join(dir, f)).size } catch {}
+        }
+      } catch {}
+      out.push({
+        browser: /Chrome/.test(root) ? 'Chrome' : /Edge/.test(root) ? 'Edge' : /Brave/.test(root) ? 'Brave' : '未知',
+        profile: prof,
+        dir,
+        size,
+      })
+    }
+  }
+  out.sort((a, b) => b.size - a.size)
+  return out
+}
+
+/** 把一个扩展存储目录里所有 .log/.ldb 拼起来读（LevelDB 写入日志是追加的） */
+export function readLegacyDir(dir, { maxLines = 500 } = {}) {
+  if (!dir || !existsSync(dir)) return { rows: [], error: '目录不存在' }
+  const files = readdirSync(dir).filter((f) => /\.(log|ldb)$/.test(f)).sort()
+  const merged = []
+  const seen = new Set()
+  for (const f of files) {
+    const r = readLegacyExtensionLogs(join(dir, f), { maxLines: 100000 })
+    for (const row of r.rows) {
+      const key = row.ts + '|' + row.msg.slice(0, 80)
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(row)
+    }
+  }
+  merged.sort((a, b) => a.ts.localeCompare(b.ts))
+  return { rows: merged.slice(-maxLines), total: merged.length, error: '', files: files.length }
+}
+
+export function readLegacyExtensionLogs(file, { maxLines = 500 } = {}) {
+  if (!file || !existsSync(file)) return { rows: [], error: '找不到旧插件存储文件' }
+  let buf
+  try { buf = readFileSync(file) } catch (e) { return { rows: [], error: e.message } }
+
+  const timeRe = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/g
+  const text = buf.toString('latin1')          // 先按字节读，避免 UTF-8 截断报错
+  const out = []
+  const seen = new Set()
+
+  // 在未转义的文本里找时间戳，向后截到第一个 \0
+  for (const m of text.matchAll(timeRe)) {
+    const start = m.index
+    let end = text.indexOf('\x00', start)
+    if (end < 0 || end - start > 4000) end = Math.min(start + 400, text.length)
+    const raw = text.slice(start, end)
+    // 用 UTF-8 重新解码这一段（latin1 → buffer → utf8）
+    let decoded
+    try { decoded = Buffer.from(raw, 'latin1').toString('utf8') } catch { continue }
+    if (decoded.length < 18) continue
+    // 一段里可能粘了多条日志，拆开
+    const parts = decoded.split(/","|(?=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} )/)
+    for (const p of parts) {
+      let one = p.replace(/^"+|"+$/g, '').replace(/[\x00-\x08\x0b-\x1f]/g, '').trim()
+      // LevelDB 记录尾部会跟上一条 key 的二进制残片：从第一个替换字符或
+      // 明显不属于日志的符号处截断（日志正文里不会出现 U+FFFD）。
+      const cut = one.search(/[�]/)
+      if (cut > 0) one = one.slice(0, cut).trim()
+      // 再砍掉尾部紧贴的短噪声（引号后跟 1–6 个 ASCII 控制/符号字符）
+      one = one.replace(/["\]]+[A-Za-z0-9%$#@!^&*()_+=|\\/<>{}[\];:,.\-]{0,8}$/, (m) => {
+        // 只有当这段噪声里含非日志常见字符时才截断，避免误伤正常结尾
+        return /[A-Za-z0-9%$#@!^&*()_+=|\\/<>{}[\];:,.\-]{0,8}$/.test(m) && m.length <= 9 && /["\]]/.test(m) ? '' : m
+      }).trim()
+      const mm = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ([\s\S]+)$/.exec(one)
+      if (!mm) continue
+      const [, ts, msgRaw] = mm
+      const msg = msgRaw.trim()
+      if (msg.length < 3) continue
+      const key = ts + '|' + msg.slice(0, 80)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ ts, msg, level: /出错|失败|未成功|⚠/.test(msg) ? 'err' : 'info' })
+    }
+  }
+  out.sort((a, b) => a.ts.localeCompare(b.ts))
+  return { rows: out.slice(-maxLines), total: out.length, error: '' }
 }
 
 /** 把 "YYYY-MM-DD HH:MM:SS" 的北京时间解析成 epoch 毫秒 */

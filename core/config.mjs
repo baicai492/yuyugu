@@ -138,7 +138,14 @@ export const DEFAULTS = {
   offline: { useButler: true, from: '01:00', to: '08:30' },
 
   // 日志
-  log: { maxLines: 2000, dir: 'logs' },
+  log: {
+    maxLines: 2000,
+    dir: 'logs',
+    // 旧版 Chrome 插件的扩展 ID：GUI 的「旧插件记录」页会去浏览器的
+    // Local Extension Settings 里读它的历史日志
+    legacyExtensionId: 'memccobjoffkjbdfciconoaedglmfmbl',
+    legacyStoreDir: '',          // 留空=自动扫描所有浏览器 profile；也可手动指定
+  },
 }
 
 /** 深度合并（用户配置覆盖默认值） */

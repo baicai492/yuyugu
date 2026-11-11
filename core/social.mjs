@@ -15,9 +15,11 @@ async function wpost(world, path, body) {
 }
 
 /** 拉邻居目录（分页） */
-export async function neighbors(world, { q = '', cursor = null, limit = 20, marked = false } = {}) {
+export async function neighbors(world, { q = '', cursor = null, limit = 20, marked = false, stealable = false } = {}) {
   const p = new URLSearchParams({ limit: String(limit), q })
   if (cursor) p.set('cursor', cursor)
+  // a4a62d77 新增：stealable=1 只返回「列表生成时可偷」的岛，省掉大量无效访问
+  if (stealable) p.set('stealable', '1')
   return wget(world, (marked ? 'neighbors/marked' : 'neighbors') + '?' + p)
 }
 
@@ -92,16 +94,25 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
   const t = world.now
   const out = []
   const pages = cfg.social?.steal?.pages ?? 6
-  let cursor = null, scanned = 0
+  let cursor = null, scanned = 0, skipped = 0
   for (let p = 0; p < pages; p++) {
     let d
-    try { d = await neighbors(world, { cursor, limit: 20 }) } catch (e) { log('扫目录失败：' + e.message); break }
+    // 站点 a4a62d77 起支持只列可偷的岛；列表是「生成时」的快照，抵达后仍需核对
+    let usedFilter = true
+    try { d = await neighbors(world, { cursor, limit: 20, stealable: true }) }
+    catch (e) {
+      // 老版本站点不支持这个参数，退回全量扫描
+      usedFilter = false
+      try { d = await neighbors(world, { cursor, limit: 20 }) } catch (e2) { log('扫目录失败：' + e2.message); break }
+    }
     for (const o of d.neighbors || []) {
       scanned++
-      if (o.newbie) continue                       // 新手保护
-      if (!(o.plots + o.pens)) continue
+      if (o.newbie) { skipped++; continue }        // 新手保护（创建后 24 小时）
+      if (!(o.plots + o.pens)) { skipped++; continue }
+      // 用了可偷筛选时，服务端已经保证有目标，可以省掉一次访问；
+      // 但为了拿到准确的目标与体力消耗，仍然读一次详情（它同时给出 rules）。
       let info
-      try { info = await visitInfo(world, o.id) } catch { continue }
+      try { info = await visitInfo(world, o.id) } catch { skipped++; continue }
       const isle = info.isle || {}
       const rules = info.rules || {}
       const protect = rules.protect ?? 1800
@@ -130,7 +141,8 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
     if (!cursor) break
   }
   out.sort((a, b) => (b.value / Math.max(1, b.energy)) - (a.value / Math.max(1, a.energy)))
-  log(`扫了 ${scanned} 座岛，找到 ${out.length} 家可偷`)
+  log(`扫了 ${scanned} 座岛${skipped ? `（跳过 ${skipped} 座）` : ''}，找到 ${out.length} 家可偷` +
+    (usedFilter ? '（用了可偷筛选）' : ''))
   return out
 }
 
