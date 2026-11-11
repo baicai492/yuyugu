@@ -32,3 +32,4 @@ _tmp_*
 .vscode/
 *.png
 !extension/icons/*.png
+!gui/icons/*.png
