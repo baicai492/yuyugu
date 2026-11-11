@@ -519,6 +519,18 @@ export function nextWake(world, cfg, memo = {}) {
     const st = R.animalReady(pen, t)
     if (st.ready) push(1)
     if (!st.retired && t - pen.f >= 8 * 3600) push(1)
+    // 下一件产物的到达时刻（榜一「事件桶」里最容易漏掉的一个）。
+    //
+    // animalReady 返回的 nextP 是循环结束后的 cursor——即「最后一件产物完成的时刻」，
+    // 不是「下一件产出的时刻」。真正的下一件在 cursor + period。
+    // 窝满时 nextP = max(cursor, until)，此时停产，只能等我们收走。
+    // 只按「窝里有货」唤醒会导致：产出一件→收走→再等下一件，
+    // 中间窝要是满了就白停一段时间。
+    if (!st.retired && st.n < (st.def?.cap || 1)) {
+      const period = st.period || 0
+      const nextAt = (st.nextP || t) + period
+      if (nextAt > t) push(Math.min(nextAt - t, R.WORLD.regen || 180))
+    }
   }
   // 蟹笼
   for (const tr of s.traps) {
@@ -551,6 +563,25 @@ export function nextWake(world, cfg, memo = {}) {
   }
   // 换岛日（价格/额度刷新）
   push(R.b12NextIsleBoundary(t) - t)
+  // 自然日 0 点（北京时间）：每日额度全部清零
+  //   钓鱼 80 / 挖矿 100 / 加工 80 / 炸矿 10 / 咖啡 3 / 五子棋计奖 10 / 擂台掉落 30
+  //   以及作物阶梯价计数 sc_<crop>、npc 计数
+  // 之前只看岛日边界，导致 0 点后额度刷新了却可能一直等到 maxSleep 才醒。
+  {
+    const local = t + 8 * 3600                        // 转成北京时间的秒数
+    const sinceMidnight = ((local % 86400) + 86400) % 86400
+    const toMidnight = 86400 - sinceMidnight
+    if (toMidnight > 0) push(toMidnight)
+    // 长夜 22:00 开始 / 08:00 结束：夜潮小礼在这两个时刻刷新
+    // （b12NightView 的 key 就取自 22:00 那天的日期，过了 08:00 就不能再领）
+    const H = 3600
+    const toNight = 22 * H - sinceMidnight                    // 距今晚 22:00
+    if (toNight > 0) push(toNight)
+    else {
+      const toMorning = 8 * H - sinceMidnight                 // 还在长夜里，等 08:00 收尾
+      if (toMorning > 0) push(toMorning)
+    }
+  }
   // 钓鱼时段开始
   if (cfg.work?.fish) {
     const h = R.isleHour(t)
