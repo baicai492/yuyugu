@@ -231,10 +231,17 @@ const FIELD_GROUPS = [
   },
   {
     title: '卖货',
-    fields: ['sell.enabled', 'sell.horizonDays', 'sell.markdownPct', 'sell.respectTiers'],
-    labels: { 'sell.enabled': '自动卖货', 'sell.horizonDays': '往后看几个岛日', 'sell.markdownPct': '离峰值几个点就卖', 'sell.respectTiers': '遵守阶梯价' },
+    fields: ['sell.enabled', 'sell.horizonDays', 'sell.outlookDays', 'sell.markdownPct', 'sell.respectTiers'],
+    labels: {
+      'sell.enabled': '自动卖货',
+      'sell.horizonDays': '往后看几个岛日',
+      'sell.outlookDays': '估值用几天均价',
+      'sell.markdownPct': '离峰值几个点就卖',
+      'sell.respectTiers': '遵守阶梯价',
+    },
     hints: {
       'sell.horizonDays': '在这段时间内找最高价，决定现在卖还是等',
+      'sell.outlookDays': '选作物、钓鱼挖矿、加工、投资都按这段时间的均价估算收益，而不是只看今天的价',
       'sell.markdownPct': '卖线 = 未来峰值 × (1 − 这个百分比)',
       'sell.respectTiers': '超出每日全价额度的部分留到明天卖，避免被压价',
     },

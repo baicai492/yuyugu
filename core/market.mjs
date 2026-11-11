@@ -189,3 +189,28 @@ export function bestSellMoment(R, now, prices, id, opts = {}) {
   fc.forEach((f, k) => { const p = f.price[id] || 0; if (p > best.p) best = { p, k, at: f.at, day: f.day } })
   return { price: best.p, inDays: best.k, at: best.at, day: best.day, now: Number(prices?.[id]) || 0 }
 }
+
+/**
+ * 给「产出型活动」用的期望价：未来 outlook 个岛日里这个物品的平均价。
+ *
+ * 为什么不用今天的价：钓鱼/挖矿/加工产出的东西不是当天就卖掉，
+ * 通常要放进囤货仓库等峰值。按今天的价挑干哪种活，会系统性地选错。
+ * 但也不能用绝对峰值（太乐观，逼着你去赌一个可能被外部供给打下去的点），
+ * 所以取未来几天的均值——这是「这批货最终能拿到的价格」的稳健估计。
+ *
+ * 返回 { id: price } 的字典，可直接当作 prices 传给 planner 的估值函数。
+ */
+export function expectedPrices(R, now, prices, { outlook = 3, external = {} } = {}) {
+  const fc = forecastPrices(R, now, prices, { days: Math.max(1, outlook), external })
+  const out = {}
+  for (const id of Object.keys(R.BASE_PRICE)) {
+    let sum = 0, n = 0
+    for (const day of fc) {
+      const p = day.price[id] || 0
+      if (p > 0) { sum += p; n++ }
+    }
+    // 当天有真实报价就用真实值（前 k=0 天本来就是真报价），否则退回预测均值
+    out[id] = n ? sum / n : (Number(prices?.[id]) || 0)
+  }
+  return out
+}

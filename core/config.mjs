@@ -69,7 +69,8 @@ export const DEFAULTS = {
   // 卖货（核心）
   sell: {
     enabled: true,
-    horizonDays: 12,             // 往后看几个岛日
+    horizonDays: 12,             // 往后看几个岛日（择时卖出用）
+    outlookDays: 3,              // 估产出价值时看几个岛日的均价（选作物/钓鱼/挖矿/加工用）
     markdownPct: 6,              // 卖线 = 峰值 × (1 - 折让)
     minGainPct: 5,               // 等到峰值能多赚这么多百分点才等
     keepRatio: 0,                // 保留多少比例的货不卖（0=全卖）

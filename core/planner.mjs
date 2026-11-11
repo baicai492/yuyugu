@@ -106,6 +106,15 @@ export function planRound(world, cfg, log = () => {}) {
   const t = world.now
   const s = clone(world.state)
   const prices = world.prices
+  // 产出型决策（选作物 / 钓鱼 / 挖矿 / 加工 / 投资）用「未来几个岛日均价」而不是今天的价。
+  // 这些产出不会当天卖掉，按当天价挑活会系统性选错。
+  let expPrices = prices
+  try {
+    expPrices = M.expectedPrices(R, t, prices, {
+      outlook: cfg.sell?.outlookDays ?? 3,
+      external: world.externalSoldRatio || {},
+    })
+  } catch {}
   const actions = []
   const summary = []
   const MAX = R.WORLD.maxActions
@@ -211,11 +220,11 @@ export function planRound(world, cfg, log = () => {}) {
     const season = R.seasonOf(R.isleDay(t))
     const best = cfg.farm.preferCrop
       ? R.CROPS.find((c) => c.id === cfg.farm.preferCrop && c.seasons.includes(season))
-      : bestCropFor(R, season, prices)
+      : bestCropFor(R, season, expPrices)
     const empty = []
     for (let i = 0; i < s.plotN; i++) if (!s.plots[i]) empty.push(i)
     if (best && empty.length) {
-      // 留几块地种口粮：选回体力性价比最高的作物
+      // 留几块地种口粮：口粮是当天就会吃掉的，按现价评估回体力的性价比
       const foodCrop = R.CROPS.filter((c) => c.seasons.includes(season))
         .sort((a, b) => ((prices[a.id] || a.price) / a.eat) - ((prices[b.id] || b.price) / b.eat))[0]
       const foodCount = Math.min(empty.length, cfg.farm.foodPlots || 0)
@@ -230,7 +239,7 @@ export function planRound(world, cfg, log = () => {}) {
 
   // ---------- 6. 投资（只买 10 天内回本的） ----------
   if (cfg.invest?.enabled) {
-    const inv = planInvestments(R, s, prices, coins, cfg, t)
+    const inv = planInvestments(R, s, expPrices, coins, cfg, t)
     for (const it of inv) {
       if (coins < it.cost + (cfg.invest.reserveCoins || 0)) continue
       if (push(it.action)) summary.push(`投资：${it.name}（${fmt(it.cost)}，约 ${it.payback.toFixed(1)} 天回本）`)
@@ -242,9 +251,11 @@ export function planRound(world, cfg, log = () => {}) {
     const left = R.WORLD.daily.craft - ((s.iq?.d === R.isleIndex(t) ? s.iq.craft : 0) || 0)
     let made = 0
     const have = (id) => [0, 1, 2].reduce((a, q) => a + R.b12Available(s, id, q), 0)
+    // 原料按现价算（今天就要消耗掉），产品按未来均价算（做好要囤到峰值才卖）
     const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
       const cost = Object.entries(r.in).reduce((a, [id, n]) => a + (prices[id] || 0) * n, 0)
-      return { r, margin: (prices[r.id] || r.price) - cost }
+      const salePrice = expPrices[r.id] || prices[r.id] || r.price
+      return { r, margin: salePrice - cost }
     }).filter((x) => x.margin > 0).sort((a, b) => b.margin - a.margin)
     for (const { r, margin } of ranked) {
       if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
@@ -260,6 +271,7 @@ export function planRound(world, cfg, log = () => {}) {
 
   // ---------- 8. 花体力做最高收益的事（钓/挖/炸） ----------
   if (cfg.work) {
+    // 口粮是立刻消耗掉的，按现价算成本
     const eatCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
     const reserve = Math.max(0, cfg.energy?.minEnergyToLeave ?? 0)
     let guard = 0
@@ -268,9 +280,10 @@ export function planRound(world, cfg, log = () => {}) {
       const mineLeft = R.WORLD.daily.mine - ((s.iq?.d === R.isleIndex(t) ? s.iq.mine : 0) || 0)
       const bombLeft = R.WORLD.daily.bomb - ((s.iq?.d === R.isleIndex(t) ? s.iq.bomb : 0) || 0)
       const useBait = cfg.work.bait && (s.inv.bait?.[0] || 0) > 0
-      const fishVal = cfg.work.fish && fishLeft > 0 ? fishEV(R, s, t, prices, useBait) : -1
-      const mineVal = cfg.work.mine && mineLeft >= 3 ? mineEV(R, s, prices, false) / (1.25 + 0.05 * s.tools.pick) : -1
-      const bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, prices, true) : -1
+      // 钓到的鱼、挖到的矿都要囤到价格峰值才卖，按未来均价估才准
+      const fishVal = cfg.work.fish && fishLeft > 0 ? fishEV(R, s, t, expPrices, useBait) : -1
+      const mineVal = cfg.work.mine && mineLeft >= 3 ? mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick) : -1
+      const bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, expPrices, true) : -1
       const jobs = []
       if (fishVal > 0 && s.en >= R.WORLD.cost.fish) jobs.push({ a: { a: 'fish', bait: useBait }, cost: R.WORLD.cost.fish, v: fishVal / R.WORLD.cost.fish, label: '钓鱼' })
       if (mineVal > 0 && s.en >= R.WORLD.cost.mine) jobs.push({ a: { a: 'mine', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: R.WORLD.cost.mine, v: mineVal / R.WORLD.cost.mine, label: '挖矿' })
