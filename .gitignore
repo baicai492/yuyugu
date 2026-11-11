@@ -40,3 +40,5 @@ native/com.*.yuyugu.json
 logs/state.json
 logs/yuyugu.pid
 logs/host-*.log
+new2/
+research/ext-logs-raw.txt
