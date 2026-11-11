@@ -66,6 +66,7 @@ export const DEFAULTS = {
     coffee: true,                // 喝咖啡（可超上限）
     minEnergyToWork: 4,
     coffeeAfterRatio: 0.5,       // 体力低于上限的这个比例时开始喝
+    reserveEnergy: 2500,         // 口粮库存攒到这个体力当量就不再买了
   },
 
   // 钓鱼/挖矿
@@ -152,6 +153,15 @@ export const DEFAULTS = {
 
   // 守护道具
   guard: { enabled: true, item: 'guard1', renewHours: 24 },
+
+  // 防偷：成熟即收是主防线（成熟后 30 分钟内别人偷不了），
+  // 下面这些是给「没法及时收」的情况兜底——被偷过之后 24 小时内自动续道具。
+  defense: {
+    guardItems: true,
+    alert: 'guard1',             // 潮铃：发现率 +10 个百分点
+    combat: 'guard2',            // 贝壳护具：守家生命 +8%
+    protect: 1800,               // 保护期（秒）
+  },
 
   // 离线时段（交给管家）
   offline: { useButler: true, from: '01:00', to: '08:30' },

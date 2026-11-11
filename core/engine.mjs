@@ -3,7 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
-import { planRound, nextWake, decisionSnapshot } from './planner.mjs'
+import { planRound, nextWake, decisionSnapshot, nextRipe } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
@@ -87,6 +87,8 @@ export class Engine {
         stealSchedule: this.memo.stealSchedule || {},
         helpStall: this.memo.helpStall || 0,
         gomokuStall: this.memo.gomokuStall || 0,
+        // 最近一次被偷的时刻：之后 24 小时都要续守家道具
+        stolenAt: this.memo.stolenAt || 0,
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -228,6 +230,9 @@ export class Engine {
     let totalEarn = 0, totalSpend = 0, totalTax = 0
     while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
       this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
+      // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
+      // world 是每轮共享的对象，规划器往里写 stolenAt 也能被这里读回来。
+      if (this.memo.stolenAt) w.stolenAt = this.memo.stolenAt
       plan = planRound(w, cfg, this.log.bind(this))
       if (!plan.actions.length) break
       if (cfg.dry) {
@@ -305,6 +310,8 @@ export class Engine {
     if (totalEarn || totalSpend) {
       this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
     }
+    // 规划器在被偷记录/防偷道具里会写 world.stolenAt，收回 memo 才能跨轮、跨重启生效
+    if (w.stolenAt && w.stolenAt !== this.memo.stolenAt) this.memo.stolenAt = w.stolenAt
     // 无论这轮有没有收支都要落盘：帮忙/偷菜的进度（helpCount、stealSchedule）
     // 是「无收支」的，只在 credit() 里存会永远丢失。
     this.savePersist()
@@ -527,6 +534,10 @@ export class Engine {
         traps: s.traps.length,
         tools: { ...s.tools },
         mineMax: s.mine.max,
+        // 防偷状态：最近一次被偷是多久前、下一块地什么时候熟。
+        // 快熟时人得盯着（成熟后 30 分钟内不收就会被偷），GUI 靠这两个字段提示。
+        stolenAgo: w.stolenAt || this.memo?.stolenAt ? Math.max(0, w.now - (w.stolenAt || this.memo.stolenAt)) : -1,
+        nextRipeAt: nextRipe(R, w, this.cfg),
         quotas: {
           fish: { used: quotaUsed(R, s, w, 'fish'), max: R.WORLD.daily.fish },
           mine: { used: quotaUsed(R, s, w, 'mine'), max: R.WORLD.daily.mine },
