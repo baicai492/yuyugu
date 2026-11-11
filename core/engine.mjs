@@ -1,0 +1,304 @@
+// 引擎：把所有模块串成持续运行的托管循环。
+// 职责：拉状态 → 规划 → 提交 → 擂台/社交/小游戏 → 算下次唤醒 → 记账 → 上报。
+import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { ROOT } from './rules.mjs'
+import { planRound, nextWake } from './planner.mjs'
+import { playGomoku, playOther } from './npc.mjs'
+import { arenaDaily } from './arena.mjs'
+import { helpDaily, stealRound } from './social.mjs'
+import * as M from './market.mjs'
+
+const fmt = (n) => Math.round(n).toLocaleString('en-US')
+const bj = (ms = Date.now()) => new Date(ms + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19)
+
+export class Engine {
+  constructor({ world, cfg, logDir }) {
+    this.world = world
+    this.cfg = cfg
+    this.logDir = logDir || resolve(ROOT, 'logs')
+    this.running = false
+    this.halted = false
+    this.logs = []
+    this.memo = {}                 // 跨轮记忆（今日已帮谁、上次扫偷菜…）
+    this.ledger = { day: '', earn: 0, spend: 0, tax: 0, startCoins: 0, startStock: 0 }
+    this.status = { state: 'idle', round: 0, nextAt: 0, lastError: '', lastRun: 0 }
+    this.externalSoldRatio = {}
+    this.history = []
+    if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true })
+  }
+
+  log(msg, level = 'info') {
+    const line = `${bj()} ${msg}`
+    this.logs.push({ t: Date.now(), level, msg })
+    const max = this.cfg.log?.maxLines || 2000
+    if (this.logs.length > max) this.logs.splice(0, this.logs.length - max)
+    console.log(line)
+    try {
+      appendFileSync(resolve(this.logDir, `yuyugu-${bj().slice(0, 10)}.log`), line + '\n', 'utf8')
+    } catch {}
+  }
+
+  /** 开始今天的账本（自然日切换时重置） */
+  ensureLedger() {
+    const R = this.world.R
+    const day = R.worldDay(this.world.now)
+    if (this.ledger.day !== day) {
+      this.ledger = {
+        day,
+        earn: 0, spend: 0, tax: 0,
+        startCoins: this.world.coins,
+        startStock: this.world.stockValue(),
+      }
+      this.log(`—— 新的一天 ${day}：D币 ${fmt(this.world.coins)}，库存 ${fmt(this.world.stockValue())} ——`)
+    }
+  }
+
+  /** 一轮完整的巡视 */
+  async tick() {
+    const w = this.world
+    const R = w.R
+    const cfg = this.cfg
+
+    await w.refresh()
+    this.ensureLedger()
+
+    // 市场供需反推（供卖货与预测）
+    try {
+      const obs = M.inferSupply(R, w.prices, w.isleDay)
+      w.externalSoldRatio = M.learnExternal(w.externalSoldRatio, obs, {})
+      w.lastSupply = obs
+    } catch {}
+
+    const s = w.state
+    const parts = []
+    parts.push(`岛日 ${R.isleDayNo(w.now)}（${R.SEASONS[w.season]}·${R.WEATHERS[w.weather]}·${R.isleHour(w.now)} 点）`)
+    parts.push(`D币 ${fmt(w.coins)}`)
+    parts.push(`体力 ${Math.floor(s.en)}/${R.energyMax(s)}`)
+    parts.push(`库存 ${fmt(w.stockValue())}`)
+    this.log(parts.join('｜'))
+
+    // ---------- 主规划 ----------
+    let plan = { actions: [], summary: [] }
+    let rounds = 0
+    let totalEarn = 0, totalSpend = 0, totalTax = 0
+    while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
+      plan = planRound(w, cfg, this.log.bind(this))
+      if (!plan.actions.length) break
+      if (cfg.dry) {
+        this.log(`[演练] 本轮计划：${summarizeActions(R, plan.actions)}`)
+        break
+      }
+      try {
+        const res = await w.act(plan.actions)
+        totalEarn += res.earn || 0
+        totalSpend += res.spend || 0
+        totalTax += res.tax || 0
+        if (plan.summary.length) this.log(plan.summary.join('；'))
+        if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
+      } catch (e) {
+        this.log('提交失败：' + e.message, 'err')
+        break
+      }
+    }
+
+    // ---------- 52弟 ----------
+    if (cfg.npc?.enabled && !cfg.dry) {
+      try {
+        if (cfg.npc.gomoku) {
+          const r = await playGomoku(w, cfg, this.log.bind(this))
+          totalEarn += r.coins || 0
+        }
+        if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) await playOther(w, cfg, this.log.bind(this))
+      } catch (e) { this.log('52弟出错：' + e.message, 'err') }
+    }
+
+    // ---------- 擂台 ----------
+    if (cfg.arena?.enabled && !cfg.dry) {
+      try { await arenaDaily(w, cfg, this.log.bind(this)) }
+      catch (e) { this.log('擂台出错：' + e.message, 'err') }
+    }
+
+    // ---------- 帮忙 ----------
+    if (cfg.social?.help?.enabled && !cfg.dry) {
+      try {
+        const r = await helpDaily(w, cfg, this.log.bind(this), this.memo)
+        totalEarn += r.coins || 0
+      } catch (e) { this.log('帮忙出错：' + e.message, 'err') }
+    }
+
+    // ---------- 偷菜 ----------
+    if (cfg.social?.steal?.enabled && !cfg.dry) {
+      try {
+        const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
+        totalEarn += r.value || 0
+      } catch (e) { this.log('偷菜出错：' + e.message, 'err') }
+    }
+
+    // ---------- 记账 ----------
+    this.ledger.earn += totalEarn
+    this.ledger.spend += totalSpend
+    this.ledger.tax += totalTax
+    if (totalEarn || totalSpend) {
+      this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
+    }
+    this.snapshot()
+
+    // ---------- 下次唤醒 ----------
+    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 600) : nextWake(w, cfg)
+    this.status = {
+      state: 'running',
+      round: (this.status.round || 0) + 1,
+      nextAt: Date.now() + sleep * 1000,
+      sleep,
+      lastError: '',
+      lastRun: Date.now(),
+    }
+    return { sleep, plan }
+  }
+
+  /** 每轮记一行资产到 ledger.csv（每小时最多一次） */
+  snapshot() {
+    const w = this.world
+    const last = this.history[this.history.length - 1]
+    if (last && Date.now() - last.t < 3600_000) return
+    const s = w.state
+    const row = {
+      t: Date.now(),
+      time: bj(),
+      coins: w.coins,
+      stock: w.stockValue(),
+      energy: s.en,
+      plots: s.plotN,
+      animals: s.barn.length,
+      ...s.tools,
+    }
+    this.history.push(row)
+    if (this.history.length > 2000) this.history.shift()
+    try {
+      const file = resolve(this.logDir, 'ledger.csv')
+      if (!existsSync(file)) writeFileSync(file, 'time,coins,stock_value,energy,plots,animals,rod,pick,spr,house\n', 'utf8')
+      appendFileSync(file, `${row.time},${Math.round(row.coins)},${Math.round(row.stock)},${Math.round(row.energy)},${row.plots},${row.animals},${row.rod},${row.pick},${row.spr},${row.house}\n`, 'utf8')
+    } catch {}
+  }
+
+  /** 持续运行 */
+  async run() {
+    this.running = true
+    this.halted = false
+    this.log(`托管启动${this.cfg.dry ? '（演练模式，不提交）' : ''}`)
+    while (this.running && !this.halted) {
+      try {
+        if (!this.cfg.enabled) {
+          this.status = { ...this.status, state: 'paused' }
+          await new Promise((r) => setTimeout(r, 3000))
+          continue
+        }
+        const { sleep } = await this.tick()
+        // 分段等待，便于快速响应暂停/停止
+        const until = Date.now() + sleep * 1000
+        while (this.running && Date.now() < until) {
+          await new Promise((r) => setTimeout(r, Math.min(2000, until - Date.now())))
+          if (!this.cfg.enabled) break
+        }
+      } catch (e) {
+        this.status = { ...this.status, state: 'error', lastError: e.message }
+        this.log('巡视出错：' + e.message, 'err')
+        await new Promise((r) => setTimeout(r, 15000))
+      }
+    }
+    this.status = { ...this.status, state: 'stopped' }
+    this.log('托管已停止')
+  }
+
+  stop() { this.running = false }
+
+  /** 给 GUI 的状态快照 */
+  statusSnapshot() {
+    const w = this.world
+    const R = w.R
+    const s = w.state
+    const stockNow = w.ready ? w.stockValue() : 0
+    const dayNet = w.ready ? (w.coins - this.ledger.startCoins) + (stockNow - this.ledger.startStock) : 0
+    return {
+      state: this.status.state,
+      running: this.running,
+      dry: this.cfg.dry,
+      round: this.status.round || 0,
+      nextAt: this.status.nextAt || 0,
+      sleep: this.status.sleep || 0,
+      lastError: this.status.lastError || '',
+      lastRun: this.status.lastRun || 0,
+      world: w.ready ? {
+        now: w.now,
+        isleDay: w.isleDay,
+        isleNo: R.isleDayNo(w.now),
+        season: R.SEASONS[w.season],
+        weather: R.WEATHERS[w.weather],
+        hour: R.isleHour(w.now),
+        longNight: R.b12IsLongNight(w.now),
+        nextIsleAt: R.b12NextIsleBoundary(w.now),
+        coins: w.coins,
+        stock: stockNow,
+        energy: s.en,
+        energyMax: R.energyMax(s),
+        plots: s.plotN,
+        barn: s.barn.length,
+        barnN: s.barnN,
+        traps: s.traps.length,
+        tools: { ...s.tools },
+        mineMax: s.mine.max,
+        quotas: {
+          fish: { used: quotaUsed(R, s, w, 'fish'), max: R.WORLD.daily.fish },
+          mine: { used: quotaUsed(R, s, w, 'mine'), max: R.WORLD.daily.mine },
+          craft: { used: quotaUsed(R, s, w, 'craft'), max: R.WORLD.daily.craft },
+          bomb: { used: quotaUsed(R, s, w, 'bomb'), max: R.WORLD.daily.bomb },
+          coffee: { used: s.cnt?.coffee || 0, max: R.WORLD.daily.coffee },
+          npc: { used: s.cnt?.npc || 0, max: R.NPC.daily },
+          gomokuPaid: { used: s.cnt?.gomokuPaid || 0, max: R.GOMOKU_PAID },
+        },
+      } : null,
+      ledger: { ...this.ledger, stockNow, dayNet },
+      history: this.history.slice(-240),
+    }
+  }
+
+  /** 市场预测（给 GUI 的市场面板） */
+  marketSnapshot(opts = {}) {
+    const w = this.world
+    if (!w.ready) return null
+    const R = w.R
+    const plan = M.sellPlan(R, w.now, { coins: w.coins, state: w.state, prices: w.prices }, {
+      days: opts.days ?? this.cfg.sell?.horizonDays ?? 12,
+      markdownPct: opts.markdownPct ?? this.cfg.sell?.markdownPct ?? 6,
+      external: w.externalSoldRatio || {},
+    })
+    return {
+      supply: {
+        day: plan.supply.day,
+        items: Object.fromEntries(Object.entries(plan.supply.rows).map(([id, r]) => [id, {
+          supply: r.supply, price: r.price, quote: r.quote,
+          clamped: r.clampedLow || r.clampedHigh,
+          soldRatio: r.soldSolid,
+        }])),
+      },
+      forecast: plan.forecast.map((f) => ({
+        at: f.at, day: f.day, season: R.SEASONS[f.season], weather: R.WEATHERS[f.weather],
+        events: f.events,
+        prices: f.price, low: f.low, high: f.high,
+      })),
+      rows: plan.rows,
+    }
+  }
+}
+
+function quotaUsed(R, s, w, key) {
+  const iq = s.iq
+  return (iq && iq.d === R.isleIndex(w.now)) ? (iq[key] || 0) : 0
+}
+
+function summarizeActions(R, actions) {
+  const c = {}
+  for (const a of actions) c[a.a] = (c[a.a] || 0) + 1
+  return Object.entries(c).map(([k, n]) => `${k}×${n}`).join(' ')
+}
