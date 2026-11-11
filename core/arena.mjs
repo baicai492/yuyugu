@@ -126,12 +126,18 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) 
 
     // 优先打等级低的、今天打得少的
     opponents.sort((x, y) => (x.level || 99) - (y.level || 99) || (x.fought || 0) - (y.fought || 0))
-    let idx = 0
+    let idx = 0, wins = 0, losses = 0
     for (let k = 0; k < need && opponents.length; k++) {
       const o = opponents[idx++ % opponents.length]
       try {
         const r = await api(world, '/api/pet/battle', { opponent_id: o.id, operation: randomUUID() })
-        if (r.battle) battles++
+        if (r.battle) {
+          battles++
+          // 服务端战报里带胜负，统计一下胜率
+          const w = r.battle.win ?? r.battle.result === 'win' ?? r.battle.winner === 'me'
+          if (w === true) wins++
+          else if (w === false) losses++
+        }
         if (r.gear) gear = r.gear
         onBattle?.(battles, need)
       } catch (e) {
@@ -141,7 +147,11 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) 
       }
       if (k < need - 1) await sleep(8500)
     }
-    if (battles) log(`擂台打 ${battles} 场`)
+    if (battles) {
+      const known = wins + losses
+      log(`擂台打 ${battles} 场（本次 ${need} 场）` +
+        (known ? `｜胜 ${wins} 负 ${losses}（胜率 ${Math.round(wins / known * 100)}%）` : ''))
+    }
   }
 
   // 开宝箱

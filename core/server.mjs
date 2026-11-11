@@ -154,6 +154,10 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             return send(res, 200, { ok: true })
           case 'once':
             engine.log('GUI：手动巡视一次')
+            // 正在巡视时不要去撞车（会和定时巡视抢 rev，产生 409），
+            // 只标记「尽快醒来」；空闲时会立刻打断等待。
+            if (engine.busy) return send(res, 200, { ok: true, msg: '正在巡视，本轮结束后会立刻再来一轮' })
+            if (engine.running) { engine.requestTick(); return send(res, 200, { ok: true, msg: '已唤醒，马上开始' }) }
             engine.tick().catch((e) => engine.log('手动巡视出错：' + e.message, 'err'))
             return send(res, 200, { ok: true })
           case 'exit':

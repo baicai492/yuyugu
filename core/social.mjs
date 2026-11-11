@@ -81,7 +81,8 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
     cursor = d.nextCursor
     if (!cursor) break
   }
-  if (helped) log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D`)
+  if (helped) log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D（今日累计 ${memo.helpCount || 0}/${perDay}）`)
+  else log(`帮忙：扫了 ${pages} 页没找到可帮的岛（今日 ${memo.helpCount || 0}/${perDay}），稍后再试`)
   return { helped, coins }
 }
 
@@ -144,6 +145,13 @@ export async function scanStealTargets(world, cfg, log = () => {}) {
   out.sort((a, b) => (b.value / Math.max(1, b.energy)) - (a.value / Math.max(1, a.energy)))
   log(`扫了 ${scanned} 座岛${skipped ? `（跳过 ${skipped} 座）` : ''}，找到 ${out.length} 家可偷` +
     (usedFilter ? '（用了可偷筛选）' : ''))
+  // 把候选按性价比列出来，方便判断为什么去/不去某一家
+  for (const tg of out.slice(0, 6)) {
+    log(`  ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）` +
+      `${tg.targets.length} 处，估 ${Math.round(tg.value).toLocaleString('en-US')} D，耗 ${tg.energy} 体力` +
+      `（每体力 ${Math.round(tg.value / Math.max(1, tg.energy)).toLocaleString('en-US')} D）`)
+  }
+  if (out.length > 6) log(`  …还有 ${out.length - 6} 家`)
   return out
 }
 
@@ -176,21 +184,47 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     try {
       const r = await stealIsle(world, tg.id)
       const res = r.result || {}
+      const unitOf = (id) => world.prices[id] || R.BASE_PRICE[id] || 0
+      const nameOf = (id) => R.ITEM_NAME?.[id] || id
+
       if (res.outcome === 'win') {
-        stolen += res.spots || 1
-        value += (res.items || []).reduce((a, [id, n]) => a + (world.prices[id] || R.BASE_PRICE[id] || 0) * n, 0)
-        log(`偷 ${tg.name} 成功：${res.n || 1} 件${res.fine ? '' : ''}`)
+        // 服务端返回 res.items = [[id, n], ...]，可能不止一种货
+        const items = res.items?.length ? res.items : (res.item ? [[res.item, res.n || 1]] : [])
+        const spots = res.spots || targets.length || 1
+        let thisValue = 0
+        for (const [id, n] of items) thisValue += unitOf(id) * n
+        stolen += spots
+        value += thisValue
+
+        // 明细：偷了谁、几处、每样东西多少件、单价、合计
+        const detail = items.map(([id, n]) => {
+          const u = unitOf(id)
+          return `${nameOf(id)}×${n}（${Math.round(u).toLocaleString('en-US')} D/个 = ${Math.round(u * n).toLocaleString('en-US')} D）`
+        }).join('　')
+        log(`偷 ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）成功：扫 ${spots} 处 → ${detail || `共 ${res.n || 1} 件`}｜合计 ${Math.round(thisValue).toLocaleString('en-US')} D`)
+        if (r.battle) {
+          const b = r.battle
+          const win = b.win ?? b.result === 'win' ?? res.outcome === 'win'
+          log(`  守家战${win ? '打赢了' : '打完'}：${b.log?.slice?.(-1)?.[0] || ''}${res.xp ? `，+${res.xp} 擂台经验` : ''}`.trim())
+        }
       } else if (res.outcome === 'lose') {
-        log(`偷 ${tg.name} 失败${res.fine ? `，赔 ${Math.round(res.fine)} D` : '（罚款已达上限）'}`)
+        const spots = res.spots || 1
+        log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
+          (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）'))
       } else {
-        log(`偷 ${tg.name} 打平`)
+        log(`偷 ${tg.name}（Lv${tg.level}）打平：${res.spots || 1} 处，谁也没占便宜`)
       }
-      if (r.energy != null) world.state.en = r.energy
+      if (r.energy != null) {
+        const spent = (world.state.en || 0) - r.energy
+        log(`  体力 ${Math.round(world.state.en)} → ${r.energy}${spent > 0 ? `（−${Math.round(spent)}）` : ''}`)
+        world.state.en = r.energy
+      }
     } catch (e) {
       log(`偷 ${tg.name} 出错：${e.message}`)
     }
     await sleep(1500)
   }
-  if (stolen) log(`本轮偷到 ${stolen} 处，约 ${Math.round(value).toLocaleString('en-US')} D`)
+  if (stolen) log(`本轮偷菜小结：${stolen} 处，${Math.round(value).toLocaleString('en-US')} D（去了 ${tried} 家）`)
+  else if (tried) log(`本轮偷菜：去了 ${tried} 家，没有收获`)
   return { stolen, value }
 }

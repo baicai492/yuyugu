@@ -21,6 +21,17 @@ export const DEFAULTS = {
     maxRoundsPerTick: 8,         // 单次巡视最多几轮「规划→提交」
   },
 
+  // 还有额度没做完时，多快回来继续做一轮（秒）。
+  // 不设这些的话，会一直落到 maxSleep（10 分钟），白天有效时间被大幅浪费。
+  wake: {
+    help: 60,                    // 帮忙还有额度
+    gomoku: 60,                  // 五子棋计奖局没打完
+    arena: 300,                  // 擂台（打完会立刻返回，成本低）
+    // 连续几轮都没进展时的退避（避免「没对象可帮」还每 60 秒空转）
+    helpStall: 900,
+    gomokuStall: 900,
+  },
+
   // 投资
   invest: {
     enabled: true,

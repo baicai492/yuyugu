@@ -3,7 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
-import { planRound, nextWake } from './planner.mjs'
+import { planRound, nextWake, decisionSnapshot } from './planner.mjs'
 import { todayStartFromLedger } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
@@ -22,6 +22,9 @@ export class Engine {
     if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true })
     this.running = false
     this.halted = false
+    this.busy = false              // 正在巡视（防止「巡视一次」和定时巡视撞车）
+    this.wakeNow = false           // 外部要求立刻醒来（GUI 的「巡视一次」）
+    this.watchSnap = null          // 上一次巡视结束时的世界快照，用来发现突发变化
     this.logs = []
     this.memo = {}                 // 跨轮记忆（今日已帮谁、上次扫偷菜…）
     this.ledger = { day: '', earn: 0, spend: 0, tax: 0, startCoins: 0, startStock: 0 }
@@ -66,7 +69,7 @@ export class Engine {
   savePersist() {
     try {
       this.persist = {
-        day: this.ledger.day,
+        day: this.ledger.day || this.ledger.pendingDay || '',
         daily: { earn: this.ledger.earn, spend: this.ledger.spend, tax: this.ledger.tax },
         helped: [...(this.memo.helpedIds || [])],
         helpCount: this.memo.helpCount || 0,
@@ -156,9 +159,13 @@ export class Engine {
 
     // 关键：一轮可能要跑好几分钟（擂台 30 场就要 4 分钟）。
     // 必须一进来就把状态切成「工作中」，否则 GUI 整轮都显示上一轮留下的「已暂停」。
+    this.busy = true
     this.setStep('读取世界状态')
     await w.refresh()
     this.ensureLedger()
+    // 本轮巡视的起点，收尾时对比「这次巡视赚了多少」（和旧版一样的口径）
+    const startCoins = w.coins
+    const startStock = w.stockValue()
 
     // 市场供需反推（供卖货与预测）
     try {
@@ -168,12 +175,26 @@ export class Engine {
     } catch {}
 
     const s = w.state
-    const parts = []
-    parts.push(`岛日 ${R.isleDayNo(w.now)}（${R.SEASONS[w.season]}·${R.WEATHERS[w.weather]}·${R.isleHour(w.now)} 点）`)
-    parts.push(`D币 ${fmt(w.coins)}`)
-    parts.push(`体力 ${Math.floor(s.en)}/${R.energyMax(s)}`)
-    parts.push(`库存 ${fmt(w.stockValue())}`)
-    this.log(parts.join('｜'))
+    // 第一行：世界状态概览（和旧版一致）
+    this.log([
+      `岛日 ${R.isleDayNo(w.now)}（${R.SEASONS[w.season]}·${R.WEATHERS[w.weather]}·${R.isleHour(w.now)} 点）`,
+      `D币 ${fmt(w.coins)}`,
+      `体力 ${Math.floor(s.en)}/${R.energyMax(s)}`,
+      `库存 ${fmt(w.stockValue())}`,
+    ].join('｜'))
+
+    // 第二行：决策依据——每点体力各能干出多少，为什么选这个活
+    try {
+      const exp = M.expectedPrices(R, w.now, w.prices, { outlook: cfg.sell?.outlookDays ?? 3, external: w.externalSoldRatio || {} })
+      const d = decisionSnapshot(R, s, w.now, w.prices, exp, cfg)
+      const jobs = []
+      if (cfg.work?.fish) jobs.push(`钓鱼 ${fmt(d.fish)}`)
+      if (cfg.work?.mine) jobs.push(`挖矿 ${fmt(d.mine)}`)
+      if (cfg.work?.bomb) jobs.push(`炸矿 ${fmt(d.bomb)}`)
+      this.log(`每点体力收益：${jobs.join('  ')}｜口粮成本 ${d.foodName ? `${fmt(d.foodCost)}（${d.foodName}）` : '库存无口粮'}` +
+        `｜当前最优 ${d.bestJob}${d.worthWorking ? '' : '（不值得，收益低于口粮）'}` +
+        `｜地块 ${d.plotN - d.empty}/${d.plotN} 已种（${d.topCrop}）｜空 ${d.empty} 块`)
+    } catch (e) { /* 决策依据只是辅助信息，算不出来不影响主流程 */ }
 
     // ---------- 主规划 ----------
     let plan = { actions: [], summary: [] }
@@ -210,6 +231,8 @@ export class Engine {
           const r = await playGomoku(w, cfg, this.log.bind(this))
           totalEarn += r.coins || 0
           this.credit(r.coins || 0)
+          if (r.games > 0) this.memo.gomokuStall = 0
+          else if (r.fails > 0) this.memo.gomokuStall = (this.memo.gomokuStall || 0) + 1
         }
         if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) {
           this.setStep('52弟 · 小游戏')
@@ -236,6 +259,9 @@ export class Engine {
         const r = await helpDaily(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.coins || 0
         this.credit(r.coins || 0)
+        // 没帮到人就累加 stall，连续几次后 nextWake 会退避，避免空转
+        if (r.helped > 0) this.memo.helpStall = 0
+        else if (this.memo.helpCount < (cfg.social.help.perDay ?? 10)) this.memo.helpStall = (this.memo.helpStall || 0) + 1
       } catch (e) { this.log('帮忙出错：' + e.message, 'err') }
     }
 
@@ -253,11 +279,23 @@ export class Engine {
     if (totalEarn || totalSpend) {
       this.log(`本轮收支：+${fmt(totalEarn)} / −${fmt(totalSpend)}（税 ${fmt(totalTax)}）`)
     }
+    // 本次巡视小结：D币 + 库存 的变化（库存也要算，否则卖货那天会看着像亏了）
+    try {
+      await w.refresh()
+      const dCoins = w.coins - startCoins
+      const dStock = w.stockValue() - startStock
+      const dAll = dCoins + dStock
+      if (dCoins || dStock) {
+        this.log(`本次巡视：D币 ${fmt(startCoins)} → ${fmt(w.coins)}（${dCoins >= 0 ? '+' : ''}${fmt(dCoins)}）` +
+          `｜库存 ${fmt(startStock)} → ${fmt(w.stockValue())}（${dStock >= 0 ? '+' : ''}${fmt(dStock)}）` +
+          `｜合计 ${dAll >= 0 ? '+' : ''}${fmt(dAll)}`)
+      }
+    } catch {}
     this.snapshot()
 
     // ---------- 下次唤醒 ----------
     this.setStep('计算下次巡视时间')
-    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 600) : nextWake(w, cfg)
+    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 600) : nextWake(w, cfg, this.memo)
     this.status = {
       state: 'waiting',
       step: '',
@@ -267,6 +305,7 @@ export class Engine {
       lastError: '',
       lastRun: Date.now(),
     }
+    this.busy = false
     return { sleep, plan }
   }
 
@@ -308,13 +347,9 @@ export class Engine {
           continue
         }
         const { sleep } = await this.tick()
-        // 分段等待，便于快速响应暂停/停止
-        const until = Date.now() + sleep * 1000
-        while (this.running && Date.now() < until) {
-          await new Promise((r) => setTimeout(r, Math.min(2000, until - Date.now())))
-          if (!this.cfg.enabled) break
-        }
+        await this.idleWait(sleep)
       } catch (e) {
+        this.busy = false
         this.status = { ...this.status, state: 'error', lastError: e.message }
         this.log('巡视出错：' + e.message, 'err')
         await new Promise((r) => setTimeout(r, 15000))
@@ -323,6 +358,90 @@ export class Engine {
     this.status = { ...this.status, state: 'stopped', step: '' }
     this.log('托管已停止')
   }
+
+  /**
+   * 巡视之间的等待。
+   *
+   * 不是死等——每 20 秒轻量拉一次世界状态（只读，不提交），
+   * 发现「作物提前成熟 / 动物产出 / 蟹笼有货 / 有人偷了东西」就提前醒来。
+   * 突发情况（被人偷、地里有小偷记录）也会立刻处理。
+   *
+   * 轮询开销：一次 GET /api/pet/world，20 秒一次，不会触发写限流。
+   */
+  async idleWait(sleepSec) {
+    const until = Date.now() + sleepSec * 1000
+    const interval = Math.max(15, this.cfg.loop?.watchInterval ?? 20) * 1000
+    let lastCheck = 0
+    while (this.running && Date.now() < until) {
+      const step = Math.min(2000, until - Date.now())
+      await new Promise((r) => setTimeout(r, step))
+      if (!this.cfg.enabled) return
+      if (this.wakeNow) { this.wakeNow = false; this.log('手动唤醒，提前巡视'); return }
+      if (Date.now() - lastCheck < interval) continue
+      lastCheck = Date.now()
+      const reason = await this.watchOnce()
+      if (reason) { this.log('提前醒来：' + reason); return }
+    }
+  }
+
+  /**
+   * 轻量巡检：只读世界状态，判断有没有值得立刻巡视的变化。
+   * 返回醒来原因（字符串），没变化返回 ''。
+   */
+  async watchOnce() {
+    const w = this.world
+    if (!w?.ready) return ''
+    const R = w.R
+    try { await w.refresh() } catch { return '' }        // 网络抖动就当这次没查到
+
+    const s = w.state
+    const t = w.now
+    const weather = R.weatherOf(R.isleDay(t))
+    const prev = this.watchSnap || {}
+
+    // 1. 作物成熟了
+    let ripe = 0
+    for (let i = 0; i < s.plotN; i++) {
+      const p = s.plots[i]
+      if (!p) continue
+      const st = R.cropStage(p, t, R.sprinkled(s, i) || weather === 1)
+      if (st.stage === 3) ripe++
+    }
+    if (ripe > 0) return `${ripe} 块地成熟了`
+
+    // 2. 动物能收了 / 饿了
+    let animal = 0
+    for (const pen of s.barn) {
+      const st = R.animalReady(pen, t)
+      if (st.ready) animal++
+      else if (!st.retired && t - pen.f >= 8 * 3600) animal++
+    }
+    if (animal > 0) return `${animal} 个畜栏要处理`
+
+    // 3. 蟹笼有货
+    let trap = 0
+    for (const tr of s.traps) if (R.trapReady(tr, t, weather === 2).n) trap++
+    if (trap > 0) return `${trap} 个蟹笼有货`
+
+    // 4. 有人来偷了（地块上出现小偷记录）—— 突发，优先级最高
+    const stolen = (s.plots || []).filter((p) => p?.sv?.length).length
+    if (stolen > (prev.stolen || 0)) {
+      this.watchSnap = { stolen, coins: w.coins }
+      return `发现 ${stolen} 块地有小偷记录`
+    }
+    this.watchSnap = { stolen, coins: w.coins }
+
+    // 5. D币突然大幅变化（被罚 / 别人互动 / 结算）
+    const dCoins = w.coins - (prev.coins || w.coins)
+    if (prev.coins && Math.abs(dCoins) > 100000) {
+      return `D币突变 ${dCoins > 0 ? '+' : ''}${Math.round(dCoins).toLocaleString('en-US')}`
+    }
+
+    return ''
+  }
+
+  /** 让主循环立刻醒来巡视（GUI 用） */
+  requestTick() { this.wakeNow = true }
 
   stop() { this.running = false }
 

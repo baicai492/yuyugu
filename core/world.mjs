@@ -3,6 +3,8 @@
 import { randomUUID } from 'node:crypto'
 import * as RL from './rules.mjs'
 
+const fmt = (n) => Math.round(n).toLocaleString('en-US')
+
 export class World {
   constructor(client, log = () => {}) {
     this.client = client
@@ -87,16 +89,31 @@ export class World {
   logActions(batch, out) {
     const R = this.R
     const names = { plant: '种植', water: '浇水', harvest: '收获', clear: '清理', feed: '喂食', pet: '摸摸', collect: '收产物', trap: '收蟹笼', fish: '钓鱼', mine: '挖矿', bomb: '炸矿', craft: '加工', sell: '卖出', buy: '购买', upgrade: '升级', expand: '扩建', buyTrap: '买蟹笼', buyAnimal: '买动物', sellAnimal: '卖动物', goal: '领目标', coffee: '喝咖啡', eat: '进食', stockBuy: '货船进货', npc: '52弟', scratch: '刮刮乐', lotto: '彩票', warehouse: '囤货', nightClaim: '夜潮', storyRead: '纪事', guardRefund: '守家补偿' }
-    const ok = {}, fail = {}
+    const ok = {}, fail = {}, got = {}
+    let earn = 0, spend = 0, tax = 0
     out.forEach((o, k) => {
       const a = batch[k] || {}
       const key = names[a.a] || a.a
-      if (o?.ok) ok[key] = (ok[key] || 0) + 1
-      else if (o?.msg) fail[key + '：' + o.msg] = (fail[key + '：' + o.msg] || 0) + 1
+      if (o?.ok) {
+        ok[key] = (ok[key] || 0) + 1
+        earn += o.earn || 0; spend += o.spend || 0; tax += o.tax || 0
+        // 关键：把「具体拿到了什么」捞出来（旧版日志就是靠这个写得详细）
+        for (const g of o.got || []) {
+          const nm = (R.ITEM_NAME?.[g.id] || g.id) + (g.q ? '★'.repeat(g.q) : '')
+          got[nm] = (got[nm] || 0) + (g.n || 1)
+        }
+      } else if (o?.msg) {
+        fail[key + '：' + o.msg] = (fail[key + '：' + o.msg] || 0) + 1
+      }
     })
-    const part = Object.entries(ok).map(([k, n]) => `${k}×${n}`).join(' ')
-    if (part) this.log(`提交 ${batch.length} 条：${part}`)
-    for (const [k, n] of Object.entries(fail)) this.log(`  失败 ${n} 条：${k}`)
+    const kv = (o) => Object.entries(o).map(([k, n]) => `${k}×${n}`).join(' ')
+    let line = `提交 ${batch.length} 条：${kv(ok) || '全部失败'}`
+    if (earn) line += `｜收入 ${fmt(earn)}`
+    if (tax) line += `（已扣税 ${fmt(tax)}）`
+    if (spend) line += `｜支出 ${fmt(spend)}`
+    if (Object.keys(got).length) line += `｜获得 ${kv(got)}`
+    if (Object.keys(ok).length || Object.keys(fail).length) this.log(line)
+    for (const [k, n] of Object.entries(fail)) this.log(`  未成功 ${n} 次 → ${k}`)
   }
 
   // ---------- 常用派生量 ----------

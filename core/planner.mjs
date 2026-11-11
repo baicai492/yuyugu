@@ -99,6 +99,53 @@ export function bestCropFor(R, season, prices) {
 }
 
 /**
+ * 决策依据快照：把「每点体力能干出多少」这类判断摆到日志里。
+ * 旧版这行信息量最大——不看它根本不知道为什么程序选了钓鱼而不是挖矿。
+ */
+export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
+  const fmt = (n) => Math.round(n).toLocaleString('en-US')
+  const season = R.seasonOf(R.isleDay(t))
+  const useBait = cfg.work?.bait && (s.inv.bait?.[0] || 0) > 0
+  // 体力超上限时 room=0，foodChoices 会返回空（没有「恢复空间」）。
+  // 但口粮成本仍然是个有意义的参考值，这时按「不考虑上限」再算一遍。
+  let food = foodChoices(R, s, prices)
+  if (!food.length) food = foodChoices(R, { ...s, en: 0 }, prices)
+  const foodCost = Math.round(food[0]?.costPerEnergy ?? 0)
+  const foodName = food[0] ? (R.ITEM_NAME?.[food[0].id] || food[0].id) : ''
+
+  const perE = (v, cost) => (v > 0 ? Math.round(v / cost) : 0)
+  const fish = cfg.work?.fish ? perE(fishEV(R, s, t, expPrices, useBait), R.WORLD.cost.fish) : 0
+  const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick), R.WORLD.cost.mine) : 0
+  const bomb = cfg.work?.bomb ? perE(mineEV(R, s, expPrices, true), R.WORLD.cost.bomb) : 0
+
+  // 当前地里种得最多的作物 / 口粮地
+  const plantCount = {}
+  let empty = 0
+  for (let i = 0; i < s.plotN; i++) {
+    const p = s.plots[i]
+    if (!p) { empty++; continue }
+    plantCount[p.c] = (plantCount[p.c] || 0) + 1
+  }
+  const topCrop = Object.entries(plantCount).sort((a, b) => b[1] - a[1])[0]
+  const best = bestCropFor(R, season, expPrices)
+
+  const jobs = [['钓鱼', fish], ['挖矿', mine], ['炸矿', bomb]].filter(([, v]) => v > 0)
+  jobs.sort((a, b) => b[1] - a[1])
+
+  return {
+    season: R.SEASONS[season], weather: R.WEATHERS[R.weatherOf(R.isleDay(t))], hour: R.isleHour(t),
+    fish, mine, bomb, foodCost, foodName,
+    bestJob: jobs[0]?.[0] || '无',
+    // 赚的还不够口粮钱 → 不值得干
+    worthWorking: jobs.length ? jobs[0][1] > foodCost * (cfg.work?.minValueRatio ?? 1.2) : false,
+    empty, topCrop: topCrop ? `${R.ITEM_NAME?.[topCrop[0]] || topCrop[0]}×${topCrop[1]}` : '无',
+    bestCrop: best?.name || '无',
+    foodPlots: cfg.farm?.foodPlots ?? 0,
+    plotN: s.plotN,
+  }
+}
+
+/**
  * 主规划：返回 { actions, summary }
  */
 export function planRound(world, cfg, log = () => {}) {
@@ -265,7 +312,12 @@ export function planRound(world, cfg, log = () => {}) {
         ...Object.entries(r.in).map(([id, k]) => Math.floor(have(id) / k)),
       )
       if (n <= 0) continue
-      if (push({ a: 'craft', id: r.id, n })) { made += n; summary.push(`加工 ${r.name}×${n}`) }
+      if (push({ a: 'craft', id: r.id, n })) {
+        made += n
+        const cost = Object.entries(r.in).reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
+        const sale = (expPrices[r.id] || prices[r.id] || r.price) * n
+        summary.push(`加工 ${r.name}×${n}（成本 ${fmt(cost * n)} → 预期 ${fmt(sale)}，毛利 ${fmt(sale - cost * n)}）`)
+      }
     }
   }
 
@@ -326,17 +378,33 @@ export function planRound(world, cfg, log = () => {}) {
       }
       sells.push({ ...r, n })
     }
-    let sold = 0
+    let sold = 0, soldUnits = 0, soldGross = 0
+    const soldNames = []
     for (const r of sells.slice(0, cfg.sell.maxSellPerRound || 40)) {
+      let units = 0
       // 按品质从高到低卖
       for (let q = 2; q >= 0 && r.n > 0; q--) {
         const have = R.b12Available(s, r.id, q)
         if (have <= 0) continue
         const take = Math.min(999, have, r.n)
-        if (push({ a: 'sell', id: r.id, q, n: take })) { r.n -= take; sold++ }
+        if (push({ a: 'sell', id: r.id, q, n: take })) { r.n -= take; sold++; units += take }
+      }
+      if (units > 0) {
+        soldUnits += units
+        soldGross += r.cur * units
+        const pctTxt = `${r.curPct >= 0 ? '+' : ''}${(r.curPct * 100).toFixed(0)}%`
+        soldNames.push(`${r.name}×${units}（现价${pctTxt}${r.peakIn > 0 ? `，峰值在 ${r.peakIn} 个岛日后` : '，已在峰值'}）`)
       }
     }
-    if (sold) summary.push(`卖出 ${sold} 格`)
+    if (sold) {
+      summary.push(`卖出 ${sold} 格 / ${soldUnits} 件，约 ${fmt(soldGross)} D`)
+      for (const s2 of soldNames.slice(0, 8)) summary.push(`  · ${s2}`)
+    }
+    // 没卖但值得等：也记一笔，方便判断策略是否合理
+    const waiting = plan.rows.filter((r) => !r.sellNow && r.gain > 0).slice(0, 3)
+    for (const r of waiting) {
+      summary.push(`  · ${r.name}×${r.qty} 暂不卖：峰值 ${(r.peakPct * 100).toFixed(0)}%（+${r.peakIn} 个岛日），可多赚 ${fmt(r.gain)} D`)
+    }
   }
 
   // ---------- 10. 货船进货 ----------
@@ -419,7 +487,7 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
 }
 
 /** 下一次该醒来的时刻（秒） */
-export function nextWake(world, cfg) {
+export function nextWake(world, cfg, memo = {}) {
   const R = world.R
   const t = world.now
   const s = world.state
@@ -476,6 +544,49 @@ export function nextWake(world, cfg) {
     }
   }
 
+  // ---------- 每日额度没做完：缩短间隔（wake 参数由调用方传入） ----------
+  // 这些事不受「作物成熟」等物理事件驱动，只要还有额度就该去做，
+  // 否则会一直落到 maxSleep（10 分钟），白白空转。
+  const day = R.worldDay(t)
+  const dayLeft = Math.max(1, R.b12NextIsleBoundary(t) - t)
+  const w = cfg.wake || {}
+
+  // 帮忙：每天 N 家，还有剩就尽快（每轮做完可继续，间隔取 minSleep）
+  // 但如果连续几轮都没帮到人（目录里没有可帮的），就退避，别每 60 秒空转。
+  if (cfg.social?.help?.enabled) {
+    const done = (memo.helpDay === day ? (memo.helpCount || 0) : 0)
+    const need = (cfg.social.help.perDay ?? 10) - done
+    const stall = memo.helpStall || 0
+    if (need > 0 && s.en >= (cfg.social.help.minEnergy ?? 20)) {
+      push(stall >= 3 ? Math.min(w.helpStall ?? 900, dayLeft) : (w.help ?? 60))
+    }
+  }
+
+  // 五子棋：每天前 N 局计奖，没打完就尽快
+  if (cfg.npc?.enabled && cfg.npc.gomoku) {
+    const used = (s.enDay === day ? (s.cnt?.npc || 0) : 0)
+    const paid = s.cnt?.gomokuPaid || 0
+    const left = Math.min((cfg.npc.gomokuMaxGames ?? 10) - paid, R.NPC.daily - used)
+    const stall = memo.gomokuStall || 0
+    // 连续解不出棋谱时也别空转
+    if (left > 0) push(stall >= 3 ? Math.min(w.gomokuStall ?? 900, dayLeft) : (w.gomoku ?? 60))
+  }
+
+  // 擂台：每天 N 场有掉落，没打完就尽快
+  // 打满之后 arenaDaily 会直接返回，所以给个宽一点的间隔即可。
+  if (cfg.arena?.enabled) {
+    push(w.arena ?? 300)
+  }
+
+  // 偷菜：扫描间隔到了就该去（不加这个会一直等 maxSleep，实际扫描被拖慢）
+  if (cfg.social?.steal?.enabled) {
+    const last = memo.stealScanAt || 0
+    const every = cfg.social.steal.scanEvery ?? 1800
+    const left = Math.max(0, every - (t - last))
+    push(left > 0 ? left : 5)
+  }
+
+  // 兜底：没有更早的事件时也别睡太久
   cands.push(cfg.loop?.maxSleep || 600)
   return Math.min(...cands, cfg.loop?.maxSleep || 600)
 }

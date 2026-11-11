@@ -73,10 +73,15 @@ export async function playGomoku(world, cfg, log = () => {}) {
   }
 
   if (games) {
-    const itemStr = Object.entries(items).map(([k, n]) => `${k}×${n}`).join(' ')
-    log(`五子棋 ${wins}/${games} 胜，+${Math.round(coins).toLocaleString('en-US')} D${itemStr ? '，' + itemStr : ''}`)
+    const itemStr = Object.entries(items).map(([k, n]) => `${k}×${n}`).join('  ')
+    const avg = wins > 0 ? Math.round(coins / wins) : 0
+    log(`五子棋 ${wins}/${games} 胜（难度 ${level}，胜率 ${Math.round(wins / games * 100)}%）` +
+      `｜奖励 +${Math.round(coins).toLocaleString('en-US')} D（每胜均 ${avg.toLocaleString('en-US')} D）` +
+      (itemStr ? `｜掉落 ${itemStr}` : ''))
+  } else if (fails > 0) {
+    log(`五子棋：${fails} 次没搜到必胜棋谱，本轮未提交（不交输棋）`)
   }
-  return { games, wins, coins, items }
+  return { games, wins, coins, items, fails }
 }
 
 /** 其他小游戏（期望中性，默认不打） */

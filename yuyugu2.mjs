@@ -65,6 +65,9 @@ async function main() {
   const world = new World(client, log0)
   const engine = new Engine({ world, cfg })
   engine.log = engine.log.bind(engine)
+  // 世界层（提交动作后的「收入/支出/获得什么」）也要写进日志文件，
+  // 否则这些明细只出现在终端里，GUI 的历史记录看不到。
+  world.log = (m) => engine.log(m)
 
   process.stdout.write('拉取世界状态… ')
   try {
