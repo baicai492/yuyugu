@@ -197,7 +197,9 @@ export const DEFAULTS = {
     openChests: true,            // 自动开宝箱（每 3 场 1 个，每天 5 个）
     autoEquip: true,
     autoPoints: true,
-    pointsPlan: 'atk',           // atk 攻击流 / vit 生存流 / agi 闪避流
+    // 'auto' = 按 battle.mjs 的加点算法（攻击断点 + 零速必暴武器补速度）；
+    // 也兼容旧值 atk/vit/agi/spd：全部自由点堆一项。
+    pointsPlan: 'auto',
     train: false,                // 花钱突破训练（默认关）
     trainBudget: 0,
     // 养大肥鱼：只影响守家/偷菜的对战胜负，不直接赚钱。
@@ -205,6 +207,32 @@ export const DEFAULTS = {
     // 每天总预算包含训练、买史诗装备和强化。
     spend: 'auto',
     dailyBudget: 150000,
+  },
+
+  // 大肥鱼战斗策略：对手档案 + 蒙特卡洛模拟 + 战前换装。
+  // 移植自榜一的 combat-engine：装备评分看被动/技能而不只是面板，
+  // 加点走断点，擂台/偷菜前按对手档案临时换装，打完立刻穿回静止装。
+  battle: {
+    accountKey: 'main',
+    profileStore: '',            // 留空 = logs/battle-profiles.json
+    lockRoot: '',                // 留空 = logs/.locks
+    // 换装是要发 POST 的（2.15 秒/次），只在模拟显著提高胜率时才换。
+    tacticalSwap: true,          // 擂台战前换装
+    stealSwap: true,             // 偷菜战前换装（还要求 arena.autoEquip=true）
+    guardPosterior: true,        // 用档案模拟守家胜率算偷菜 EV（关掉退回等级差公式）
+    // 增量同步战报：擂台 history（双方面板）+ 守家日志（来袭者面板）。
+    // 都按 lastId 增量，平时只多两个 GET。
+    profileSync: true,
+    guardSync: true,
+    homeSyncMax: 6,
+    guardSyncMax: 8,
+    trials: 800,                 // 擂台每套候选装备的模拟局数
+    guardTrials: 400,            // 偷菜前每家的模拟局数（要快，别拖过解禁窗口）
+    minGain: 0.005,              // 换装至少提高 0.5% 期望效用
+    zThreshold: 2.0,             // 且配对检验 z > 2（避免为噪音换装）
+    guardBlockSec: 600,          // 打输/负期望后多久不再碰这座岛（秒）
+    gearCacheSec: 600,           // 装备页缓存（秒）
+    homeHpMult: 1.1,             // 守家方 HP 加成（arena 快照回退到 guard 时补乘）
   },
 
   // 串门

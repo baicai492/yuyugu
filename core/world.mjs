@@ -11,6 +11,9 @@ export class World {
     this.log = log
     this.state = null      // state
     this.rev = 0
+    // 串门接口（visit/help）返回的 state 是「对方岛」的，rev 也随之作废。
+    // 标脏后，下一次 act() 前必须先重新拉自家世界状态（见 social.mjs 的说明）。
+    this.revDirty = false
     this.coins = 0
     this.prices = {}
     this.now = 0
@@ -38,7 +41,11 @@ export class World {
       RL.configureClock(j.clockStart)
     }
     this.state = j.state
-    if (j.rev != null) this.rev = j.rev
+    if (j.rev != null) {
+      this.rev = j.rev
+      // 拿到带 rev 的自家快照，「状态已过期」的标记就可以清了。
+      this.revDirty = false
+    }
     if (j.coins != null) this.coins = j.coins
     if (j.prices) this.prices = j.prices
     if (j.now) {
@@ -91,6 +98,9 @@ export class World {
   async act(actions, { silent = false } = {}) {
     const R = this.R
     if (!actions.length) return { out: [], spend: 0, earn: 0 }
+    // 刚串门/帮过忙：手里的 state 和 rev 都是对方岛的，直接发动作必被 409 打回。
+    // 先重新拉一次自家世界状态（一次 GET，代价远小于一轮动作全部作废）。
+    if (this.revDirty) await this.refresh()
     const batches = []
     const max = R.WORLD.maxActions
     for (let i = 0; i < actions.length; i += max) batches.push(actions.slice(i, i + max))

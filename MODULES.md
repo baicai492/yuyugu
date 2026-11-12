@@ -387,6 +387,26 @@ AI 只能堵一个，另一手就赢了。
 押注 100–20,000，站点抽 5%，10 分钟过期，同一对每天 2 场，每人每天押注上限 10 万。
 **不给经验、不给掉落**，且是零和的（扣 5% 抽成）→ **不做**。
 
+### 11.6 本程序的战斗策略（`core/battle.mjs`）
+
+规则表来自站点 `/api/pet/battle/:id` 返回的 38 条技能，落盘为 `core/battle-rules.json`
+（20 条通用招式 + 18 条武器技），与线上同源；站点改版时要重新比对一次。
+
+- **单场模拟**：最多 20 回合；武器技优先，通用招式按等级/已学列表从强到弱判定；
+  支持 heal / shield / evade / focus / stun / weak / burn / drain / crit / 多段，
+  以及护符被动 revive / lifesteal / thorns / counter / first / evade。
+- **多局模拟**：固定种子 + 配对采样，同一套装备组合之间用配对标准误比较；
+  擂台效用 = 胜 + 0.5×平，守家效用 = 胜 − 0.2×负（输了要赔钱）。
+- **装备评分**：`(atk×10 + spd×8 + agi×8 + def×3 + hp×0.5) × 0.30 × (1+0.04×enh)`
+  ＋护符被动（复活 val×1200 / 吸血 ×620 / 反击 ×320 / 其他 35）＋稀有度与武器技能。
+- **加点**：攻击按面板断点加（2/4/7/9/12/14/17/19/22/24…），agi 恒为 0；
+  零速必暴武器（如舞狮头）先把 spd 补到 4，穿上后若面板 spd < 19 再逐点 +1（上限 6）。
+- **换装判定**：每槽取评分前 N（武器 4 / 护甲 3 / 护符 5）＋当前静止装做笛卡尔积，
+  只有当期望提升 ≥ `minGain`（0.5%）且配对 z > `zThreshold`（2.0）才换。
+- **对手档案**：擂台 history、守家日志、偷菜 `visit` 响应里的 `battle` 都增量入档
+  （`logs/battle-profiles.json`）；arena 快照回退成守家快照时 hp ×1.1（守家加成）。
+  档案里记录 observedPanels（真实 breakdown），用于反推裸装基础值、收窄模拟区间。
+
 ---
 
 ## 12. 站宠养成 / 悬浮
@@ -479,6 +499,22 @@ POST /api/pet/world/board/:id      {operation, text}
 GET  /api/pet/world/guard-log?cursor=
 POST /api/pet/world/favorite/:id   {active}
 ```
+
+### 13.6 守家战与偷菜 EV（`core/social.mjs` + `core/battle.mjs`）
+
+```
+ev = (1−发现率) × 货值
+   + 发现率 × (pWin×(货值+每处多拿1) + pDraw×0 − pLoss×罚款)
+   − 体力 × 体力机会成本
+```
+
+- 有对手档案：`pWin/pDraw/pLoss` 来自模拟（默认 400 局，静态装 + 换装后的较优者）。
+- 无档案：退回 `pWin = clamp(0.5 + (我的等级 − 对方等级)×0.15, 0.03, 0.95)`。
+- 偷菜的 `visit` 响应带 `battle` 时直接 `recordBattleSnapshot(...,'guard')`，
+  所以打过一次的邻居，下次偷之前就知道该不该去、该穿什么。
+- 打输或算出负期望 → 该岛进 `stealBlockAt`，默认 600 秒内不再排（旧版是 1 小时）。
+- 掐点路径在**等待解禁的间隙**完成换装（提前量里已计入 3×2.2 秒），
+  偷完在 `finally` 穿回静止防守装。
 
 ---
 

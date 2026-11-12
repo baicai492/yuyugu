@@ -78,7 +78,7 @@ async function loadStatus() {
     status = j.status
     config = j.config
     renderOverview()
-    $('ver').textContent = 'v' + (j.version || 1)
+    $('ver').textContent = 'v' + (j.version || 3)
   } catch (e) {
     // 重启空窗、进程刚退出都会走到这里。进行中的重启不算故障；
     // 其它情况才报，并且下一次读取成功时由 renderOverview 覆盖掉。
@@ -351,6 +351,7 @@ async function saveXianCfg(mut) {
 // 三态开关（旧版 popup 的「花 D币 养大肥鱼」）：值可能是布尔，也可能是字符串 'auto'，
 // 所以下拉框的 value 用 JSON 编码，读回来再解析，避免 "true" 被当成字符串。
 const SPEND_OPTS = [['开了偷菜或离线时才花', 'auto'], ['总是', true], ['从不', false]]
+const POINTS_OPTS = [['自动（按面板断点）', 'auto'], ['全加力量', 'atk'], ['全体质', 'vit'], ['全敏捷', 'agi'], ['全速度', 'spd']]
 
 const FIELD_GROUPS = [
   {
@@ -462,6 +463,23 @@ const FIELD_GROUPS = [
       'arena.dailyBudget': '训练 + 买装 + 强化合计每天最多花这么多',
     },
     selects: { 'arena.spend': SPEND_OPTS },
+  },
+  {
+    title: '擂台 · 战斗策略',
+    fields: ['arena.pointsPlan', 'battle.tacticalSwap', 'battle.stealSwap', 'battle.guardPosterior'],
+    labels: {
+      'arena.pointsPlan': '加点方案',
+      'battle.tacticalSwap': '擂台战前换装',
+      'battle.stealSwap': '偷菜战前换装',
+      'battle.guardPosterior': '用对手档案模拟胜率',
+    },
+    hints: {
+      'arena.pointsPlan': '自动 = 按攻击断点加点，零速必暴武器先补速度；也可强制全堆一项',
+      'battle.tacticalSwap': '每场按对手面板模拟，换装显著提高胜率才换，打完自动穿回静止装',
+      'battle.stealSwap': '需要上面的「自动换装」开着；换装时间已计入掐点提前量',
+      'battle.guardPosterior': '关掉就退回「0.5 + 等级差×0.15」的旧胜率公式',
+    },
+    selects: { 'arena.pointsPlan': POINTS_OPTS },
   },
   {
     title: '串门 · 帮忙',

@@ -9,6 +9,10 @@ import {
   WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC,
 } from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
+import {
+  computeGuardPosteriorForTarget, executeWithTacticalLoadout, recordBattleSnapshot,
+  fetchGear, loadObservedPanels, defaultProfileStorePath, defaultLockRoot,
+} from './battle.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -37,7 +41,12 @@ export async function visitInfo(world, id) { return wget(world, 'visit/' + id) }
  */
 export async function helpIsle(world, id) {
   const r = await wpost(world, 'help/' + id, { operation: randomUUID() })
-  if (r.state) world.accept({ state: r.state })
+  // 注意：串门类接口返回的 r.state 是**对方岛**的状态，rev 也被服务端作废
+  // （站点前端在串门期间把 rev 置 -1，回自家岛才重新拉一次）。
+  // 以前这里把 r.state 塞回 world.state，等于把自家世界换成了邻居的：
+  // 同一轮紧接着开五子棋时，本地读到的是邻居的 cnt.gomokuPaid，
+  // 于是在「今日计奖 10/10」已满时仍然发 start，被 409「小岛状态已变化」打回。
+  world.revDirty = true
   return r.result || {}
 }
 
@@ -557,7 +566,8 @@ export async function ensureThiefItems(world, cfg, log = () => {}) {
 /** 偷一家（一批全偷） */
 export async function stealIsle(world, id) {
   const r = await wpost(world, 'visit/' + id, { operation: randomUUID(), kind: 'all', i: 0 })
-  if (r.state) world.accept({ state: r.state })
+  // 同上：r.state 是对方岛的，不能拿来覆盖自家的世界状态；只标脏。
+  world.revDirty = true
   return r
 }
 
@@ -617,6 +627,86 @@ function waveTargets(schedule, watch, now, leadSec, limit = 5, prices = {}) {
     .slice(0, limit)
 }
 
+// ---------- 守家档案 / 战前换装 ----------
+
+/**
+ * 偷菜侧的战斗上下文。
+ *
+ * 以前守家胜率是「0.5 + 等级差×0.15」——既没看对方真实面板，
+ * 也没考虑我们能换装备。这里接上榜一的方案：
+ *   · 从战报档案里取出对手的守家面板；
+ *   · 跑蒙特卡洛模拟算出赢/平/输三结局；
+ *   · 若换装能显著提高胜率（z > 2），就在解禁前把装备换好，偷完还原。
+ * 全部关掉时（battle.guardPosterior=false / arena.autoEquip=false）退回旧公式。
+ */
+function stealBattleCtx(cfg) {
+  const b = cfg.battle || {}
+  return {
+    on: cfg.arena?.enabled && cfg.arena?.autoEquip !== false && b.stealSwap !== false && b.guardPosterior !== false,
+    storePath: b.profileStore || defaultProfileStorePath(),
+    lockRoot: b.lockRoot || defaultLockRoot(),
+    accountKey: b.accountKey || 'main',
+    trials: b.guardTrials ?? 400,
+    minGain: b.minGain ?? 0.005,
+    zThreshold: b.zThreshold ?? 2.0,
+    blockSec: b.guardBlockSec ?? 600,
+  }
+}
+
+const gearFnFor = (world) => () => world.client.get('/api/pet/battle/gear')
+const equipSlotFnFor = (world) => async (slot, item) => {
+  try {
+    const body = await world.client.post('/api/pet/battle/equip', { slot, item })
+    return { status: 200, body }
+  } catch (e) {
+    // 交给调用方按「状态未知」处理：它会重新拉一次装备页确认实际穿着。
+    return { status: e.status ?? 0 }
+  }
+}
+
+/** 拉装备页 + 给有守家的目标附上模拟胜率（没有档案的目标保持旧公式）。 */
+async function prepareStealBattle(world, cfg, memo, targets) {
+  const bc = stealBattleCtx(cfg)
+  if (!bc.on) return null
+  let gear
+  try {
+    gear = await fetchGear(world, memo, { maxAge: cfg.battle?.gearCacheSec ?? 600 })
+  } catch { return null }
+  if (!gear?.catalog) return null
+  const observed = loadObservedPanels(bc.accountKey, bc.lockRoot)
+  let simulated = 0
+  for (const t of targets) {
+    if (!t.guard) { t.pWin = 1; t.pLoss = 0; t.pDraw = 0; continue }
+    try {
+      const post = computeGuardPosteriorForTarget(gear, t.id, {
+        knownOpponentLevel: t.level || null,
+        observedPanels: observed,
+        storePath: bc.storePath,
+        trials: bc.trials,
+        minGain: bc.minGain,
+        zThreshold: bc.zThreshold,
+      })
+      if (post) {
+        t.pWin = post.winRateMid
+        t.pLoss = post.lossRateMid
+        t.pDraw = post.drawRate
+        t._post = post
+        simulated++
+      }
+    } catch { /* 单条档案坏了不影响其他目标 */ }
+  }
+  return { ...bc, gear, simulated }
+}
+
+/** 从排好序的目标里挑一个「换装后胜率显著更高」的，作为这一波的战前准备。 */
+function pickSwapTarget(ranked) {
+  for (const { t } of ranked) {
+    const dec = t?._post?.decision
+    if (dec?.switched && dec.loadout) return { t, decision: dec }
+  }
+  return null
+}
+
 export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const st = cfg.social?.steal
   if (!st?.enabled) return { stolen: 0, value: 0 }
@@ -629,7 +719,12 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   // 提前量 T_prep：配置显式指定就照用，否则按「这一波有几家」算——
   // 醒来后要串行访问每一家（约 1.5 秒/家），访问完最后一家刚好越过解禁点。
   // 固定 8 秒时，一波 4~5 家根本访问不完，第一家还没提交就过窗口了。
-  const leadSec = st.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, world.now)
+  // 开了战前换装的话还要再留出 3 个槽位的 POST 时间（约 6.6 秒），
+  // 否则换完装解禁时刻已经过去。
+  const tacticalPrepHint = stealBattleCtx(cfg).on
+  const leadSec = st.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, world.now, {
+    gearSwaps: tacticalPrepHint ? 3 : 0,
+  })
 
   // 先把「已经处理过 / 已经失效」的解禁记录清掉，再判断要不要绕过扫描间隔。
   //
@@ -740,6 +835,63 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
         const waitMs = Number.isFinite(waveAt)
           ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
           : 0
+
+        // 战前准备：拉装备页 + 用对手档案模拟这一波每家的守家胜率。
+        // 装备页是 GET（不节流），模拟是本地计算，几百毫秒内完成。
+        const ctx = await prepareStealBattle(world, cfg, memo, out)
+        const myLevel = memo.arenaLevel || 1
+        const rankedPrep = out
+          .map((t) => ({ t, ev: stealEV(t, myLevel, st.energyValue ?? 300) }))
+          .sort((a, b) => b.ev - a.ev)
+        const swap = ctx ? pickSwapTarget(rankedPrep) : null
+
+        if (swap) {
+          // 道具（24 小时有效）先买好，再换装，最后用剩余时间等解禁。
+          // 三者都是串行 POST，顺序反过来会把换装挤到解禁之后。
+          try { await ensureThiefItems(world, cfg, log) } catch {}
+          const sleepUntilUnlock = async () => {
+            const ms = Number.isFinite(waveAt)
+              ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+              : 0
+            if (ms > 0) {
+              log(`偷菜：换好守家装，距解禁还有 ${(ms / 1000).toFixed(1)} 秒，等到点再动手`)
+              await sleep(Math.min(ms, 30000))
+            }
+          }
+          try {
+            const rr = await executeWithTacticalLoadout({
+              accountKey: ctx.accountKey,
+              lockRoot: ctx.lockRoot,
+              opponentId: swap.t.id,
+              mode: 'guard',
+              knownOpponentLevel: swap.t.level || null,
+              storePath: ctx.storePath,
+              precomputedDecision: swap.decision,
+              getGearFn: gearFnFor(world),
+              equipSlotFn: equipSlotFnFor(world),
+              waitBeforeActionFn: sleepUntilUnlock,
+              actionFn: async () => {
+                try { return await stealFromTargets(world, cfg, log, memo, out, { tactical: false, ctx }) }
+                catch (e) { return { stolen: 0, value: 0, error: e } }
+              },
+              trials: ctx.trials,
+              minGain: ctx.minGain,
+              zThreshold: ctx.zThreshold,
+            })
+            if (rr?.result) {
+              if (rr.result.error) log('偷菜出错：' + rr.result.error.message)
+              if (!rr.restoreOk) log(`偷菜后恢复静止装失败（${rr.restoreError}），下次运行会先恢复`)
+              return rr.result
+            }
+            // 换装没成功（preEquipError）：退回静止装路径，仍在窗口内就继续偷。
+            log('偷菜：战前换装未完成，按静止装直接上')
+          } catch (e) {
+            log('偷菜：守家换装出错（' + e.message + '），按静止装直接上')
+          }
+        } else if (ctx?.simulated) {
+          log(`偷菜：这波有 ${ctx.simulated} 家可按档案模拟守家，静止装已是最优或提升不显著，不换装`)
+        }
+
         // 道具（24 小时有效）在等待期间先买好：解禁那一刻只发偷菜请求，
         // 别让一次买道具的 POST 把提交拖到窗口之后。
         if (waitMs > 3000) await ensureThiefItems(world, cfg, log)
@@ -752,7 +904,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
           // 访问没跑完就到点，等待被截断、提前提交被服务端拒掉。
           await sleep(Math.min(leftMs, 30000))
         }
-        return await stealFromTargets(world, cfg, log, memo, out)
+        return await stealFromTargets(world, cfg, log, memo, out, { ctx })
       }
       // 到点了但货已经没了（被抢 / 被偷满）。把这些过时记录清掉，
       // 否则下一轮还是 overdue，主循环会被它反复催醒。
@@ -782,17 +934,21 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
  */
 
 /** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
-async function stealFromTargets(world, cfg, log, memo, targets) {
+async function stealFromTargets(world, cfg, log, memo, targets, { tactical = true, ctx = null } = {}) {
   const st = cfg.social?.steal
   const R = world.R
   let stolen = 0, value = 0, tried = 0
   // 有目标但一个都偷不了时，说明是体力不够。要说明白，
   // 否则日志里只有「找到 N 家可偷」然后什么都没发生，看不出原因。
   let starved = 0
-  // 我的等级：决定守家战的胜率（旧版 myWhale 缓存 10 分钟）。
+  // 我的等级：对手档案缺失时用它估算守家胜率（旧版 myWhale 缓存 10 分钟）。
   // arenaDaily 每轮都会跑，等级写在 memo.arenaLevel 里；没有就当 1 级（保守）。
   const myLevel = memo.arenaLevel || 1
   const energyValue = st.energyValue ?? 300
+  const minEV = st.minEV ?? st.minValue ?? 3000
+  // 有档案就按模拟出的赢/平/输三结局算期望；没有档案的目标仍用等级差公式。
+  const bc = ctx || await prepareStealBattle(world, cfg, memo, targets)
+  const blockSec = bc?.blockSec ?? 600
   // 按期望收益从高到低排。
   //
   // 以前是按「扫描/巡逻返回的顺序」（目录顺序）去偷，体力又受 visitsPerScan
@@ -808,107 +964,169 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
   const canPay = (needE) => world.state.en >= needE || !!energyActions(R, world.state, world.prices, {
     need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
   })
-  const worth = ranked.some(({ t, ev }) => ev >= (st.minEV ?? st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
+  const worth = ranked.some(({ t, ev }) => ev >= minEV && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
   if (worth) await ensureThiefItems(world, cfg, log)
-  let skippedEV = 0
-  for (const { t: tg, ev } of ranked) {
-    if (tried >= (st.visitsPerScan ?? 8)) break
-    const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
-    // 打输过的岛一小时不去（旧版：v.check = max(v.check, now+3600)）。
-    // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
-    const loseAt = memo.stealLoseAt?.[tg.id] || 0
-    if (world.now - loseAt < 3600) continue
-    // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
-    // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
-    // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
-    // ev 在排序时已经算过一次，这里直接复用。
-    if (ev < (st.minEV ?? st.minValue ?? 3000)) { skippedEV++; continue }
-    // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
-    // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，
-    // 而补体力只要几十上百 D。上限 steal.maxEnergyCost 防止口粮太贵时倒亏。
-    if (world.state.en < needE) {
-      const acts = energyActions(R, world.state, world.prices, {
-        need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
-      })
-      if (!acts?.length) { starved++; continue }
-      try {
-        const beforeE = Math.floor(world.state.en)
-        const r = await world.act(acts, { silent: true })
-        const ok = (r.out || []).filter((o) => o?.ok).length
-        if (ok) log(`  偷 ${tg.name} 体力不够（${beforeE} < ${needE}），吃口粮补到 ${Math.floor(world.state.en)}（花 ${Math.round(r.spend || 0).toLocaleString('en-US')} D）`)
-      } catch (e) { log(`  偷 ${tg.name} 补体力失败：${e.message}`) }
-      if (world.state.en < needE) { starved++; continue }
-    }
-    tried++
-    try {
-      const r = await stealIsle(world, tg.id)
-      const res = r.result || {}
-      const unitOf = (id) => world.prices[id] || R.BASE_PRICE[id] || 0
-      const nameOf = (id) => R.ITEM_NAME?.[id] || id
 
-      if (res.outcome === 'win') {
-        // 服务端返回 res.items = [[id, n], ...]，可能不止一种货
-        const items = res.items?.length ? res.items : (res.item ? [[res.item, res.n || 1]] : [])
-        const spots = res.spots || tg.targets?.length || 1
-        let thisValue = 0
-        for (const [id, n] of items) thisValue += unitOf(id) * n
-        stolen += spots
-        value += thisValue
-
-        // 明细：偷了谁、几处、每样东西多少件、单价、合计
-        const detail = items.map(([id, n]) => {
-          const u = unitOf(id)
-          return `${nameOf(id)}×${n}（${Math.round(u).toLocaleString('en-US')} D/个 = ${Math.round(u * n).toLocaleString('en-US')} D）`
-        }).join('　')
-        log(`偷 ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）成功：扫 ${spots} 处 → ${detail || `共 ${res.n || 1} 件`}｜合计 ${Math.round(thisValue).toLocaleString('en-US')} D`)
-        if (r.battle) {
-          const b = r.battle
-          const win = b.win ?? b.result === 'win' ?? res.outcome === 'win'
-          log(`  守家战${win ? '打赢了' : '打完'}：${b.log?.slice?.(-1)?.[0] || ''}${res.xp ? `，+${res.xp} 擂台经验` : ''}`.trim())
-        }
-      } else if (res.outcome === 'lose') {
-        const spots = res.spots || 1
-        // 打不过的岛一小时不再去（旧版：v.check = max(v.check, now + 3600)）。
-        // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
-        ;(memo.stealLoseAt ||= {})[tg.id] = world.now
-        log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
-          (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）') +
-          '，这座岛一小时内不再去')
-      } else {
-        log(`偷 ${tg.name}（Lv${tg.level}）打平：${res.spots || 1} 处，谁也没占便宜`)
+  // 真正动手的那段。抽成闭包是为了能整体套在「换装 → 偷 → 还原」里：
+  // finally 一定会把静止防守装换回去，不会被中途的异常绕过。
+  const runSteals = async () => {
+    let skippedEV = 0
+    for (const { t: tg, ev } of ranked) {
+      if (tried >= (st.visitsPerScan ?? 8)) break
+      // 负期望的守家岛：模拟结果十分钟内不会反转，先排掉，省得每轮重算重跑。
+      const blockAt = memo.stealBlockAt?.[tg.id] || 0
+      if (world.now - blockAt < blockSec) continue
+      const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
+      // 打输过的岛一小时不去（旧版：v.check = max(v.check, now+3600)）。
+      // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
+      const loseAt = memo.stealLoseAt?.[tg.id] || 0
+      if (world.now - loseAt < 3600) continue
+      // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
+      // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
+      // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
+      // ev 在排序时已经算过一次，这里直接复用。
+      if (ev < minEV) {
+        skippedEV++
+        if (ev < 0 && tg.guard) (memo.stealBlockAt ||= {})[tg.id] = world.now
+        continue
       }
-      if (r.energy != null) {
-        const spent = (world.state.en || 0) - r.energy
-        log(`  体力 ${Math.round(world.state.en)} → ${r.energy}${spent > 0 ? `（−${Math.round(spent)}）` : ''}`)
-        world.state.en = r.energy
+      // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
+      // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，
+      // 而补体力只要几十上百 D。上限 steal.maxEnergyCost 防止口粮太贵时倒亏。
+      if (world.state.en < needE) {
+        const acts = energyActions(R, world.state, world.prices, {
+          need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
+        })
+        if (!acts?.length) { starved++; continue }
+        try {
+          const beforeE = Math.floor(world.state.en)
+          const r = await world.act(acts, { silent: true })
+          const ok = (r.out || []).filter((o) => o?.ok).length
+          if (ok) log(`  偷 ${tg.name} 体力不够（${beforeE} < ${needE}），吃口粮补到 ${Math.floor(world.state.en)}（花 ${Math.round(r.spend || 0).toLocaleString('en-US')} D）`)
+        } catch (e) { log(`  偷 ${tg.name} 补体力失败：${e.message}`) }
+        if (world.state.en < needE) { starved++; continue }
+      }
+      tried++
+      try {
+        const r = await stealIsle(world, tg.id)
+        const res = r.result || {}
+        const unitOf = (id) => world.prices[id] || R.BASE_PRICE[id] || 0
+        const nameOf = (id) => R.ITEM_NAME?.[id] || id
+
+        if (res.outcome === 'win') {
+          // 服务端返回 res.items = [[id, n], ...]，可能不止一种货
+          const items = res.items?.length ? res.items : (res.item ? [[res.item, res.n || 1]] : [])
+          const spots = res.spots || tg.targets?.length || 1
+          let thisValue = 0
+          for (const [id, n] of items) thisValue += unitOf(id) * n
+          stolen += spots
+          value += thisValue
+
+          // 明细：偷了谁、几处、每样东西多少件、单价、合计
+          const detail = items.map(([id, n]) => {
+            const u = unitOf(id)
+            return `${nameOf(id)}×${n}（${Math.round(u).toLocaleString('en-US')} D/个 = ${Math.round(u * n).toLocaleString('en-US')} D）`
+          }).join('　')
+          log(`偷 ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）成功：扫 ${spots} 处 → ${detail || `共 ${res.n || 1} 件`}｜合计 ${Math.round(thisValue).toLocaleString('en-US')} D`)
+          if (r.battle) {
+            const b = r.battle
+            const win = b.win ?? b.result === 'win' ?? res.outcome === 'win'
+            log(`  守家战${win ? '打赢了' : '打完'}：${b.log?.slice?.(-1)?.[0] || ''}${res.xp ? `，+${res.xp} 擂台经验` : ''}`.trim())
+          }
+        } else if (res.outcome === 'lose') {
+          const spots = res.spots || 1
+          // 打不过的岛先冷 10 分钟（旧版是一小时）。有了对手档案之后，
+          // 等我们养成/换装变强，这座岛的期望可能重新变正——一小时太长。
+          ;(memo.stealLoseAt ||= {})[tg.id] = world.now
+          log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
+            (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）') +
+            `，${Math.round(blockSec / 60)} 分钟内不再去`)
+        } else {
+          log(`偷 ${tg.name}（Lv${tg.level}）打平：${res.spots || 1} 处，谁也没占便宜`)
+        }
+        // 每次守家战都是一份免费的战报：B（守家方）的面板直接进档案，
+        // 下次偷这家之前就能先模拟，而不是再来一次盲打。
+        if (r.battle && bc?.storePath) {
+          try { recordBattleSnapshot(r.battle, 'guard', { storePath: bc.storePath }) } catch {}
+        }
+        if (r.energy != null) {
+          const spent = (world.state.en || 0) - r.energy
+          log(`  体力 ${Math.round(world.state.en)} → ${r.energy}${spent > 0 ? `（−${Math.round(spent)}）` : ''}`)
+          world.state.en = r.energy
+        }
+      } catch (e) {
+        // 最常见的两种：409/「TA 家现在没有能偷的」= 被别人抢先；
+        // 403/401 = cookie 失效。把状态码和「这份数据是几秒前的」都打出来，
+        // 否则日志里只有一句话，分不清是程序 bug 还是竞争。
+        const age = Math.max(0, Math.round(world.now - (tg.seenAt || world.now)))
+        log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
+          `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处`)
+      }
+      // 这座岛已经处理过了：清掉它这一个「解禁时刻」。
+      // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
+      // 下次真正扫到这座岛时 updateIsleSchedule 会重新算出新的解禁点。
+      if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
+        const rec = memo.stealSchedule[tg.id]
+        rec.upcoming = []
+        rec.nextGroup = []
+        rec.nextAt = 0
+        rec.nextEV = 0
+        // 60 秒后让巡逻重新访问一次：这次拿到的可能是「下一块地的解禁时刻」，
+        // 它可能就在几分钟后。直接用 checkEvery（30 分钟）会把它整段错过。
+        rec.checkAt = world.now + 60
+      }
+      await sleep(1500)
+    }
+    return { skippedEV }
+  }
+
+  // 全量扫描/巡逻发现的目标通常「现在就能偷」，换装时间来得及。
+  // 掐点路径（stealRound）会在等待解禁期间就完成换装，传 tactical:false，
+  // 避免在解禁之后再花几秒换装备。
+  const swap = tactical && bc ? pickSwapTarget(ranked) : null
+  let runRes
+  if (swap) {
+    try {
+      const rr = await executeWithTacticalLoadout({
+        accountKey: bc.accountKey,
+        lockRoot: bc.lockRoot,
+        opponentId: swap.t.id,
+        mode: 'guard',
+        knownOpponentLevel: swap.t.level || null,
+        storePath: bc.storePath,
+        precomputedDecision: swap.decision,
+        getGearFn: gearFnFor(world),
+        equipSlotFn: equipSlotFnFor(world),
+        actionFn: runSteals,
+        trials: bc.trials,
+        minGain: bc.minGain,
+        zThreshold: bc.zThreshold,
+      })
+      if (rr?.result) runRes = rr.result
+      if (rr && !rr.restoreOk) log(`偷菜后恢复静止装失败（${rr.restoreError}），下次运行会先恢复`)
+      if (!runRes) {
+        log('偷菜：战前换装未完成，按静止装直接上')
+        runRes = await runSteals()
       }
     } catch (e) {
-      // 最常见的两种：409/「TA 家现在没有能偷的」= 被别人抢先；
-      // 403/401 = cookie 失效。把状态码和「这份数据是几秒前的」都打出来，
-      // 否则日志里只有一句话，分不清是程序 bug 还是竞争。
-      const age = Math.max(0, Math.round(world.now - (tg.seenAt || world.now)))
-      log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
-        `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处`)
+      // 锁被别的进程占住（超时）时动作还没跑，可以安全地退回静止装；
+      // 其他异常多半发生在偷菜过程中，stolen/value 已按实情累加，不再重跑。
+      if (/换装锁/.test(e.message || '')) {
+        log('偷菜：换装锁被占用，按静止装直接上')
+        runRes = await runSteals()
+      } else {
+        log('偷菜：守家换装出错（' + e.message + '）')
+        runRes = { skippedEV: 0 }
+      }
     }
-    // 这座岛已经处理过了：清掉它这一个「解禁时刻」。
-    // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
-    // 下次真正扫到这座岛时 updateIsleSchedule 会重新算出新的解禁点。
-    if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
-      const rec = memo.stealSchedule[tg.id]
-      rec.upcoming = []
-      rec.nextGroup = []
-      rec.nextAt = 0
-      rec.nextEV = 0
-      // 60 秒后让巡逻重新访问一次：这次拿到的可能是「下一块地的解禁时刻」，
-      // 它可能就在几分钟后。直接用 checkEvery（30 分钟）会把它整段错过。
-      rec.checkAt = world.now + 60
-    }
-    await sleep(1500)
+  } else {
+    runRes = await runSteals()
   }
+  const skippedEV = runRes?.skippedEV || 0
+
   if (stolen) log(`本轮偷菜小结：${stolen} 处，${Math.round(value).toLocaleString('en-US')} D（去了 ${tried} 家）`)
   else if (tried) log(`本轮偷菜：去了 ${tried} 家，没有收获`)
   else if (starved) {
-    const minEV = st.minEV ?? st.minValue ?? 3000
     const costs = targets
       .filter((t) => t.value >= minEV)
       .map((t) => Math.min(t.energy, st.maxEnergy ?? 15))
@@ -916,7 +1134,7 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
     log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点，` +
       `口粮补不上或每点超过 ${st.maxEnergyCost ?? 600} D）`)
   } else if (skippedEV) {
-    log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${st.minEV ?? st.minValue ?? 3000} D），不去`)
+    log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${minEV} D），不去`)
   }
   return { stolen, value }
 }

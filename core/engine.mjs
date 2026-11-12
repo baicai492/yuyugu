@@ -67,6 +67,8 @@ export class Engine {
     if (st.externalSold && typeof st.externalSold === 'object') this.externalSoldRatio = st.externalSold
     // 打输过的岛：一小时之内不再去，重启后也该继续记着
     if (st.stealLoseAt && typeof st.stealLoseAt === 'object') this.memo.stealLoseAt = st.stealLoseAt
+    // 负期望的守家岛：模拟出来打不过就冷 10 分钟，不必每次重启都重算重跑
+    if (st.stealBlockAt && typeof st.stealBlockAt === 'object') this.memo.stealBlockAt = st.stealBlockAt
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -118,6 +120,8 @@ export class Engine {
         externalSold: this.externalSoldRatio || {},
         // 打输过的岛（id → 时刻），一小时内不再去
         stealLoseAt: this.memo.stealLoseAt || {},
+        // 负期望的守家岛（id → 时刻），冷却时间见 battle.guardBlockSec
+        stealBlockAt: this.memo.stealBlockAt || {},
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -411,8 +415,12 @@ export class Engine {
     // 平时仍按原顺序（下面那块）走，不改变日常节奏。
     let stealSnipeDone = false
     w.tickClock()
+    // 开了守家换装时，提前量里还要算上 3 个槽位的 POST 时间（约 6.6 秒），
+    // 不然醒来时只剩访问邻居的时间，换完装窗口已经过了。
+    const tacticalPrep = cfg.arena?.enabled && cfg.arena?.autoEquip !== false &&
+      cfg.battle?.stealSwap !== false && cfg.battle?.guardPosterior !== false
     const snipeLead = cfg.social?.steal?.enabled
-      ? (cfg.social.steal.prepLeadSec || waveLeadSec(this.memo.stealSchedule || {}, w.now))
+      ? (cfg.social.steal.prepLeadSec || waveLeadSec(this.memo.stealSchedule || {}, w.now, { gearSwaps: tacticalPrep ? 3 : 0 }))
       : 8
     if (cfg.social?.steal?.enabled && !cfg.dry &&
         shouldSnipe(this.memo, this.memo.stealSchedule, w.now, { leadSec: snipeLead })) {
@@ -432,6 +440,13 @@ export class Engine {
         this.memo.stealWakePending = false
         stealSnipeDone = true
       } catch (e) { this.log('偷菜（掐点）出错：' + e.message, 'err') }
+    }
+
+    // 掐点偷菜走的是 visit 接口：响应里的 state 是对方岛的、rev 也已作废。
+    // 紧接着的五子棋要用自家 cnt.gomokuPaid 判断计奖额度，必须先把自家快照换回来，
+    // 否则会拿邻居的计数去发 start，被服务端 409「小岛状态已变化」打回。
+    if (w.revDirty) {
+      try { await w.refresh() } catch (e) { this.log('偷菜后刷新状态失败：' + e.message) }
     }
 
     // ---------- 52弟 ----------

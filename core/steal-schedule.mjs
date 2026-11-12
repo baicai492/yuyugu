@@ -61,13 +61,30 @@ export function stealEV(tg, myLevel, energyValue = 300) {
   const spots = Math.max(1, tg.targets?.length || tg.spots || 1)
   const V = tg.value || 0
   const detect = Number.isFinite(tg.detect) ? tg.detect : 0.55
-  const pWin = tg.guard
-    ? Math.max(0.03, Math.min(0.95, 0.5 + ((myLevel || 1) - (tg.level || 1)) * 0.15))
-    : 1
+  const clamp01 = (x) => Math.max(0, Math.min(1, x))
+  // 有对手档案时用模拟出来的三结局概率；没有就退回旧版的等级差估算。
+  // 这里是「有没有守家鱼」的分水岭：没守家时 pWin=1、不会有罚款。
+  const hasPosterior = tg.guard && Number.isFinite(tg.pWin) && Number.isFinite(tg.pLoss)
+  let pWin, pLoss, pDraw
+  if (!tg.guard) {
+    pWin = 1; pLoss = 0; pDraw = 0
+  } else if (hasPosterior) {
+    pWin = clamp01(tg.pWin)
+    pLoss = clamp01(tg.pLoss)
+    pDraw = clamp01(Number.isFinite(tg.pDraw) ? tg.pDraw : 1 - pWin - pLoss)
+    const sum = pWin + pLoss + pDraw
+    if (sum > 0) { pWin /= sum; pLoss /= sum; pDraw /= sum }
+  } else {
+    pWin = Math.max(0.03, Math.min(0.95, 0.5 + ((myLevel || 1) - (tg.level || 1)) * 0.15))
+    pLoss = 1 - pWin
+    pDraw = 0
+  }
   const bonus = V / spots                     // 打赢：每处多拿 1 个
   const fine = Math.min(tg.fineMax || 5000, V * 1.2)
   const energy = Math.min(tg.energy || 5, 15)
-  return (1 - detect) * V + detect * (pWin * (V + bonus) - (1 - pWin) * fine) - energy * energyValue
+  // 平局按「什么都没拿到、也没赔钱」算（保守；服务端平局确实不结算收益）。
+  const fightEV = pWin * (V + bonus) + pDraw * 0 - pLoss * fine
+  return (1 - detect) * V + detect * fightEV - energy * energyValue
 }
 
 const priceOf = (prices, id, R) => Number(prices?.[id]) || Number(R?.BASE_PRICE?.[id]) || 0
@@ -388,9 +405,13 @@ export function nextWave(schedule, now, { leadSec = 0, waveSpanSec = 2, graceSec
  * 上限 30 秒：一波再大也只能先到先得，跑不完的部分留给下一轮
  * （醒来后按价值排序，高价值的先跑）。
  */
-export function prepLeadSec(nIsles, { visitSec = 1.5, slackSec = 4, maxSec = 30 } = {}) {
+export function prepLeadSec(nIsles, { visitSec = 1.5, slackSec = 4, maxSec = 30, gearSwaps = 0, gearSwapSec = 2.2 } = {}) {
   const n = Math.max(1, Number(nIsles) || 1)
-  return Math.min(maxSec, Math.max(2, Math.ceil(n * visitSec + slackSec)))
+  // 战前换装是 POST，受 2.15 秒串行间隔约束。把这几秒算进提前量，
+  // 否则「换完装已经过了解禁时刻」——掐点偷菜最怕的就是这个。
+  const swapSec = Math.max(0, Number(gearSwaps) || 0) * gearSwapSec
+  // 换装把提前量撑长时上限跟着放宽，但不无限增长（一波没跑完就留给下一轮）。
+  return Math.min(maxSec + (swapSec > 0 ? 15 : 0), Math.max(2, Math.ceil(n * visitSec + slackSec + swapSec)))
 }
 
 /** 当前这一波该提前几秒醒；没有待解禁记录时返回 fallback */

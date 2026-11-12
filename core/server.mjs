@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url'
 import { saveConfig } from './config.mjs'
 import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir } from './logfile.mjs'
 
+// 主程序版本号：GUI 标题栏显示为 v<版本>。
+// 从 v1 的 Chrome 插件架构换成 v2 的 Node 主程序后这里一直漏改，
+// 面板上就一直挂着「v1」，看起来像加载了旧代码。
+export const VERSION = 3
+
 const ALLOW_ORIGIN = [
   'chrome-extension://',
   'http://127.0.0.1',
@@ -71,7 +76,7 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
           ok: true,
           status: engine.statusSnapshot(),
           config: cfg,
-          version: 1,
+          version: VERSION,
         })
       }
 
@@ -221,7 +226,7 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
       }
 
       // ---------- 健康检查 ----------
-      if (path === '/api/ping') return send(res, 200, { ok: true, name: 'yuyugu', version: 1 })
+      if (path === '/api/ping') return send(res, 200, { ok: true, name: 'yuyugu', version: VERSION })
 
       return send(res, 404, { error: '未知路径：' + path })
     } catch (e) {
