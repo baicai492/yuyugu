@@ -166,6 +166,41 @@ export function netSaleQuote(R, wallet, paid, gross) {
  * 已成熟（stage 3）的地不计：它们要么本轮已经收进 inventory 参与了卖出，
  * 要么在等体力，算进来会重复计数。
  */
+/**
+ * 一茬作物的成熟时刻。
+ *
+ * 洒水器/雨天走 auto 分支（服务端直接把总时长 ×0.6）；
+ * 手工浇水不缩短 total，而是每次浇水把「剩余时间」折成 p.g += 25%。
+ * 我们每个阶段都会浇，所以不能拿 cropStage(p, now, false).left 当剩余时间——
+ * 那是「从现在起再也不浇水」的口径，会把玉米、南瓜这类长周期作物算晚半天以上，
+ * 未来到货就会被排到更晚的岛日，档期占用算少。
+ *
+ * 这里按规则原文逐阶段推进（浇水 → 阶段边界 → 再浇水），
+ * 结果和在线结算的 cropStage / water / harvest 完全一致。
+ */
+function cropMatureAt(R, p, from, auto) {
+  const st0 = R.cropStage(p, from, auto)
+  if (!st0 || st0.stage < 0) return Infinity
+  if (auto) return st0.stage >= 3 ? from : from + st0.left
+  const q = { ...p }
+  let t = from
+  for (let it = 0; it < 12; it++) {
+    const st = R.cropStage(q, t, false)
+    if (!st || st.stage < 0) return Infinity
+    if (st.stage >= 3) return t
+    if (q.w <= st.stage) {
+      q.g += Math.floor(st.left * 0.25)
+      q.w++
+      continue
+    }
+    // 未浇水时，下一阶段出现在 el = (stage+1) × total / 3
+    const tNext = q.t + ((st.stage + 1) * st.total) / 3
+    if (!(tNext > t)) return Infinity
+    t = tNext
+  }
+  return Infinity
+}
+
 export function cropArrivals(R, s, now, fc, { sellShare = 0.7 } = {}) {
   const out = {}
   if (!s?.plots?.length || !fc?.length) return out
@@ -179,22 +214,27 @@ export function cropArrivals(R, s, now, fc, { sellShare = 0.7 } = {}) {
     if (!p?.c) continue
     const crop = R.CROPS?.find((c) => c.id === p.c)
     if (!crop) continue
-    const auto = R.sprinkled(s, i) || rainy
-    const st = R.cropStage(p, now, auto)
-    if (!st || st.stage < 0 || st.stage >= 3) continue
+    const sprinkled = R.sprinkled(s, i)
+    const cur = R.cropStage(p, now, sprinkled || rainy)
+    // 已成熟（stage 3）的地不计：它们要么本轮已经收进 inventory 参与了卖出，
+    // 要么在等体力，算进来会重复计数。枯萎（stage -1）的也跳过。
+    if (!cur || cur.stage < 0 || cur.stage >= 3) continue
+    const first = cropMatureAt(R, p, now, sprinkled || rainy)
+    if (!(first < Infinity)) continue
     // w=3：我们每轮都会把能浇的浇满，收获时的浇水数就是 3
     const w = 3
     const n = (1.3 + 0.08 * w) * sellShare
     const p2 = 0.05 + 0.1 * w, p1 = 0.2 + 0.08 * w
     const qAvg = p2 * 1.5 + p1 * 1.25 + (1 - p1 - p2)
     const cycles = crop.regrow && p.h + 1 < (crop.times || 1) ? (crop.times || 1) - (p.h + 1) : 0
-    // 下一茬的生长时间：regrow 分钟 × 岛日快 0.8 × 熟得快 0.6（浇水/洒水器）
-    const nextSec = (crop.regrow || 0) * 60 * 0.8 * 0.8 * 0.6
-    let at = now + st.left
+    let at = first
     for (let c = 0; c <= cycles; c++) {
+      if (!(at < Infinity)) break
       const k = at > now ? bucketAt(at) : 0
       if (k >= 0) (out[p.c] ||= []).push({ k, at, n, qAvg })
-      at += nextSec
+      // 下一茬：收获后 w/g 归零重新长，时长按那天的天气重算
+      const fresh = { c: p.c, t: at, w: 0, g: 0, h: p.h + 1 + c }
+      at = cropMatureAt(R, fresh, at, sprinkled || R.weatherOf(R.isleDay(at)) === 1)
     }
   }
   return out

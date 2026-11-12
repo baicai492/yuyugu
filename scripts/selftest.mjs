@@ -120,6 +120,35 @@ console.log('\n[4] 市场预测')
   const expectLiq = 150 * 200 + 250 * 200 * 0.85 + 200 * 200 * 0.7
   ok('终端清算按真实阶梯算', Math.abs(liq.gross - expectLiq) < 1, `gross=${Math.round(liq.gross)} 期望 ${expectLiq}`)
   ok('清算均价低于全价', liq.unitPrice < 200, `单价 ${liq.unitPrice.toFixed(1)}`)
+
+  // 未来到货时刻：手工浇水每阶段把剩余时间折 25%，不能拿「再也不浇水」的 left 当成熟时刻
+  {
+    const season = R.seasonOf(R.isleDay(now))
+    const crop = R.CROPS.find((c) => c.seasons.includes(season))
+    const p = { c: crop.id, t: now - 20 * 60, w: 0, g: 0, h: 0 }
+    const st = R.cropStage(p, now, false)
+    const fcA = [{ at: now, end: now + 3600 }, { at: now + 3600, end: now + 7200 }]
+    const arr = M.cropArrivals(R, { plots: [p], tools: { spr: 0 } }, now, fcA)[crop.id]
+    // 独立实现：按分钟步进，每进入新阶段就浇水
+    const q = { ...p }
+    let bruteAt = Infinity
+    for (let m = 0; m <= 2000; m++) {
+      const tt = now + m * 60
+      const s2 = R.cropStage(q, tt, false)
+      if (!s2 || s2.stage < 0) break
+      if (s2.stage >= 3) { bruteAt = tt; break }
+      if (q.w <= s2.stage) { q.g += Math.floor(s2.left * 0.25); q.w++ }
+    }
+    ok('到货时刻与逐分钟推进一致',
+      arr?.[0] && arr[0].at <= bruteAt && bruteAt - arr[0].at < 60,
+      `事件式 ${arr?.[0] ? Math.round((arr[0].at - now) / 60) : '-'} 分 / 步进 ${Math.round((bruteAt - now) / 60)} 分`)
+    ok('到货时刻早于「不浇水」口径', arr?.[0] && arr[0].at - now < st.left,
+      `left=${Math.round(st.left / 60)} 分`)
+    // 已成熟的地已经进过 inventory，不能再算一次到货
+    const ripe = { c: crop.id, t: now - 800 * 60, w: 0, g: 0, h: 0 }
+    ok('已成熟的地不计入到货',
+      !(M.cropArrivals(R, { plots: [ripe], tools: { spr: 0 } }, now, fcA)[crop.id] || []).length)
+  }
 }
 
 console.log('\n[5] 配置')
