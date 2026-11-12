@@ -1,5 +1,8 @@
 {
   "enabled": true,
+  "xian": {
+    "enabled": true
+  },
   "social": {
     "steal": {
       "enabled": true

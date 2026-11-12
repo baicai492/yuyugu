@@ -140,6 +140,10 @@ export class Engine {
     this.ledger.spend += spend
     this.ledger.tax += tax
     this.stats.totalEarn = (this.stats.totalEarn || 0) + earn
+    // 自己赚/花的钱不是「外部突变」。把巡检基线一起平移，
+    // 否则刚投出去的钱会在下一轮巡检里被当成突发变化，立刻再醒一轮——
+    // 2026-11-12 就是这样在 3 分钟里连买了 6 轮畜栏。
+    if (this.watchSnap) this.watchSnap.coins = Number(this.watchSnap.coins || 0) + earn - spend
     this.savePersist()
   }
 
@@ -355,6 +359,9 @@ export class Engine {
     let rounds = 0
     let totalEarn = 0, totalSpend = 0, totalTax = 0
     let totalActions = 0        // 本轮真正提交成功的动作数（判断「有没有推进」用）
+    // 本轮巡视已经投过资就不再评估新的投资。配合 planner 的 maxPerRound=1，
+    // 保证一次巡视最多只买一项；是否继续投，等下次巡视重新看现金和规则。
+    let investedThisTick = false
     while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
       this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
       // 一次规划循环可能横跨几分钟（每批要串行提交、等 http 间隔）。
@@ -363,7 +370,7 @@ export class Engine {
       // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
       // world 是每轮共享的对象，规划器往里写 stolenAt 也能被这里读回来。
       if (this.memo.stolenAt) w.stolenAt = this.memo.stolenAt
-      plan = planRound(w, cfg, this.log.bind(this))
+      plan = planRound(w, cfg, this.log.bind(this), { allowInvest: !investedThisTick })
       if (!plan.actions.length) break
       if (cfg.dry) {
         this.log(`[演练] 本轮计划：${summarizeActions(R, plan.actions)}`)
@@ -378,6 +385,7 @@ export class Engine {
         totalActions += (res.out || []).filter((o) => o?.ok).length
         this.credit(res.earn || 0, res.spend || 0, res.tax || 0)   // 边赚边记，GUI 立刻能看到
         if (plan.summary.length) this.log(`第 ${rounds} 轮：${plan.summary.join('；')}`)
+        if (plan.summary.some((x) => x.startsWith('投资：'))) investedThisTick = true
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
       } catch (e) {
         // 409：小岛状态在别处变了（网页端手动操作、站内管家抢先提交、另一个标签页）。

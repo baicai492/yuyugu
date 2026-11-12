@@ -4,7 +4,10 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock, nextWave, waveLeadSec, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import {
+  updateIsleSchedule, stealEV, nextUnlock, nextWave, waveLeadSec,
+  WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC,
+} from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -118,41 +121,167 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
   return { helped, coins }
 }
 
+/** 折叠菜篮是否生效：生效时每处多拿 1 个（旧版 steal.useSack）。 */
+function sackActive(R, world) {
+  try { return !!R.b12Effect(world.state, 'carry', world.now) } catch { return false }
+}
+
+/** 组装 updateIsleSchedule 需要的参数，保证扫描/巡逻/掐点三处口径一致。 */
+function scheduleArgs(R, world, cfg, info, memo, level) {
+  const st = cfg.social?.steal || {}
+  const state = info.state || null
+  const rules = info.rules || {}
+  const t = Number(info.now) || world.now
+  let detect = 0.55
+  try { detect = R.b12Detection(state || {}, world.state, t, 0) } catch { /* 用默认值 */ }
+  return {
+    R,
+    isle: info.isle || {},
+    state,
+    rules,
+    now: t,
+    prices: world.prices,
+    level: level || info.owner?.level || 1,
+    myLevel: memo.arenaLevel || 1,
+    guard: !!info.owner?.guard,
+    detect,
+    sack: sackActive(R, world),
+    minEV: st.minEV ?? st.minValue ?? 3000,
+    energyValue: st.energyValue ?? 300,
+    groupSpanSec: st.groupSpanSec ?? 2,
+    checkEvery: st.checkEvery ?? 1800,
+    prepLeadSec: st.prepLeadSec || 15,
+    horizonSec: st.horizonSec ?? 7200,
+  }
+}
+
+/** 访问完一座岛就更新它的调度记录；失败时不破坏旧记录。 */
+function recordVisitSchedule(R, world, cfg, memo, id, info, level) {
+  const schedule = memo.stealSchedule || (memo.stealSchedule = {})
+  try {
+    const { rec } = updateIsleSchedule({ ...scheduleArgs(R, world, cfg, info, memo, level), prev: schedule[id] || null })
+    schedule[id] = rec
+    return rec
+  } catch {
+    return schedule[id] || null
+  }
+}
+
+/** 现在能不能付得起这么多体力（不够就用口粮补，上限 maxEnergyCost）。 */
+function canPayEnergy(R, world, cfg, needE) {
+  if ((world.state.en || 0) >= needE) return true
+  try {
+    return !!energyActions(R, world.state, world.prices, {
+      need: needE, maxPerE: cfg.social?.steal?.maxEnergyCost ?? 600, cfg, coins: world.coins,
+    })
+  } catch { return false }
+}
+
+/** 这一家现在去偷值不值（EV 过线 + 体力付得起）。 */
+function worthStealing(R, world, cfg, memo, tg) {
+  const st = cfg.social?.steal || {}
+  const ev = stealEV(tg, memo.arenaLevel || 1, st.energyValue ?? 300)
+  const needE = Math.min(tg.energy || 5, st.maxEnergy ?? 15)
+  return ev >= (st.minEV ?? st.minValue ?? 3000) && canPayEnergy(R, world, cfg, needE)
+}
+
 /**
  * 从一次 visit 响应里抽出「现在能偷」的目标和估值。
- * scanStealTargets 和 watchRound 共用，保证两边口径一致。
+ * scanStealTargets、watchRound、掐点快速路径共用，保证口径一致。
+ *
+ * 估值口径（旧版 v1 的 inspect()）：
+ *   · 每块地服务端给 rules.perPlot 个；带折叠菜篮再多 1 个
+ *   · 畜栏按窝里实际有的 pen.n 个给（至少 rules.perPen），带菜篮再多 1 个
  */
 function targetsFromIsle(R, world, isle, rules) {
   const targets = []
   let value = 0
+  const sack = sackActive(R, world) ? 1 : 0
   ;(isle.plots || []).forEach((pl, i) => {
     if (!pl?.steal) return
     // 保护期：成熟后一段时间内不可偷。服务端已用 steal 标记，直接信它。
     targets.push({ kind: 'plot', i })
-    value += (world.prices[pl.c] || R.BASE_PRICE[pl.c] || 0) * (rules.perPlot || 2)
+    value += (world.prices[pl.c] || R.BASE_PRICE[pl.c] || 0) * ((rules.perPlot || 2) + sack)
   })
   ;(isle.barn || []).forEach((pen, i) => {
     if (!pen?.steal) return
     targets.push({ kind: 'pen', i })
     const def = R.ANIMALS.find((a) => a.id === pen.k)
-    value += (world.prices[def?.product] || def?.productPrice || 0) * (rules.perPen || 2)
+    const n = Math.max(rules.perPen || 2, Number(pen.n) || 0)
+    value += (world.prices[def?.product] || def?.productPrice || 0) * (n + sack)
   })
   return { targets, value }
 }
 
+/** 被发现概率（对方潮铃 +% / 我们斗篷 −%）；规则模块缺失时按基础 55%。 */
+function detectOf(R, world, info) {
+  try {
+    return R.b12Detection(info.state || {}, world.state, Number(info.now) || world.now, 0)
+  } catch { return 0.55 }
+}
+
+/** 从 visit 结果里组装一个「现在就能偷」的目标对象。 */
+function targetFromVisit(R, world, cfg, info, extra = {}) {
+  const isle = info.isle || {}
+  const rules = info.rules || {}
+  const { targets, value } = targetsFromIsle(R, world, isle, rules)
+  if (!targets.length) return null
+  return {
+    targets, value,
+    detect: detectOf(R, world, info),
+    fineMax: rules.fineMax || 5000,
+    energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
+    seenAt: Number(info.now) || world.now,
+    ...extra,
+  }
+}
+
+/**
+ * 「还没到解禁时刻」的目标：服务端此刻的 steal 标记还是 false，
+ * 但调度表已经算准了它几秒后解禁。
+ *
+ * 掐点醒来时访问的正是这个时刻——如果只认 targetsFromIsle（服务端当前
+ * 的 steal 标记），一波目标全都还没解锁，会被整波丢掉，只能等第二次唤醒。
+ * 这里直接用调度表记下的那几处（地块/畜栏 + 估值）组装目标：
+ * 提交时服务端按岛结算，真正能不能拿到由它判定。
+ */
+function targetFromSchedule(R, world, info, c) {
+  const entries = c.entries || []
+  if (!entries.length) return null
+  const rules = info.rules || {}
+  const spots = entries.length
+  return {
+    targets: entries.map((e) => ({ kind: e.kind, i: e.i })),
+    value: Number(c.value) || 0,
+    detect: detectOf(R, world, info),
+    fineMax: rules.fineMax || 5000,
+    energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, spots - 1)),
+    seenAt: Number(info.now) || world.now,
+    id: c.targetId,
+    name: c.name,
+    level: c.level || 1,
+    guard: !!info.owner?.guard,
+    at: c.at,
+  }
+}
+
 /**
  * 扫目录，找出「现在能偷」的岛：有成熟作物或窝里有产物，且过了保护期、不在新手保护。
- * 同时把每座岛的「即将解禁」时刻记进 memo.stealSchedule，供 nextWake 精确唤醒。
+ * 同时把每座岛的「最近的值得掐的解禁组」记进 memo.stealSchedule，供 nextWake 精确唤醒。
  * 返回 [{ id, name, level, guard, targets: [...], value }]
+ *
+ * 和旧版 v1 一样：一旦发现「现在能偷且 EV 过线、体力付得起」的岛就立刻返回，
+ * 不再把剩下的页扫完——扫描期间对手就在抢同一块地。
  */
 export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
   const R = world.R
   const t = world.now
+  const st = cfg.social?.steal || {}
   const out = []
   const schedule = memo.stealSchedule || (memo.stealSchedule = {})
   let upcomingCount = 0
-  const pages = cfg.social?.steal?.pages ?? 6
-  let cursor = null, scanned = 0, skipped = 0
+  const pages = st.pages ?? 6
+  let cursor = null, scanned = 0, skipped = 0, readyN = 0
   // 是否成功用上了「只看可偷」筛选。必须声明在循环外——循环末尾的日志要用它。
   let usedFilter = true
   for (let p = 0; p < pages; p++) {
@@ -167,49 +296,54 @@ export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
     for (const o of d.neighbors || []) {
       scanned++
       if (o.newbie) { skipped++; continue }        // 新手保护（创建后 24 小时）
-      if (!(o.plots + o.pens)) { skipped++; continue }
+      if (st.skipMarked && o.marked) { skipped++; continue }
+      if (!usedFilter && !(o.plots + o.pens)) { skipped++; continue }
       // 用了可偷筛选时，服务端已经保证有目标，可以省掉一次访问；
       // 但为了拿到准确的目标与体力消耗，仍然读一次详情（它同时给出 rules）。
       let info
       try { info = await visitInfo(world, o.id) } catch { skipped++; continue }
       const isle = info.isle || {}
-      const rules = info.rules || {}
 
-      // 更新这座岛的解禁调度表（记录「还要多久成熟 / 保护期还剩多久」）
+      // 更新这座岛的解禁调度表（精确的成熟 + 保护期时刻）
       try {
-        const prev = schedule[o.id] || null
-        const { rec, upcoming } = updateIsleSchedule({ isle, rules, now: t, prev })
-        schedule[o.id] = rec
-        upcomingCount += upcoming.length
+        const rec = recordVisitSchedule(R, world, cfg, memo, o.id, info, o.level)
+        upcomingCount += rec?.nextAt ? 1 : 0
       } catch { /* 调度只是优化，算不出来不影响正常扫描 */ }
 
-      const { targets, value } = targetsFromIsle(R, world, isle, rules)
-      if (!targets.length) continue
-      out.push({
+      const tg = targetFromVisit(R, world, cfg, info, {
         id: o.id, name: o.name, level: o.level || 1, guard: !!info.owner?.guard,
-        targets, value,
-        // 被发现概率：守家道具 +%，我们的轻步斗篷 −%。旧版 inspect() 用它算 EV。
-        detect: R.b12Detection(info.state || {}, world.state, t, 0),
-        fineMax: rules.fineMax || 5000,
-        energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
       })
+      if (!tg) continue
+      readyN++
+      const ev = stealEV(tg, memo.arenaLevel || 1, st.energyValue ?? 300)
+      tg.ev = ev
+      // 巡逻/扫描时一旦发现值得偷的就立刻收工去偷，别把剩下的页扫完。
+      if (worthStealing(R, world, cfg, memo, tg)) {
+        log(`扫目录：${o.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）现在能偷 ` +
+          `${tg.targets.length} 处，估 ${Math.round(tg.value).toLocaleString('en-US')} D，` +
+          `期望 ${Math.round(ev).toLocaleString('en-US')} D，立即去（不再扫后面的页）`)
+        return [tg]
+      }
+      out.push({ ...tg, ev })
     }
     cursor = d.nextCursor
     if (!cursor) break
   }
-  out.sort((a, b) => (b.value / Math.max(1, b.energy)) - (a.value / Math.max(1, a.energy)))
-  log(`扫了 ${scanned} 座岛${skipped ? `（跳过 ${skipped} 座）` : ''}，找到 ${out.length} 家可偷` +
+  out.sort((a, b) => b.ev - a.ev)
+  log(`扫了 ${scanned} 座岛${skipped ? `（跳过 ${skipped} 座）` : ''}，` +
+    (readyN ? `${readyN} 家现在能偷，但没有一家期望收益过线` : '找到 0 家可偷') +
     (usedFilter ? '（用了可偷筛选）' : ''))
-  // 提示「还有多少处正在保护期、什么时候解禁」——这是旧的到点扫描完全看不到的信息
+  // 提示「还有多少处正在生长/保护期、什么时候解禁」——这是旧的到点扫描完全看不到的信息
   if (upcomingCount > 0) {
     const nx = nextUnlock(schedule, t)
-    log(`  ${upcomingCount} 处正在生长/保护期` +
+    log(`  ${upcomingCount} 座岛有未来解禁目标` +
       (nx ? `，最近一处 ${nx.item} 在 ${Math.round(nx.at - t)} 秒后解禁${nx.exact ? '（时刻确定）' : '（估计）'}` : ''))
   }
   // 把候选按性价比列出来，方便判断为什么去/不去某一家
   for (const tg of out.slice(0, 6)) {
     log(`  ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）` +
       `${tg.targets.length} 处，估 ${Math.round(tg.value).toLocaleString('en-US')} D，耗 ${tg.energy} 体力` +
+      `，期望 ${Math.round(tg.ev).toLocaleString('en-US')} D` +
       `（每体力 ${Math.round(tg.value / Math.max(1, tg.energy)).toLocaleString('en-US')} D）`)
   }
   if (out.length > 6) log(`  …还有 ${out.length - 6} 家`)
@@ -227,13 +361,23 @@ export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
  */
 function sweepStaleUnlocks(schedule, now, leadSec = 8) {
   for (const [id, rec] of Object.entries(schedule || {})) {
-    const list = rec?.upcoming
-    if (!Array.isArray(list) || !list.length) continue
+    if (!rec) continue
+    const list = Array.isArray(rec.upcoming) ? rec.upcoming : []
     const keep = list.filter((u) => u.unlockAt > now - leadSec)
     if (keep.length !== list.length) {
       rec.upcoming = keep
-      if (!keep.length && !Object.keys(rec.plots || {}).length && !Object.keys(rec.pens || {}).length) {
-        delete schedule[id]
+      if (!keep.length) {
+        // 这一波没赶上（被别人抢 / 体力不够）。别立刻重试，下一次巡逻再看。
+        rec.nextAt = 0
+        rec.nextGroup = []
+        rec.nextEV = 0
+        rec.checkAt = now + 60
+      }
+    }
+    // 过期的明细只留着占内存，一小时前的记录没有参考价值。
+    for (const map of [rec.plots, rec.pens]) {
+      for (const [k, v] of Object.entries(map || {})) {
+        if ((v?.unlockAt || 0) < now - 3600) delete map[k]
       }
     }
   }
@@ -275,7 +419,8 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
       const act = Number(o.active) || 0
       // 深页全是早就没人玩的 Lv1 空岛（active 缺失）。至少要 24 小时内活跃过。
       if (!act || now - act > 86400) continue
-      watch[o.id] = { name: o.name, level: o.level || 1 }
+      // hint = 目录里看到的「有货的地块 + 畜栏数」，只用来给同时解禁的岛排先后
+      watch[o.id] = { name: o.name, level: o.level || 1, hint: (Number(o.plots) || 0) + (Number(o.pens) || 0) }
       kept++
     }
     cursor = d.nextCursor
@@ -284,23 +429,37 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
   }
   memo.stealWatch = watch
   memo.stealWatchAt = now
+  // 名单之外的岛的调度记录没用了（旧版每次重建目录都会整份替换）
+  const schedule = memo.stealSchedule
+  if (schedule) {
+    let dropped = 0
+    for (const id of Object.keys(schedule)) {
+      if (!watch[id]) { delete schedule[id]; dropped++ }
+    }
+    if (dropped) log(`偷菜：目录重建，清掉 ${dropped} 座不再活跃的岛的调度记录`)
+  }
   log(`偷菜：目录 ${pages} 页 ${seen} 座岛，盯 ${kept} 座 24 小时内活跃的`)
   return watch
 }
 
 /**
- * 逐个访问 watchlist 里的岛，把每块地的解禁时刻记进调度表。
+ * 逐个访问 watchlist 里的岛，把每块地 / 每个畜栏的解禁时刻记进调度表。
  *
- * 轮转着看：已经有「将来解禁时刻」的岛跳过（交给 nextWake 掐点），
- * 优先看没记录 / 记录已过期的。每轮看 visitsPerScan 家。
- * 返回这一轮顺带发现的「现在就能偷」的目标。
+ * 选择规则（旧版 v1 的 `check` 队列）：
+ *   · 记录里 checkAt <= now 的岛优先，按 checkAt 升序
+ *   · 没有记录的岛也排队（checkAt 视为 0），保证每座岛至少被看一次
+ *   · 一小时前打输过的岛跳过
+ * 每轮最多 visitsPerScan 家。访问过程中一旦发现「现在能偷且值得偷」的，
+ * 立刻停止巡逻、返回这一家——巡逻剩下的岛不花体力，但会错过偷菜窗口。
+ *
+ * 返回这一轮顺带发现的「现在就能偷」的目标（最多一家，早退）。
  */
 export async function watchRound(world, cfg, log = () => {}, memo = {}) {
   const st = cfg.social?.steal
   const R = world.R
   const now = world.now
   // 巡逻是「顺手」做的，不该每轮巡视都花 10 秒在这上面。
-  // 两分钟一批，53 座活跃岛 7 分钟轮完一圈，够掐解禁时刻了。
+  // 两分钟一批，活跃岛几分钟轮完一圈，够掐解禁时刻了。
   const every = st.watchEvery ?? 120
   if (now - (memo.stealWatchRoundAt || 0) < every) return []
   memo.stealWatchRoundAt = now
@@ -309,33 +468,30 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
   if (!ids.length) return []
   const schedule = memo.stealSchedule || (memo.stealSchedule = {})
   const per = st.visitsPerScan ?? 12
-  const maxAge = st.checkEvery ?? 3600   // 多久没看过就值得再看一眼
+  const maxAge = st.checkEvery ?? 1800   // 多久没看过就值得再看一眼
+  const loseAt = memo.stealLoseAt || {}
 
-  // 轮转起点：保证每个岛都有机会被看到，不会永远只看前几家
-  const start = (memo.stealWatchIdx || 0) % ids.length
-  const picked = []
-  for (let k = 0; k < ids.length && picked.length < per; k++) {
-    const idx = (start + k) % ids.length
-    const id = ids[idx]
+  // 按「下次该访问的时刻」排队。没有记录的岛 checkAt=0，最先被看。
+  // 同一时刻的用目录 hint（有货的地块数）做 tiebreak，好岛排前面。
+  const queue = []
+  for (const id of ids) {
+    if (now - (loseAt[id] || 0) < 3600) continue        // 打输过，一小时内不去
     const rec = schedule[id]
-    const future = (rec?.upcoming || []).some((u) => u.unlockAt > now + 30)
-    // 有将来解禁时刻，且最近看过了 → 交给掐点，不用重复访问
-    if (future && rec?.seenAt && now - rec.seenAt < maxAge) continue
-    picked.push({ id: Number(id), name: watch[id].name, level: watch[id].level })
+    const checkAt = Number(rec?.checkAt) || 0
+    const stale = !rec?.seenAt || now - rec.seenAt >= maxAge
+    if (checkAt > now && !stale) continue               // 离下次访问还早
+    queue.push({ id: Number(id), name: watch[id].name, level: watch[id].level, checkAt, hint: watch[id].hint || 0 })
   }
-  memo.stealWatchIdx = (start + picked.length) % ids.length
+  queue.sort((a, b) => a.checkAt - b.checkAt || b.hint - a.hint)
+  const picked = queue.slice(0, per)
+  if (!picked.length) return []
 
-  const out = []
-  let ripeSeen = 0, exhausted = 0
+  let ripeSeen = 0, exhausted = 0, readyN = 0
   for (const o of picked) {
     let info
     try { info = await visitInfo(world, o.id) } catch { continue }
     const isle = info.isle || {}
-    const rules = info.rules || {}
-    try {
-      const { rec } = updateIsleSchedule({ isle, rules, now, prev: schedule[o.id] || null })
-      schedule[o.id] = rec
-    } catch { /* 调度失败不影响下面的偷 */ }
+    recordVisitSchedule(R, world, cfg, memo, o.id, info, o.level)
     // 统计用：成熟但偷不了的地，说明已经被偷满或还在保护期
     for (const pl of isle.plots || []) {
       if (!pl || pl.stage !== 3) continue
@@ -343,25 +499,30 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
       if ((pl.stolen || 0) >= 2) exhausted++
       else ripeSeen++
     }
-    const { targets, value } = targetsFromIsle(R, world, isle, rules)
-    if (targets.length) {
-      out.push({
-        id: o.id, name: o.name, level: o.level || 1, guard: !!info.owner?.guard,
-        targets, value,
-        detect: R.b12Detection(info.state || {}, world.state, now, 0),
-        fineMax: rules.fineMax || 5000,
-        energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
-      })
+    const tg = targetFromVisit(R, world, cfg, info, {
+      id: o.id, name: o.name, level: o.level || 1, guard: !!info.owner?.guard,
+    })
+    if (!tg) {
+      await sleep(600)
+      continue
     }
-    await sleep(900)
+    readyN++
+    const ev = stealEV(tg, memo.arenaLevel || 1, st.energyValue ?? 300)
+    tg.ev = ev
+    // 巡逻途中撞见现在就能偷的，先偷，别继续看剩下的岛。
+    if (worthStealing(R, world, cfg, memo, tg)) {
+      log(`偷菜：巡逻发现 ${o.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）现在能偷 ` +
+        `${tg.targets.length} 处，估 ${Math.round(tg.value).toLocaleString('en-US')} D，` +
+        `期望 ${Math.round(ev).toLocaleString('en-US')} D，立即去`)
+      return [tg]
+    }
+    await sleep(600)
   }
-  if (picked.length) {
-    log(`偷菜：看了 ${picked.length} 座岛` +
-      (out.length ? `，${out.length} 家现在能偷` : '') +
-      (ripeSeen ? `｜${ripeSeen} 块成熟在保护期` : '') +
-      (exhausted ? `｜${exhausted} 块已被偷满` : ''))
-  }
-  return out
+  log(`偷菜：看了 ${picked.length} 座岛` +
+    (readyN ? `，${readyN} 家有货但期望收益不够` : '，暂时没有可偷的') +
+    (ripeSeen ? `｜${ripeSeen} 块成熟在保护期` : '') +
+    (exhausted ? `｜${exhausted} 块已被偷满` : ''))
+  return []
 }
 
 /** 偷菜道具：轻步斗篷（被发现率 −10 个百分点）+ 折叠菜篮（每处多拿 1 个）。
@@ -423,7 +584,8 @@ export async function stealIsle(world, id) {
  * 一波，整波一起访问；上限 5 家（再多访问也赶不上窗口，还会把请求间隔拖长）。
  *
  * 注意：这里只决定「访问谁」，具体偷哪些由 targetsFromIsle 按货值/守家胜率
- * 重新算，所以多访问一家的代价只是一次 visit（不花体力）。
+ * 重新算；还没到解禁时刻的（服务端 steal 仍是 false）退回调度表的估值。
+ * 所以多访问一家的代价只是一次 visit（不花体力）。
  */
 function waveTargets(schedule, watch, now, leadSec, limit = 5, prices = {}) {
   const wave = nextWave(schedule, now, { leadSec, waveSpanSec: 2 })
@@ -437,11 +599,21 @@ function waveTargets(schedule, watch, now, leadSec, limit = 5, prices = {}) {
   return wave.isles
     .map(({ targetId, entries }) => {
       const w = watch?.[targetId] || {}
+      const rec = schedule?.[targetId] || {}
       const items = entries.map((e) => e.item).filter(Boolean)
       const est = items.reduce((a, id) => a + (Number(prices[id]) || 0), 0)
-      return { targetId, name: w.name || `岛 ${targetId}`, level: w.level || 1, at: entries[0].at, items, est }
+      // 调度时算好的估值：解禁前服务端的 steal 标记还是 false，
+      // 这是唯一能提前知道「这一波值多少」的来源（targetFromSchedule 用它）。
+      const value = entries.reduce((a, e) => {
+        const v = e.kind === 'plot' ? rec.plots?.[e.i]?.value : rec.pens?.[e.i]?.value
+        return a + (Number(v) || 0)
+      }, 0)
+      return {
+        targetId, name: w.name || `岛 ${targetId}`, level: w.level || 1,
+        at: entries[0].at, items, est, value, entries,
+      }
     })
-    .sort((a, b) => b.est - a.est || a.at - b.at)
+    .sort((a, b) => b.value - a.value || b.est - a.est || a.at - b.at)
     .slice(0, limit)
 }
 
@@ -551,22 +723,14 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
       for (const c of cands) {
         let info
         try { info = await visitInfo(world, c.targetId) } catch { continue }
-        const isle = info.isle || {}
-        const rules = info.rules || {}
-        try {
-          const { rec } = updateIsleSchedule({ isle, rules, now: world.now, prev: memo.stealSchedule[c.targetId] || null })
-          memo.stealSchedule[c.targetId] = rec
-        } catch { /* 调度只是优化，算不出来不影响正常偷 */ }
-        const { targets, value } = targetsFromIsle(R, world, isle, rules)
-        if (!targets.length) continue
-        out.push({
-          id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard,
-          at: c.at,
-          targets, value,
-          detect: R.b12Detection(info.state || {}, world.state, world.now, 0),
-          fineMax: rules.fineMax || 5000,
-          energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
-        })
+        recordVisitSchedule(R, world, cfg, memo, c.targetId, info, c.level)
+        // 提前量到场时，这几处往往还没到解禁（服务端 steal=false），
+        // 只认 targetFromVisit 会整波丢掉——退回调度表里记下的那几处。
+        const tg = targetFromVisit(R, world, cfg, info, {
+          id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard, at: c.at,
+        }) || targetFromSchedule(R, world, info, c)
+        if (!tg) continue
+        out.push(tg)
       }
       if (out.length) {
         // 访问完全部岛时可能还没到解禁时刻：T_prep 是按访问耗时反推的，
@@ -576,9 +740,17 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
         const waitMs = Number.isFinite(waveAt)
           ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
           : 0
-        if (waitMs > 0) {
-          log(`偷菜：访问完 ${out.length} 家，距解禁还有 ${(waitMs / 1000).toFixed(1)} 秒，等到点再动手`)
-          await sleep(Math.min(waitMs, 15000))
+        // 道具（24 小时有效）在等待期间先买好：解禁那一刻只发偷菜请求，
+        // 别让一次买道具的 POST 把提交拖到窗口之后。
+        if (waitMs > 3000) await ensureThiefItems(world, cfg, log)
+        const leftMs = Number.isFinite(waveAt)
+          ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+          : 0
+        if (leftMs > 0) {
+          log(`偷菜：访问完 ${out.length} 家，距解禁还有 ${(leftMs / 1000).toFixed(1)} 秒，等到点再动手`)
+          // 上限 30 秒 = prepLeadSec 的上限。以前卡 15 秒，一波很多家时
+          // 访问没跑完就到点，等待被截断、提前提交被服务端拒掉。
+          await sleep(Math.min(leftMs, 30000))
         }
         return await stealFromTargets(world, cfg, log, memo, out)
       }
@@ -598,35 +770,16 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   // 是拿到「刚好解禁那几块地」的唯一途径；顺便也能捞到此刻就能偷的。
   await refreshWatchList(world, cfg, log, memo)
   const watched = await watchRound(world, cfg, log, memo)
+  // 巡逻一旦撞见值得偷的就直接去了（watchRound 自己会早退），不再扫全服目录。
+  if (watched.length) return await stealFromTargets(world, cfg, log, memo, watched)
   const scanned = await scanStealTargets(world, cfg, log, memo)
-  const seen = new Set(watched.map((x) => x.id))
-  const targets = [...watched, ...scanned.filter((x) => !seen.has(x.id))]
-  return await stealFromTargets(world, cfg, log, memo, targets)
+  return await stealFromTargets(world, cfg, log, memo, scanned)
 }
 
 /**
- * 一次偷菜的期望收益（移植自旧版 extension/lib/social.mjs 的 inspect().ev）。
- *
- *   ev = (1−被发现) × 货值
- *      + 被发现 × (胜率 × (货值 + 每处多拿 1 个) − 败率 × 罚款)
- *      − 体力 × 机会成本
- *
- * 只看货值会系统性地高估：邻居里一半以上的岛有守家鱼，等级比我们高时
- * 胜率只有 30~50%，输一次按货值 1.2 倍赔（上限 5,000 D）。
- * 一批 5,000 D 的货，期望可能只有 1,000 出头——扣掉体力成本就是亏的。
+ * 一次偷菜的期望收益在 steal-schedule.mjs 里（扫描、巡逻、调度预筛共用同一份），
+ * 这里直接 import 使用。
  */
-function stealEV(tg, myLevel, energyValue) {
-  const spots = Math.max(1, tg.targets?.length || 1)
-  const V = tg.value || 0
-  const detect = Number.isFinite(tg.detect) ? tg.detect : 0.55
-  const pWin = tg.guard
-    ? Math.max(0.03, Math.min(0.95, 0.5 + ((myLevel || 1) - (tg.level || 1)) * 0.15))
-    : 1
-  const bonus = V / spots                     // 打赢：每处多拿 1 个
-  const fine = Math.min(tg.fineMax || 5000, V * 1.2)
-  const energy = Math.min(tg.energy || 5, 15)
-  return (1 - detect) * V + detect * (pWin * (V + bonus) - (1 - pWin) * fine) - energy * energyValue
-}
 
 /** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
 async function stealFromTargets(world, cfg, log, memo, targets) {
@@ -696,7 +849,7 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
       if (res.outcome === 'win') {
         // 服务端返回 res.items = [[id, n], ...]，可能不止一种货
         const items = res.items?.length ? res.items : (res.item ? [[res.item, res.n || 1]] : [])
-        const spots = res.spots || targets.length || 1
+        const spots = res.spots || tg.targets?.length || 1
         let thisValue = 0
         for (const [id, n] of items) thisValue += unitOf(id) * n
         stolen += spots
@@ -730,29 +883,40 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
         world.state.en = r.energy
       }
     } catch (e) {
-      log(`偷 ${tg.name} 出错：${e.message}`)
+      // 最常见的两种：409/「TA 家现在没有能偷的」= 被别人抢先；
+      // 403/401 = cookie 失效。把状态码和「这份数据是几秒前的」都打出来，
+      // 否则日志里只有一句话，分不清是程序 bug 还是竞争。
+      const age = Math.max(0, Math.round(world.now - (tg.seenAt || world.now)))
+      log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
+        `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处`)
     }
-    // 这座岛已经处理过了：把它的解禁记录从调度表里删掉。
-    // 不删的话，那个「解禁时刻」还留在表里，nextWake 会一直把它当成
-    // 「马上要解禁」来唤醒，造成几秒一次的循环唤醒。
+    // 这座岛已经处理过了：清掉它这一个「解禁时刻」。
+    // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
     // 下次真正扫到这座岛时 updateIsleSchedule 会重新算出新的解禁点。
     if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
       const rec = memo.stealSchedule[tg.id]
-      rec.upcoming = (rec.upcoming || []).filter((u) => !tg.targets?.some((x) => x.kind === u.kind && x.i === u.i))
+      rec.upcoming = []
+      rec.nextGroup = []
+      rec.nextAt = 0
+      rec.nextEV = 0
+      // 60 秒后让巡逻重新访问一次：这次拿到的可能是「下一块地的解禁时刻」，
+      // 它可能就在几分钟后。直接用 checkEvery（30 分钟）会把它整段错过。
+      rec.checkAt = world.now + 60
     }
     await sleep(1500)
   }
   if (stolen) log(`本轮偷菜小结：${stolen} 处，${Math.round(value).toLocaleString('en-US')} D（去了 ${tried} 家）`)
   else if (tried) log(`本轮偷菜：去了 ${tried} 家，没有收获`)
   else if (starved) {
+    const minEV = st.minEV ?? st.minValue ?? 3000
     const costs = targets
-      .filter((t) => t.value >= (st.minValue ?? 3000))
+      .filter((t) => t.value >= minEV)
       .map((t) => Math.min(t.energy, st.maxEnergy ?? 15))
     const cheapest = costs.length ? Math.min(...costs) : (st.maxEnergy ?? 15)
     log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点，` +
       `口粮补不上或每点超过 ${st.maxEnergyCost ?? 600} D）`)
   } else if (skippedEV) {
-    log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${st.minValue ?? 3000} D），不去`)
+    log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${st.minEV ?? st.minValue ?? 3000} D），不去`)
   }
   return { stolen, value }
 }

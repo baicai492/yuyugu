@@ -449,7 +449,7 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
 /**
  * 主规划：返回 { actions, summary }
  */
-export function planRound(world, cfg, log = () => {}) {
+export function planRound(world, cfg, log = () => {}, opts = {}) {
   const R = world.R
   const t = world.now
   const s = clone(world.state)
@@ -809,12 +809,20 @@ export function planRound(world, cfg, log = () => {}) {
     }
   }
 
-  // ---------- 6. 投资（只买 10 天内回本的） ----------
-  if (cfg.invest?.enabled) {
+  // ---------- 6. 投资（只买 5 天内回本的） ----------
+  if (cfg.invest?.enabled && opts.allowInvest !== false) {
     const inv = planInvestments(R, s, expPrices, coins, cfg, t)
+    // 单次规划最多买 maxPerRound 项。所有候选都是同一时刻估出来的，
+    // 一次全买等于把同一个判断重复下注；分开到后续巡视，规则变了还能停手。
+    const maxInv = Math.max(1, cfg.invest?.maxPerRound ?? 1)
+    let invested = 0
     for (const it of inv) {
+      if (invested >= maxInv) break
       if (coins < it.cost + (cfg.invest.reserveCoins || 0)) continue
-      if (push(it.action)) summary.push(`投资：${it.name}（${fmt(it.cost)}，约 ${it.payback.toFixed(1)} 天回本）`)
+      if (push(it.action)) {
+        invested++
+        summary.push(`投资：${it.name}（${fmt(it.cost)}，约 ${it.payback.toFixed(1)} 天回本）`)
+      }
     }
   }
 
@@ -1308,22 +1316,13 @@ export function planRound(world, cfg, log = () => {}) {
 export function planInvestments(R, s, prices, coins, cfg, t) {
   const W = R.WORLD
   const out = []
-  // 回本期限不是一个固定值，而是随「闲置现金」浮动。
+  // 回本上限是硬阈值，不随现金放宽。
   //
-  // 现金闲着本身就是亏的：余额税每天 08:00 按 0.1%–0.3% 扣，现金也不会自己生钱。
-  // 所以手头闲置越多，能接受的回本期就越长——这是「现金是手段、产能是目的」
-  // 的直接推论（榜一 model/objective.mjs 也是把现金当成 C0 项而不是目标）。
-  //
-  // 线上实测（2026-11-12）：现金 19.2M、reserve 3M，maxPaybackDays=10 时
-  // **一个候选都没有**——16.2M 一分没换成产能，同时每天白交约 3.46 万余额税。
-  // 放宽到 30 天立刻出现两条可投项：
-  //   扩畜栏 + 小猪  390,000   日收益 40,706   11.3 天回本
-  //   小屋 Lv3        600,000   日收益 34,059   17.6 天回本
-  // 两条都在 30 天内回本，而且产能是永久、可复利的。
-  const idleCoins = coins - (cfg.invest?.reserveCoins || 0)
-  const maxPayback = idleCoins >= (cfg.invest?.idleCoinsForLoose ?? 5_000_000)
-    ? (cfg.invest?.maxPaybackDaysIdle ?? 30)
-    : (cfg.invest?.maxPaybackDays || 10)
+  // 2026-11-12 线上试过「闲置 ≥500 万时放宽到 30 天」，结果 3 分钟内
+  // 连买 6 轮畜栏 + 6 只猪，共 414 万。回本期是用当前产出/价格估的，
+  // 站点一改规则估算就可能整体失效，期限越长风险越大；5 天以内
+  // 即使规则小幅变化也还有纠错余地。
+  const maxPayback = cfg.invest?.maxPaybackDays || 5
   // 长期平均的「择时卖出」系数：基础价的 1.3 倍，再扣税
   const longRunFactor = cfg.price?.longRun ?? 1.3
   const taxRate = coins >= R.B12_TAX.high ? 0.03 : coins >= R.B12_TAX.free ? 0.01 : 0
