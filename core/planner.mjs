@@ -789,6 +789,34 @@ export function planRound(world, cfg, log = () => {}) {
     const needForRipe = ripeSoon.length * (W.cost.harvest || 1)
     const keep = Math.min(needForRipe, Math.floor(R.energyMax(s) / 2))
 
+    // --- 补货：炸弹和鱼饵 ---
+    //
+    // 旧版每次巡视都会把这两样补到够用的量，重写 v2 时整段丢了。
+    // 后果很直接：
+    //   · 鱼饵让高价鱼出现权重 ×2、脱钩率 -8 个百分点（见 fishEV 的 boost/miss），
+    //     不带饵的期望收益几乎腰斩——线上日志里「钓鱼 2,440/体力」是裸钓的数。
+    //   · 炸弹用光（每天 10 个）就再也炸不了矿，10 次额度直接烂掉。
+    // 两样都远便宜于它们带来的收益（炸弹 2,500 D、饵 400 D/个），
+    // 所以只要能付得起就补满。
+    {
+      const cap = Math.min(cfg.invest?.reserveCoins || 0, 50000)
+      const leftOf = (k, max) => Math.max(0, (max || 0) - ((s.iq?.d === R.isleIndex(t) ? s.iq[k] : 0) || 0))
+      if (cfg.work.bomb) {
+        const lack = leftOf('bomb', W.daily.bomb) - (s.inv.bomb?.[0] || 0)
+        const price = R.SHOP.bomb?.price || 0
+        if (lack > 0 && price > 0 && coins - lack * price >= cap) {
+          if (push({ a: 'buy', id: 'bomb', n: lack })) summary.push(`买炸弹 ×${lack}（${fmt(lack * price)}）`)
+        }
+      }
+      if (cfg.work.fish && cfg.work.bait) {
+        const lack = Math.min(99, leftOf('fish', W.daily.fish)) - (s.inv.bait?.[0] || 0)
+        const price = R.SHOP.bait?.price || 0
+        if (lack > 0 && price > 0 && coins - lack * price >= cap) {
+          if (push({ a: 'buy', id: 'bait', n: lack })) summary.push(`买鱼饵 ×${lack}（${fmt(lack * price)}）`)
+        }
+      }
+    }
+
     // --- 钓鱼时段窗口 ---
     // 岛上的「小时」是现实 10 分钟一格，鱼分时段出没。当前时段收益远低于今天最好的时段时，
     // 先把竿数留着，等窗口。但快到换岛日边界（额度即将重置）时要清掉，别浪费。
