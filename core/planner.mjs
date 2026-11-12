@@ -800,6 +800,11 @@ export function planRound(world, cfg, log = () => {}) {
     // 循环条件不能只看「体力够不够一件活」：体力见底时还要能靠吃口粮补上来。
     // 用 0 做下界，真正的门槛在循环体里按任务成本判断。
     let guard = 0
+    // 本轮已经决定「先不做」的任务。收益最高的那件体力不够时，要退回去看
+    // 第二优的，而不是整轮放弃：线上实测体力 17、keep 12，
+    // 炸矿（6 点、3,156/体力）够不着就 break，而 3 点就能干的挖矿
+    // （937/体力、还剩 100 次）也跟着一起不动，白白退避 300 秒。
+    const skipJobs = new Set()
     while (s.en >= 0 && guard++ < 200) {
       const fishLeft = W.daily.fish - ((s.iq?.d === R.isleIndex(t) ? s.iq.fish : 0) || 0)
       const mineLeft = W.daily.mine - ((s.iq?.d === R.isleIndex(t) ? s.iq.mine : 0) || 0)
@@ -816,7 +821,7 @@ export function planRound(world, cfg, log = () => {}) {
       if (mineVal > 0) jobs.push({ a: { a: 'mine', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.mine, v: mineVal / W.cost.mine, label: '挖矿', lazy: true })
       if (bombVal > 0) jobs.push({ a: { a: 'bomb', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.bomb, v: bombVal / W.cost.bomb, label: '炸矿', lazy: true })
       jobs.sort((x, y) => y.v - x.v)
-      const job = jobs[0]
+      const job = jobs.find((j) => !skipJobs.has(j.label))
       if (!job) break
       // 收益必须高于口粮成本，否则不值得做
       if (job.v <= eatCost * (cfg.work.minValueRatio ?? 1.2)) break
@@ -835,7 +840,7 @@ export function planRound(world, cfg, log = () => {}) {
         // 实测线上就是这样：体力 0、keep 10、regenBudget 50，
         // 于是每轮都 break 等回复，6 分钟只种了 1 块地。
         // 这种情况说明回复速度已经跟不上成熟速度，必须吃口粮。
-        if (job.lazy && regenBudget >= job.cost && usable >= 0) break
+        if (job.lazy && regenBudget >= job.cost && usable >= 0) { skipJobs.add(job.label); continue }
         // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
         // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
         //
@@ -857,11 +862,15 @@ export function planRound(world, cfg, log = () => {}) {
           if (!push({ a: 'eat', id: food.id, q: food.q })) break
           need -= Math.min(food.restore, room)
         }
-        // 吃不够就说明口粮/上限都到顶了，这轮干不了，别再空转
-        if (s.en - keep < job.cost) break
+        // 吃不够就说明口粮/上限都到顶了，这件活这轮做不了，退回去看下一件
+        if (s.en - keep < job.cost) { skipJobs.add(job.label); continue }
+        // 体力被吃过之后，之前因「体力不够」被跳过的任务要重新评估
+        skipJobs.clear()
         continue
       }
-      if (!push(job.a)) break
+      // 提交失败（缺炸弹、矿洞层数不够等）同样只是「这件活做不了」，
+      // 不该把整轮都否掉——线上出现过炸矿把挖矿一起卡死的情况。
+      if (!push(job.a)) { skipJobs.add(job.label); continue }
       // 这次消耗吃掉了一份「自然回复预算」：用掉的是本来会自己长出来的体力
       if (job.lazy) regenBudget = Math.max(0, regenBudget - job.cost)
     }
