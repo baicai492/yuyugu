@@ -560,10 +560,23 @@ export function planRound(world, cfg, log = () => {}) {
    * 农务（收/种/浇）的价值远高于口粮成本（晚收会被偷），所以这里
    * 不看「每点体力收益」，只要有口粮就吃。
    */
-  const ensureEnergy = (cost) => {
+  const ensureEnergy = (cost, { defer = true } = {}) => {
     if (!(cost > 0)) return true
     let guard = 0
     while (s.en < cost && guard++ < 30) {
+      // Just-In-Time：只差 1 点、且下一滴自然回复很快到账时，等它自己回，不吃口粮。
+      // 榜一 v1.2.0 的做法（phase10 Case C）：当「等自然回复」比「吃一份口粮」便宜时就等。
+      // 算一下：一块地空着 3 分钟的机会成本 ≈ 一天收益的 1/480，不到 2 D；
+      // 而一口最便宜的口粮也要几百 D。所以差最后 1 点时等，明显划算。
+      //
+      // defer=false 用于收割：熟地多放一秒就多一秒被偷的风险，宁可吃口粮。
+      if (defer && cost - s.en === 1) {
+        const regenSec = R.WORLD.regen || 180
+        const phase = Number(s.enT || s.now || t)
+        const nextDrop = phase + (Math.floor(Math.max(0, (t - phase) / regenSec)) + 1) * regenSec
+        // 下一滴在 1 个回复周期内到账（正常情况恒成立）→ 值得等，这一轮先不做
+        if (nextDrop - t <= regenSec + 2) return false
+      }
       // 口粮优先；体力已满时 foodChoices 返回空，此时只能等自然回复
       const food = foodChoices(R, s, prices)[0]
       if (food && s.en < R.energyMax(s)) {
@@ -589,7 +602,7 @@ export function planRound(world, cfg, log = () => {}) {
     if (st.stage === 3) {
       // 熟了必须先补体力再收：收不了的话下一轮巡检又会报「地熟了」，
       // 醒来还是收不了，整夜空转，作物就那么在树上被偷。
-      if (ensureEnergy(R.WORLD.cost.harvest || 1) && push({ a: 'harvest', i })) {
+      if (ensureEnergy(R.WORLD.cost.harvest || 1, { defer: false }) && push({ a: 'harvest', i })) {
         harvested++
         // p.sv 是小偷记录：收获前被偷过，这块地这次只收得到 1 个
         if (p.sv?.length) stolenParcels.push(p.c)
@@ -788,7 +801,7 @@ export function planRound(world, cfg, log = () => {}) {
       if (skippedOffline) summary.push(`  离线避让：${skippedOffline} 块先空着（种什么都赶在离线时段成熟）`)
       // 主动留空的地要说清原因，否则日志里「24 块只种 4 块」看起来像 bug
       const heldEmpty = empty.length - planted - skippedOffline - failedPlant
-      if (failedPlant) summary.push(`  还有 ${failedPlant} 块空地：体力不够种（每块要 ${R.WORLD.cost.plant || 2} 点），下轮再来`)
+      if (failedPlant) summary.push(`  还有 ${failedPlant} 块空地：体力不够种（每块要 ${R.WORLD.cost.plant || 2} 点），等体力回复后补种`)
       if (heldEmpty > 0 && !prefer) {
         summary.push(`  留空 ${heldEmpty} 块：一块地每岛日要吃 30 多点体力，` +
           `这些体力拿去钓/挖/炸能赚 ${fmt(soilCost)} D/点，种地回不了本`)
@@ -919,8 +932,17 @@ export function planRound(world, cfg, log = () => {}) {
     // 被加工吃掉，或者在别的动作里消耗掉。
     //
     // 上限取体力上限的一半：地再多也不能把体力全锁死，否则钓/挖/炸没法做。
-    const needForRipe = ripeSoon.length * (W.cost.harvest || 1)
-    const keep = Math.min(needForRipe, Math.floor(R.energyMax(s) / 2))
+    // 每块要熟的地不但要留收割的 1 点，还要留补种的 2 点
+    // （榜一 v1.2.0 的 harvest-replant continuity：收完立刻补种，地不能空着）。
+    // 以前只留收割的 1 点，收完地体力见底，补种又得现吃口粮，
+    // 中间空出来的那段时间就是纯损失——线上日志里反复出现
+    // 「还有 N 块空地：体力不够种（每块要 2 点），下轮再来」。
+    const replantCost = cfg.farm?.enabled ? (W.cost.plant || 2) : 0
+    const needForRipe = ripeSoon.length * ((W.cost.harvest || 1) + replantCost)
+    // 上限取体力上限的 60%（默认 140 → 84）：24 块地 × 3 点 = 72 能完整覆盖一波，
+    // 又不至于把体力全锁死——旧版 keep=24 那次因为口粮抵扣写成 0 才饿死钓鱼，
+    // 但反过来把上限开到 100% 同样会让钓/挖/炸一滴都分不到。
+    const keep = Math.min(needForRipe, Math.floor(R.energyMax(s) * 0.6))
 
     // --- 补货：炸弹和鱼饵 ---
     //
