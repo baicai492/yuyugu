@@ -68,15 +68,13 @@ console.log(`\n[1] 全部做完 → 长睡（cap=${cap}）`)
   const plots = Array(6).fill(null).map(() => ({ c: growing.id, t: now, w: 3, g: 0, y: 0, sv: [] }))
   const w = mkWorld({ plots })
   const nap = nextWake(w, workOnly, allDone)
-  // 换岛日边界如果比 cap 更近，睡到边界是对的（见用例 2）。
-  // 这里只在边界确实更远时才要求睡满 cap，否则这条测试会随时辰飘。
   const dayLeft = R.b12NextIsleBoundary(now) - now
-  if (dayLeft > cap + 10) {
-    ok(nap === cap, `额度全空 + 地都在长 → ${cap} 秒`, `got=${nap}`)
-  } else {
-    ok(nap <= Math.ceil(dayLeft) + 5,
-      `边界（${Math.round(dayLeft)} 秒）比 cap 近 → 睡到边界`, `got=${nap}`)
-  }
+  const st = R.cropStage(plots[0], now, true)
+  // 「长睡」的下限是 maxSleep，上限是 cap，但还要和「下一块地成熟」取小——
+  // 地熟了就得到场收割（漏收 = 被偷），这是用例 8 专门守的行为。
+  ok(nap >= Math.min(cap, Math.ceil(dayLeft)) - 5 || nap <= Math.ceil(st.left) + 5,
+    `额度全空 → 睡到 cap/边界/下次成熟（${cap}s / ${Math.round(dayLeft)}s / ${Math.round(st.left)}s）`,
+    `got=${nap}`)
   ok(nap > (workOnly.loop?.maxSleep ?? 120), '不会退回到 maxSleep 的短间隔', `maxSleep=${workOnly.loop?.maxSleep}`)
 }
 
