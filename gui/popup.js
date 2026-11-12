@@ -356,20 +356,54 @@ function renderSettings() {
 }
 
 // ---------- 渲染：日志 ----------
+// 对齐旧版 Chrome 插件的观感：按内容分级着色 + 跨天插日期行 + <time> 标签。
+// 旧版这三处让长日志一眼能扫出「赚了 / 亏了 / 出错了 / 投资擂台偷菜」，
+// 重写 v2 时只留了一个 .err，读起来很费劲。
+function logClass(msg) {
+  if (/出错|失败|⚠|❌|被偷|打跑|赔了|余额不足|登录已失效/.test(msg)) return 'bad'
+  if (/^投资|^擂台|^偷菜：|^偷菜 |防偷|^五子棋|^帮忙/.test(msg)) return 'info'
+  if (/收入|赢了|到手|\+[\d,]+ D|本次巡视.*\+/.test(msg)) return 'good'
+  return ''
+}
+
 function renderLogs() {
   const box = $('logs')
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20
   const src = logMode === 'hist' ? histLines : logMode === 'legacy' ? legacyLines : logLines
-  box.replaceChildren(...src.slice(-600).map((l) => {
-    const div = document.createElement('div')
-    if (l.level === 'err') div.className = 'err'
-    let t
-    if (l.ts) t = l.ts.slice(5)                       // 历史：MM-DD HH:MM:SS
-    else if (l.t) t = new Date(l.t).toLocaleTimeString('zh-CN', { hour12: false })
-    else t = ''
-    div.innerHTML = `<span class="time">${t}</span> ${escapeHtml(l.msg)}`
-    return div
-  }))
+  const out = []
+  let lastDay = ''
+  for (const l of src.slice(-600)) {
+    // 时间戳：历史日志是 "MM-DD HH:MM:SS" 字符串，实时日志是毫秒
+    let day = '', clock = ''
+    if (l.ts) { day = l.ts.slice(0, 10); clock = l.ts.slice(11, 19) }
+    else if (l.t) {
+      const d = new Date(l.t)
+      day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      clock = d.toLocaleTimeString('zh-CN', { hour12: false })
+    }
+    // 跨天插一行居中的日期，长日志里翻起来有段落感
+    if (day && day !== lastDay) {
+      lastDay = day
+      const dp = document.createElement('p')
+      dp.className = 'day'
+      dp.textContent = day
+      out.push(dp)
+    }
+    const p = document.createElement('p')
+    const cls = l.level === 'err' ? 'bad' : logClass(l.msg || '')
+    if (cls) p.className = cls
+    const t = document.createElement('time')
+    t.textContent = clock
+    // createTextNode 本身就是转义安全的，不能再套 escapeHtml（会变成 &lt; 显示出来）
+    p.append(t, document.createTextNode(l.msg || ''))
+    out.push(p)
+  }
+  if (!out.length) {
+    const p = document.createElement('p')
+    p.textContent = '还没有日志。'
+    out.push(p)
+  }
+  box.replaceChildren(...out)
   if (atBottom) box.scrollTop = box.scrollHeight
 }
 
