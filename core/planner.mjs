@@ -863,20 +863,38 @@ export function planRound(world, cfg, log = () => {}) {
     }
     const craftKeep = ripeCount * (R.WORLD.cost.harvest || 1)
     const craftBudget = Math.max(0, Math.floor(s.en) - craftKeep)
-    for (const { r, margin } of ranked) {
+    // 配方链（金锭 → 钻石王冠）要同轮打通。
+    //
+    // 以前这里只跑一遍 ranked：王冠的毛利最高，但它的原料金锭还没做出来，
+    // have('ingot') 是 0，于是 n=0 跳过；同一轮做完金锭就结束了，
+    // 王冠必须等下一轮——而 nextWake 可能几分钟后才醒。
+    // 现在按最多 3 层反复跑，push 会实时更新预演状态，做完金锭后
+    // 第二轮就能看到它并用掉。现有配方链最深 2 层，3 层留余量。
+    for (let pass = 0; pass < 3; pass++) {
       if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
-      const n = Math.min(
-        left - made,
-        craftBudget - made,
-        ...Object.entries(r.in).map(([id, k]) => Math.floor(have(id) / k)),
-      )
-      if (n <= 0) continue
-      if (push({ a: 'craft', id: r.id, n })) {
-        made += n
-        const cost = Object.entries(r.in).reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
-        const sale = (expPrices[r.id] || prices[r.id] || r.price) * n
-        summary.push(`加工 ${r.name}×${n}（成本 ${fmt(cost * n)} → 预期 ${fmt(sale)}，毛利 ${fmt(sale - cost * n)}）`)
+      const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
+        const cost = Object.entries(r.in).reduce((a, [id, n]) => a + (prices[id] || 0) * n, 0)
+        const salePrice = expPrices[r.id] || prices[r.id] || r.price
+        return { r, margin: salePrice - cost }
+      }).filter((x) => x.margin > 0).sort((a, b) => b.margin - a.margin)
+      let progressed = false
+      for (const { r } of ranked) {
+        if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
+        const n = Math.min(
+          left - made,
+          craftBudget - made,
+          ...Object.entries(r.in).map(([id, k]) => Math.floor(have(id) / k)),
+        )
+        if (n <= 0) continue
+        if (push({ a: 'craft', id: r.id, n })) {
+          made += n
+          progressed = true
+          const cost = Object.entries(r.in).reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
+          const sale = (expPrices[r.id] || prices[r.id] || r.price) * n
+          summary.push(`加工 ${r.name}×${n}（成本 ${fmt(cost * n)} → 预期 ${fmt(sale)}，毛利 ${fmt(sale - cost * n)}）`)
+        }
       }
+      if (!progressed) break
     }
   }
 
