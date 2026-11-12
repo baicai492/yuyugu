@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
 import { checkRulesUpdate, rulesVersion } from './rules.mjs'
 import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices } from './planner.mjs'
-import { todayStartFromLedger, todayBookFromLog } from './logfile.mjs'
+import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
@@ -168,6 +168,17 @@ export class Engine {
       if (book.rounds > 0) {
         earn = book.earn; spend = book.spend; tax = book.tax
         this.log(`今日收支从日志重建：+${fmt(earn)} / −${fmt(spend)}（税 ${fmt(tax)}，${book.rounds} 轮）`)
+      }
+    }
+    // 税单独兜一次底：旧版本把「卖货税」记成了恒 0（取错字段，见 world.act），
+    // 那个 0 已经覆盖写进 state.json 了。光修取值不够——当天已经跑过的部分
+    // 恢复出来仍然是 0，GUI 会一直显示 0 到下一个自然日。
+    // 日志里每批卖货都有「（已扣税 N）」，取两者较大值即可平滑过渡。
+    {
+      const fromLog = todayTaxFromLog(this.logDir)
+      if (fromLog > tax) {
+        this.log(`今日卖货税从日志重建：${fmt(fromLog)}（state.json 里是 ${fmt(tax)}，旧版本没记上）`)
+        tax = fromLog
       }
     }
 

@@ -238,8 +238,36 @@ export function todayBookFromLog(dir, nowMs = Date.now()) {
   return { earn, spend, tax, rounds, from: file }
 }
 
-/** 日志目录概况（给 GUI 显示有哪些天可选） */
-export function logInventory(dir) {
+/**
+ * 从今天的日志里重建「卖货税」。
+ *
+ * 为什么单独来一个：state.json 里的 daily.tax 是**旧版本存进去的 0**。
+ * 旧代码 world.act 取的是响应体顶层的 j.tax（服务端根本不返回这个字段），
+ * 所以 tax 从头到尾都是 0，还被覆盖写进 state.json。
+ * 修好取值之后，只要当天已经跑过一阵，恢复出来的仍是 0，
+ * GUI 会一直显示 0 直到下一个自然日。
+ *
+ * 日志里每批卖货都留了「（已扣税 N）」，是当日累计的最可靠来源。
+ * 只数这一种行，不数「本轮收支（税 N）」——那是同一笔税的上卷，会重复计。
+ */
+export function todayTaxFromLog(dir, nowMs = Date.now()) {
+  const todayBj = new Date(nowMs + 8 * 3600 * 1000).toISOString().slice(0, 10)
+  const file = resolve(dir, `yuyugu-${todayBj}.log`)
+  if (!existsSync(file)) return 0
+  let text = ''
+  try { text = readFileSync(file, 'utf8') } catch { return 0 }
+  const re = /已扣税 ([\d,]+)/
+  let tax = 0
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith(todayBj)) continue
+    const m = re.exec(line)
+    if (!m) continue
+    tax += Number(m[1].replace(/,/g, '')) || 0
+  }
+  return tax
+}
+
+/** 日志目录概况（给 GUI 显示有哪些天可选） */export function logInventory(dir) {
   const days = listLogDays(dir)
   return days.map((day) => {
     const file = resolve(dir, `yuyugu-${day}.log`)
