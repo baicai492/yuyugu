@@ -312,7 +312,9 @@ function renderXian() {
   // 资源统计：灵石换不成 D 币，所以这一块只按「灵石口径」估值，和现金收益无关。
   const a = x.assets
   if (a) {
-    $('xAssets').textContent = '≈ ' + fmt(a.total) + ' 灵石'
+    // 概览里的总数是估值（灵石 + 药材 + 种子 + 丹药 + 成熟作物），
+    // 顺手把真正能立刻花的灵石数写出来，避免被 ≈ 的大数字误导。
+    $('xAssets').textContent = `≈ ${fmt(a.total)} 灵石（实有 ${fmt(a.stone)}）`
     $('xAssets').title = `灵石 ${fmt(a.stone)} + 药材 ${fmt(a.bagValue)} + 种子 ${fmt(a.seedValue)}` +
       ` + 丹药 ${fmt(a.pillValue)}（参考价） + 成熟作物 ${fmt(a.groundValue)}`
     $('xAssetHerbs').textContent = `药材 ${a.bagQty} 件（可卖 ${fmt(a.bagValue)}）· 种子 ${a.seedQty} 包（成本 ${fmt(a.seedValue)}）`
