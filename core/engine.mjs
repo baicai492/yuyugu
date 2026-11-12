@@ -244,6 +244,7 @@ export class Engine {
     let plan = { actions: [], summary: [] }
     let rounds = 0
     let totalEarn = 0, totalSpend = 0, totalTax = 0
+    let totalActions = 0        // 本轮真正提交成功的动作数（判断「有没有推进」用）
     while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
       this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
       // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
@@ -261,6 +262,7 @@ export class Engine {
         totalEarn += res.earn || 0
         totalSpend += res.spend || 0
         totalTax += res.tax || 0
+        totalActions += (res.out || []).filter((o) => o?.ok).length
         this.credit(res.earn || 0, res.spend || 0, res.tax || 0)   // 边赚边记，GUI 立刻能看到
         if (plan.summary.length) this.log(plan.summary.join('；'))
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
@@ -354,7 +356,16 @@ export class Engine {
 
     // ---------- 下次唤醒 ----------
     this.setStep('计算下次巡视时间')
-    const sleep = cfg.dry ? (cfg.loop?.maxSleep || 120) : nextWake(w, cfg, this.memo)
+    let sleep = cfg.dry ? (cfg.loop?.maxSleep || 120) : nextWake(w, cfg, this.memo)
+    // 保险：nextWake 说「立刻有事」（<10 秒）但这一轮一个动作都没做成，
+    // 说明「看起来有活其实干不了」（体力/材料/现金卡住）。
+    // 这时必须退避，否则就是每几秒醒一次的刷屏循环——
+    // 之前体力 0 收不了地那次就是这种表现。
+    if (!cfg.dry && sleep < 10 && totalActions === 0) {
+      const cool = cfg.loop?.stuckCool ?? 300
+      this.log(`本轮没有做成任何动作但唤醒间隔只有 ${sleep} 秒，退避到 ${cool} 秒`, 'warn')
+      sleep = cool
+    }
     this.status = {
       state: 'waiting',
       step: '',

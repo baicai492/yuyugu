@@ -1048,10 +1048,14 @@ export function nextWake(world, cfg, memo = {}) {
   }
   if (hasRipe) {
     const canHarvest = s.en >= (R.WORLD.cost.harvest || 1)
-    // 口粮能补上也算「收得动」
+    // 口粮能补上也算「收得动」。注意这里的价格要用 world.prices——
+    // nextWake 作用域里没有 prices 局部变量，以前写成 foodChoices(R, s, prices)
+    // 会抛 ReferenceError，被 catch 吞掉后 canEat 永远是 false，
+    // 于是体力 0 时「有熟地」完全不算事，nextWake 给 108 秒，
+    // 而 watchOnce 又报「地熟了」——两边打架，日志刷屏。
     let canEat = false
     if (!canHarvest) {
-      try { canEat = cfg.energy?.eat !== false && foodChoices(R, s, prices).length > 0 } catch {}
+      try { canEat = cfg.energy?.eat !== false && foodChoices(R, s, world.prices).length > 0 } catch {}
     }
     if (canHarvest || canEat) push(1)
   }

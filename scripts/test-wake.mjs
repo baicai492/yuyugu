@@ -127,5 +127,28 @@ console.log('\n[6] 帮忙还没做完 → 不算「没事可做」')
   ok(nap < cap, '帮忙还有额度 → 短间隔', `got=${nap}`)
 }
 
+console.log('\n[7] 体力 0 但有口粮 + 有熟地 → 必须立刻醒（不能卡住）')
+{
+  // 这条覆盖一个真实 bug：nextWake 里写成了 foodChoices(R, s, prices)，
+  // 而 nextWake 作用域里没有 prices（只有 world.prices），抛 ReferenceError
+  // 被 catch 吞掉 → canEat 永远 false → 体力 0 时「有熟地」不当回事，
+  // 而 watchOnce 又按另一套逻辑报「地熟了」，两边打架，日志每几秒刷一条。
+  const season = R.seasonOf(R.isleDay(now))
+  const growing = R.CROPS.find((c) => c.seasons.includes(season) && !c.regrow)
+  const plots = Array(6).fill(null).map(() => ({
+    c: growing.id, t: now - Math.ceil(growing.grow * 60 * 0.8) - 60, w: 3, g: 99999, y: 0, sv: [],
+  }))
+  // 体力 0，但库存有大量可吃的当季作物
+  const w = mkWorld({ plots, en: 0 })
+  w.state.inv[growing.id] = [999, 0, 0]
+  const nap = nextWake(w, workOnly, allDone)
+  ok(nap <= 5, '体力 0 + 有口粮 + 有熟地 → 立刻醒', `got=${nap}`)
+
+  // 同样的场景但完全没有口粮 → 收不了，不该立刻醒（等体力回复）
+  const w2 = mkWorld({ plots, en: 0 })
+  const nap2 = nextWake(w2, workOnly, allDone)
+  ok(nap2 > 5, '体力 0 且无口粮 → 等体力回复，不空转', `got=${nap2}`)
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)
