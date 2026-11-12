@@ -390,6 +390,34 @@ export class Engine {
       }
     }
 
+    // ---------- 偷菜（掐点优先） ----------
+    //
+    // 偷菜的价值全在「解禁那一刻」：可偷筛选能看到的都是别人漏掉的，
+    // 真正的好货几秒内就被抢走。而五子棋 10 局要一分钟、擂台 30 场要四分钟，
+    // 等它们跑完再去偷，解禁早过了——线上 2026-11-12 全天记下 250 处待解禁、
+    // 实际偷到 0 件。所以只在「确实有目标进入解禁窗口」时插队，
+    // 平时仍按原顺序（下面那块）走，不改变日常节奏。
+    let stealSnipeDone = false
+    if (cfg.social?.steal?.enabled && !cfg.dry &&
+        shouldSnipe(this.memo, this.memo.stealSchedule, w.now)) {
+      try {
+        this.setStep('串门 · 偷菜（掐点）')
+        const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
+        totalEarn += r.value || 0
+        this.credit(r.value || 0)
+        if ((r.stolen || 0) > 0) noteSnipeResult(this.memo, r.stolen)
+        else if (this.memo.stealWakePending) {
+          const before = this.memo.stealWakeGap || 60
+          noteSnipeResult(this.memo, 0)
+          if (this.memo.stealWakeGap > before) {
+            this.log(`偷菜：这一趟没抢到，下次因解禁唤醒的间隔放宽到 ${this.memo.stealWakeGap} 秒`)
+          }
+        }
+        this.memo.stealWakePending = false
+        stealSnipeDone = true
+      } catch (e) { this.log('偷菜（掐点）出错：' + e.message, 'err') }
+    }
+
     // ---------- 52弟 ----------
     if (cfg.npc?.enabled && !cfg.dry) {
       try {
@@ -443,7 +471,8 @@ export class Engine {
     }
 
     // ---------- 偷菜 ----------
-    if (cfg.social?.steal?.enabled && !cfg.dry) {
+    // 掐点那一块已经跑过就跳过：否则会紧接着再全量扫一遍目录，白花几十秒。
+    if (cfg.social?.steal?.enabled && !cfg.dry && !stealSnipeDone) {
       try {
         this.setStep('串门 · 偷菜')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
