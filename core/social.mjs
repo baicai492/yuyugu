@@ -415,6 +415,22 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   // 下次真正扫到那座岛时 updateIsleSchedule 会重新算。
   sweepStaleUnlocks(memo.stealSchedule, world.now, leadSec)
 
+  // 体力不够偷任何一家时，连扫都别扫。
+  //
+  // 偷菜最便宜也要 rules.energy（服务端常量 5 点）体力。体力 0 时照样去访问
+  // 8 座岛，只会得到「找到 N 家可偷但体力不够」+ 一堆新解禁记录，
+  // 然后过一会儿又被那些记录催醒——线上实测 62 秒一轮空转，持续了 4 分钟。
+  // 这一轮跳过即可，等体力回来了自然会重新扫。
+  const minStealE = 5
+  if (world.state.en < minStealE) {
+    const key = `${world.worldDay || ''}:${Math.floor(world.state.en)}`
+    if (memo.stealLowEnergyNoted !== key) {
+      memo.stealLowEnergyNoted = key
+      log(`偷菜：体力不足（${Math.floor(world.state.en)} < ${minStealE}），这一轮跳过`)
+    }
+    return { stolen: 0, value: 0 }
+  }
+
   const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec })
   // 「到点了」必须是「还没过点」才算：nx.at 已经过去时（负数差值）也满足 <= 13，
   // 会让每一轮都打断扫描间隔，配合 nextWake 的 1 秒候选变成几秒一醒的空转。

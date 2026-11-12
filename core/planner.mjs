@@ -1508,7 +1508,12 @@ export function nextWake(world, cfg, memo = {}) {
   }
 
   // 偷菜：扫描间隔到了就该去（不加这个会一直等 maxSleep，实际扫描被拖慢）
-  if (cfg.social?.steal?.enabled) {
+  //
+  // 体力不足 5 点时整个跳过：偷菜最便宜也要 5 点，醒来也只能看着。
+  // 更要紧的是那些「解禁时刻」记录还会被重新算一遍，
+  // 形成「醒来 → 扫一遍 → 什么都没做 → 再睡 → 再醒」的空转
+  // （线上 14:25~14:29 每 62 秒一轮）。体力回来之后这里自然会重新给候选。
+  if (cfg.social?.steal?.enabled && s.en >= 5) {
     const last = memo.stealScanAt || 0
     const every = cfg.social.steal.scanEvery ?? 1800
     const left = Math.max(0, every - (t - last))

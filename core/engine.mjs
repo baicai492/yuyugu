@@ -649,7 +649,12 @@ export class Engine {
     this.watchSnap = { stolen, coins: w.coins }
 
     // 5. 偷菜解禁时刻到了（精确调度，比「到点扫一遍」准得多）
-    if (this.cfg.social?.steal?.enabled) {
+    //
+    // 体力不足时不算「有事可做」：偷菜最便宜要 5 点体力，体力 0 时醒来
+    // 也只能干看着，然后那些解禁记录还会被重新算一遍，形成
+    // 「醒来 → 扫一遍 → 什么都没做 → 再睡 → 再醒」的空转。
+    // 线上 14:25~14:29 就是这么每 62 秒转一轮的。
+    if (this.cfg.social?.steal?.enabled && w.state.en >= 5) {
       const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
       const nx = nextUnlock(this.memo.stealSchedule || {}, t, { leadSec })
       if (nx && nx.at - t <= leadSec) {
