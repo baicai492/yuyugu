@@ -9,6 +9,7 @@
 import * as M from './market.mjs'
 import { planVault } from './warehouse.mjs'
 import { nextUnlock, waveLeadSec, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { allocateStamina } from './stamina-dp.mjs'
 
 const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -908,10 +909,12 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
 
   // ---------- 8. 花体力做最高收益的事（钓/挖/炸） ----------
   //
-  // 这一段有三处「往后看一眼」的判断，都是旧版有、重写时丢掉的：
-  //   keep     —— 马上要熟的地，先把收获体力留出来，别全花在钓鱼上
-  //   fishOK   —— 钓鱼有时段，低谷期不钓，等最佳时段
-  //   regenBudget —— 换岛日边界前自然回复够用的体力，不吃口粮，等它自己回
+  // 三处「往后看一眼」的判断：
+  //   keep   —— 马上要熟的地，先把收获体力留出来，别全花在钓鱼上
+  //   fishOK —— 钓鱼有时段，低谷期不钓，等最佳时段
+  //   背包   —— 钓鱼/挖矿/炸矿的单位收益不同、额度与现金约束不同，
+  //             用有界背包一次求出最优组合（见 core/stamina-dp.mjs），
+  //             再和口粮成本曲线比一次，决定吃多少口粮。
   if (cfg.work) {
     const W = R.WORLD
     // 口粮是立刻消耗掉的，按现价算成本
@@ -1044,112 +1047,160 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const fishOK =
       (fishNowEV >= fishBestEV * windowRatio || boundaryIn < deadlineSec || !canFinishQuota)
 
-    // --- 跨期体力预算 ---
-    // 换岛日边界前，体力每 regen 秒回 1 点。这部分「白来的」体力用来挖矿/炸矿时
-    // 不该吃口粮（吃口粮是有成本的）。先按回复量算出能白嫖几竿。
-    // regen 在上面算收获预留窗口时已经取过了，这里复用。
-    let regenBudget = Math.max(0, Math.floor(Math.max(0, boundaryIn - 600) / regen))
+    // --- 体力分配：有界背包（移植自榜一 solveBucketStaminaKnapsack） ---
+    //
+    // 旧版是贪心：按 D/体力 排序、能付就做、够不着就退而求其次。边界上会选错——
+    // 体力 5 点时先做 3 点的挖矿，4 点的钓鱼就永远差 1 点，而正确解可能是
+    // 少挖一次换成钓鱼。榜一把所有「体力换钱」的活展开成单位物品做背包：
+    //   · 钓鱼：分「库存鱼饵」「无鱼饵」两档收益（带饵贵鱼权重 ×2、脱钩率 −8 个点）；
+    //   · 挖矿：额度封顶；
+    //   · 炸矿：额度、炸弹库存、矿层封顶。
+    // 求出「可用体力 e 以内的最大收益」之后，再和口粮成本曲线比一次，
+    // 决定要不要吃口粮、补到几点。
+    const iqUsed = (k) => ((s.iq?.d === R.isleIndex(t) ? s.iq[k] : 0) || 0)
+    const fishLeft = cfg.work.fish && fishOK ? Math.max(0, W.daily.fish - iqUsed('fish')) : 0
+    const mineLeft = cfg.work.mine ? Math.max(0, W.daily.mine - iqUsed('mine')) : 0
+    const bombLeft = cfg.work.bomb ? Math.max(0, W.daily.bomb - iqUsed('bomb')) : 0
+    const haveBait = Math.max(0, Math.floor(s.inv?.bait?.[0] || 0))
+    const haveBomb = Math.max(0, Math.floor(s.inv?.bomb?.[0] || 0))
+    const pickFloor = Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick])
+    const mineVal = mineLeft > 0 ? mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick) : 0
+    const canDeeper = s.mine.max < R.PICK_FLOOR[s.tools.pick]
+    let bombVal = bombLeft > 0 && mineLeft >= 6 && haveBomb > 0 ? mineEV(R, s, expPrices, true, t) : 0
+    // 镐子还能到更深的层时，炸矿的价值至少按「口粮成本 ×2」算：
+    // 下潜解锁的新矿层是长期收益，不能因为当下这层矿不值钱就永远不下去。
+    if (bombVal > 0 && canDeeper) bombVal = Math.max(bombVal, (W.cost.bomb || 1) * (eatCost || 0) * 2)
+    const fishValBait = fishLeft > 0 && cfg.work.bait ? fishEV(R, s, t, expPrices, true) : 0
+    const fishValNoBait = fishLeft > 0 ? fishEV(R, s, t, expPrices, false) : 0
+    // 单位体力的毛收益要明显高于口粮成本才值得排进背包（旧版同一条门槛）。
+    // 背包会自己比较「做」和「等自然回复」，但「连现有体力也不该浪费在这上面」
+    // 需要这条下限——否则矿价低谷时会用免费体力去做几乎不赚钱的活。
+    const minV = eatCost * (cfg.work.minValueRatio ?? 1.2)
 
-    // 循环条件不能只看「体力够不够一件活」：体力见底时还要能靠吃口粮补上来。
-    // 用 0 做下界，真正的门槛在循环体里按任务成本判断。
-    let guard = 0
-    // 本轮已经决定「先不做」的任务。收益最高的那件体力不够时，要退回去看
-    // 第二优的，而不是整轮放弃：线上实测体力 17、keep 12，
-    // 炸矿（6 点、3,156/体力）够不着就 break，而 3 点就能干的挖矿
-    // （937/体力、还剩 100 次）也跟着一起不动，白白退避 300 秒。
-    const skipJobs = new Set()
-    while (s.en >= 0 && guard++ < 200) {
-      const fishLeft = W.daily.fish - ((s.iq?.d === R.isleIndex(t) ? s.iq.fish : 0) || 0)
-      const mineLeft = W.daily.mine - ((s.iq?.d === R.isleIndex(t) ? s.iq.mine : 0) || 0)
-      const bombLeft = W.daily.bomb - ((s.iq?.d === R.isleIndex(t) ? s.iq.bomb : 0) || 0)
-      const useBait = cfg.work.bait && (s.inv.bait?.[0] || 0) > 0
-      // 钓到的鱼、挖到的矿都要囤到价格峰值才卖，按未来均价估才准
-      const fishVal = cfg.work.fish && fishLeft > 0 && fishOK ? fishEV(R, s, t, expPrices, useBait) : -1
-      // 挖矿剩 1~2 次时也做（体力够就直接挖），只是**不值得为它吃口粮**。
-      // 以前写成 mineLeft >= 3 才算，实测岛上剩 2 次挖矿时规划器直接判「没事可做」，
-      // 而 nextWake 又按「还有额度」每 60 秒催一次，于是整天每 60 秒醒一次、
-      // 醒来什么都不干（线上 14:44~14:47 稳定复现）。
-      const mineLowQuota = mineLeft > 0 && mineLeft < 3
-      const mineVal = cfg.work.mine && mineLeft > 0 ? mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick) : -1
-      const canDeeper = s.mine.max < R.PICK_FLOOR[s.tools.pick]
-      let bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, expPrices, true, t) : -1
-      // 镐子还能到更深的层时，炸矿的价值至少按「口粮成本 ×2」算：
-      // 下潜解锁的新矿层是长期收益，不能因为当下这层矿不值钱就永远不下去（旧版 canDeeper）。
-      if (bombVal >= 0 && canDeeper) bombVal = Math.max(bombVal, (W.cost.bomb || 1) * (eatCost || 0) * 2)
-      // 不按当前体力筛任务：体力不够时下面会决定「吃口粮补」还是「等自然回复」。
-      // 按体力筛的话，体力见底会直接跳出，永远等不到吃口粮那一步。
-      const jobs = []
-      if (fishVal > 0) jobs.push({ a: { a: 'fish', bait: useBait }, cost: W.cost.fish, v: fishVal / W.cost.fish, label: '钓鱼', lazy: false })
-      if (mineVal > 0) jobs.push({ a: { a: 'mine', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.mine, v: mineVal / W.cost.mine, label: '挖矿', lazy: true, lowQuota: mineLowQuota })
-      if (bombVal > 0) jobs.push({ a: { a: 'bomb', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.bomb, v: bombVal / W.cost.bomb, label: '炸矿', lazy: true })
-      jobs.sort((x, y) => y.v - x.v)
-      const job = jobs.find((j) => !skipJobs.has(j.label))
-      if (!job) break
-      // 收益必须高于口粮成本，否则不值得做
-      if (job.v <= eatCost * (cfg.work.minValueRatio ?? 1.2)) break
-
-      // 本岛日剩下的时间自然能回多少体力？够不够把剩余额度刷完？
-      // 刷不完就值得吃口粮把额度做掉：挖矿 937 D/体力、口粮 162 D/体力，
-      // 净赚 775。以前只要 regenBudget 够就无脑「等自然回复」，
-      // 实测体力 8、keep 6（可用 2 点）、挖矿要 3 点，于是每轮什么都不做、
-      // 退避 60 秒，97 次挖矿额度整岛日烂在那里。
-      // regenLeft 在钓鱼窗口那段已经算过，这里直接复用。
-      const quotaEnergy =
-        (fishLeft > 0 && fishOK ? fishLeft : 0) * (W.cost.fish || 0) +
-        Math.max(0, mineLeft) * (W.cost.mine || 0) +
-        Math.max(0, bombLeft) * (W.cost.bomb || 0)
-      const worthEating = quotaEnergy > regenLeft
-
-      // 可用体力 = 现有体力 − 农场预留。keep 里的那部分不能动，
-      // 它要留给 keepWindow 内成熟的地收割。这是防偷的硬底线。
-      const usable = s.en - keep
-      if (usable < job.cost) {
-        // 剩最后 1~2 次挖矿：体力够就挖，但绝不为了它吃口粮——
-        // 口粮成本 300+ D/点，而这点额度明天就重置了，不值得投资。
-        if (job.lowQuota) { skipJobs.add(job.label); continue }
-        // 可用的不够干这活。挖矿/炸矿没有时段限制，可以等自然回复——
-        // 只要换岛日前回复得够，白白等回来比花口粮买体力划算得多。
-        // 钓鱼不行：鱼有时段，过了就没了。
-        //
-        // 但有个死锁要避免：当体力连 keep 都填不满（usable < 0）时，
-        // 「等自然回复」永远启动不了——每 180 秒回 1 点，而这时
-        // keepWindow 里的地又熟了，keep 重新算还是那么高。
-        // 实测线上就是这样：体力 0、keep 10、regenBudget 50，
-        // 于是每轮都 break 等回复，6 分钟只种了 1 块地。
-        // 这种情况说明回复速度已经跟不上成熟速度，必须吃口粮。
-        if (job.lazy && regenBudget >= job.cost && usable >= 0 && !worthEating) { skipJobs.add(job.label); continue }
-        // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
-        // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
-        //
-        // 一个口粮往往不够：线上小麦回 6 点、番茄回 12 点，而 keep 可能是 12。
-        // 以前这里只试第一个口粮就下结论（`en + restore - keep < cost` → break），
-        // 体力 5 + 6 − 12 = −1 < 4，直接放弃，连吃都不吃。
-        // 结果就是「体力常年 1~5、钓鱼额度一整天 0/80」——不是没口粮，
-        // 是永远迈不过第一口的门槛。这里改成能连着吃到够为止。
-        const maxV = job.v * (cfg.work.minValueRatio ?? 1.2)
-        let need = keep + job.cost - s.en
-        let ate = 0
-        while (need > 0 && ate++ < 20) {
-          const food = foodChoices(R, s, prices)[0]
-          if (!food) break
-          if (food.costPerEnergy >= maxV) break
-          // 体力满了之后再吃也是浪费（咖啡例外，它能超上限，但也受 daily 限制）
-          const room = R.energyMax(s) - s.en
-          if (room <= 0) break
-          if (!push({ a: 'eat', id: food.id, q: food.q })) break
-          need -= Math.min(food.restore, room)
-        }
-        // 吃不够就说明口粮/上限都到顶了，这件活这轮做不了，退回去看下一件
-        if (s.en - keep < job.cost) { skipJobs.add(job.label); continue }
-        // 体力被吃过之后，之前因「体力不够」被跳过的任务要重新评估
-        skipJobs.clear()
-        continue
+    const units = []
+    if (fishLeft > 0) {
+      // 带饵只在「真能提高期望收益」时才用：库存饵是免费的，但 fishEV 里
+      // 仍按 400 D/个扣成本，所以低价鱼池时带饵反而更差，这时不用饵。
+      let nBait = (cfg.work.bait && haveBait > 0 && fishValBait > fishValNoBait)
+        ? Math.min(fishLeft, haveBait) : 0
+      if (nBait > 0 && !(fishValBait / W.cost.fish > minV)) nBait = 0
+      if (nBait > 0) {
+        for (let i = 0; i < nBait; i++) units.push({ key: 'fish-bait', cost: W.cost.fish, gain: fishValBait, act: { a: 'fish', bait: true } })
       }
-      // 提交失败（缺炸弹、矿洞层数不够等）同样只是「这件活做不了」，
-      // 不该把整轮都否掉——线上出现过炸矿把挖矿一起卡死的情况。
-      if (!push(job.a)) { skipJobs.add(job.label); continue }
-      // 这次消耗吃掉了一份「自然回复预算」：用掉的是本来会自己长出来的体力
-      if (job.lazy) regenBudget = Math.max(0, regenBudget - job.cost)
+      const nNo = fishLeft - nBait
+      if (nNo > 0 && fishValNoBait / W.cost.fish > minV) {
+        for (let i = 0; i < nNo; i++) units.push({ key: 'fish', cost: W.cost.fish, gain: fishValNoBait, act: { a: 'fish', bait: false } })
+      }
+    }
+    if (mineLeft > 0 && mineVal / W.cost.mine > minV) {
+      for (let i = 0; i < mineLeft; i++) units.push({ key: 'mine', cost: W.cost.mine, gain: mineVal, act: { a: 'mine', f: pickFloor } })
+    }
+    if (bombLeft > 0 && bombVal / W.cost.bomb > minV) {
+      const n = Math.min(bombLeft, haveBomb)
+      for (let i = 0; i < n; i++) units.push({ key: 'bomb', cost: W.cost.bomb, gain: bombVal, act: { a: 'bomb', f: pickFloor } })
+    }
+
+    // 口粮成本曲线：costAt[d] = 额外提供 d 点体力最少要花多少 D（按最便宜的顺序吃）。
+    //
+    // 注意这里按「额外点数」而不是「补到多少体力」建表：体力上限只限制
+    // **当前值**，不限制**累计消耗**。一堆活可以边花边吃——体力降到 12 时
+    // 吃一份回到 24，继续干活。所以总预算 = 现有体力 + 全部口粮能提供的点数。
+    // 以前按「先吃到上限」建模，满体力时最多只能规划 160−keep 点体力，
+    // 反而比旧贪心（边花边吃，能多干 2~3 件）做得少。
+    const enNow = Math.floor(s.en)
+    // foodChoices 会把每份恢复量钳到「距离上限还差多少」，那是给「现在立刻吃」
+    // 用的。这里算的是整轮能榨出多少体力（边花边吃，吃的时候体力早降下来了），
+    // 所以用一个把 en 压到极低的探针状态，拿未截断的 restore。
+    //
+    // 补体力来源统一排序：口粮按份展开 + 冰美式。咖啡 250 D/点且能突破上限，
+    // 比多数口粮更便宜（番茄 ≈268 D/点），应该一起参与比较。
+    const probe = Object.create(s)
+    probe.en = -1e9
+    const src = []
+    for (const f of foodChoices(R, probe, prices)) {
+      for (let k = 0; k < f.n; k++) src.push({ restore: f.restore, unit: f.unit, act: { a: 'eat', id: f.id, q: f.q } })
+    }
+    const coffee = R.WORLD.coffee || {}
+    const coffeeLeft = Math.max(0, (R.WORLD.daily?.coffee || 0) - (s.cnt?.coffee || 0))
+    if (cfg.energy?.coffee !== false && coffeeLeft > 0 && (coffee.price || 0) > 0 && (coffee.energy || 0) > 0) {
+      const cashLeft = Math.max(0, coins - Math.min(cfg.invest?.reserveCoins || 0, 50000))
+      const nCup = Math.min(coffeeLeft, Math.floor(cashLeft / coffee.price))
+      for (let k = 0; k < nCup; k++) src.push({ restore: coffee.energy, unit: coffee.price, act: { a: 'coffee' } })
+    }
+    src.sort((a, b) => a.unit / a.restore - b.unit / b.restore)
+    let maxEat = 0
+    for (const f of src) maxEat += f.restore
+    const costAt = new Float64Array(maxEat + 1).fill(Infinity)
+    // cntAt[d]：提供 d 点要消耗几份（口粮/咖啡）。一份 = 一条动作，
+    // 而一轮最多 40 条动作（R.WORLD.maxActions），所以选体力上限时
+    // 必须把「吃/喝」占掉的槽位算进去，否则会规划出提交不完的组合。
+    const cntAt = new Int32Array(maxEat + 1).fill(1 << 20)
+    costAt[0] = 0
+    cntAt[0] = 0
+    {
+      let covered = 0
+      let cost = 0
+      let cnt = 0
+      for (const f of src) {
+        const from = covered
+        covered += f.restore
+        cost += f.unit
+        cnt++
+        for (let d = from + 1; d <= covered; d++) {
+          costAt[d] = cost
+          cntAt[d] = cnt
+        }
+      }
+    }
+
+    const totalWorkCost = units.reduce((a, u) => a + u.cost, 0)
+    const availEn = Math.max(0, enNow - keep)
+    const enCap = Math.max(0, Math.min(totalWorkCost, enNow + maxEat - keep))
+    const dp = allocateStamina(units, {
+      enCap,
+      cashCap: Math.max(0, coins - Math.min(cfg.invest?.reserveCoins || 0, 50000)),
+    })
+    // 选 e 时同时检查动作槽位：DP 的一件活 = 一条动作，吃一份口粮也是
+    // 一条动作。旧贪心先按 40 条上限停手，DP 不知道这个上限，会算出
+    // 「吃 12 份、钓 26 竿」这种被截断的方案，反而比吃 9 份钓 29 竿差。
+    const slotLeft = Math.max(0, MAX - actions.length)
+    // 先用「不吃口粮」的体力找可行的最大组合（同样受槽位限制）。
+    let bestE = 0
+    let bestNet = 0
+    for (let e = Math.min(availEn, dp.E); e >= 0; e--) {
+      if (dp.reconstructAt(e).length > slotLeft) continue
+      bestE = e
+      bestNet = dp.bestAtMost[e]
+      break
+    }
+    // 额度需要的体力超过「现有 + 本岛日自然回复」时，才值得吃口粮把活做掉；
+    // 否则等它自己回——口粮是钱，自然回复是白来的。
+    if (totalWorkCost > regenLeft + availEn) {
+      for (let e = bestE + 1; e <= dp.E; e++) {
+        const d = e + keep - enNow
+        if (d < 0 || d > maxEat) continue
+        const fc = costAt[d]
+        if (!Number.isFinite(fc)) continue
+        if (dp.reconstructAt(e).length + cntAt[d] > slotLeft) continue
+        const net = dp.bestAtMost[e] - fc
+        if (net > bestNet + 1e-6) {
+          bestNet = net
+          bestE = e
+        }
+      }
+    }
+    // 按背包选出的组合提交，**边花边吃**：体力降到不够时就地吃一份口粮/喝咖啡。
+    // 不能「先吃后花」——体力上限卡着，满体力时一口也吃不进去。
+    // src 已按每点成本排好序，指针只往前走，和 costAt 的估算口径一致。
+    // 单件失败（缺炸弹/矿层不够）只丢这一件，不像旧版把整类活一起否掉。
+    let srcIdx = 0
+    for (const it of dp.reconstructAt(bestE)) {
+      while (s.en < it.cost && srcIdx < src.length) {
+        if (!push({ ...src[srcIdx].act })) break
+        srcIdx++
+      }
+      if (s.en < it.cost) break
+      if (!push({ ...it.act })) break
     }
   }
 
@@ -1611,16 +1662,25 @@ export function nextWake(world, cfg, memo = {}) {
       if (toMorning > 0) push(toMorning)
     }
   }
-  // 钓鱼时段开始
-  if (cfg.work?.fish) {
+  // 钓鱼时段的起止（榜一的做法：hours 的进入/退出时刻都是规划节点）
+  //
+  // 以前只看 f.hours[0]（鱼种出现），不看 f.hours[1]（鱼种离开）。
+  // 结果是好鱼种到点走了，我们没醒；或者最后一个小时该抢收时在睡。
+  // 现在起止都算，且用 %24 处理跨天时段（鱿鱼 [18,30] 的退出是次日 6 点）。
+  //
+  // 长夜里岛钟冻结（isleHour 基于 b12ClockSeconds，只累计 8:00–22:00），
+  // 时段根本不会变化，唤醒也没意义，交给 22:00/08:00 的候选。
+  if (cfg.work?.fish && !R.b12IsLongNight(t)) {
     const h = R.isleHour(t)
+    const hourSpan = R.ISLE_SPAN / 24             // 一个岛上小时 = 现实 600 秒
     for (const f of R.FISH) {
       if (f.rod > s.tools.rod) continue
-      let start = f.hours[0]
-      while (start <= h) start += 24
-      if (f.hours[0] === 0) continue
-      const hoursUntil = start - h
-      if (hoursUntil > 0 && hoursUntil < 24) push(hoursUntil * (R.ISLE_SPAN / 24))
+      for (const edge of [f.hours[0] % 24, f.hours[1] % 24]) {
+        if (edge === 0) continue                  // [0,24] 全天开放，没有变化时刻
+        const dh = (edge - h + 24) % 24
+        if (dh === 0) continue                    // 正处在变化的那一格，整点唤醒会处理
+        push(dh * hourSpan)
+      }
     }
     // 整点唤醒：鱼池按「岛上小时」换（现实 10 分钟一格），
     // 还有竿数没用完时，每个整点醒一次，好时段一开始就下竿。
