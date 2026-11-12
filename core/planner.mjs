@@ -605,9 +605,35 @@ export function planRound(world, cfg, log = () => {}) {
       const prefer = cfg.farm.preferCrop
         ? R.CROPS.find((c) => c.id === cfg.farm.preferCrop && c.seasons.includes(season))
         : null
-      const foodCount = Math.min(empty.length, cfg.farm.foodPlots || 0)
+      // 口粮地该留几块：旧版是**算**出来的，不是拍脑袋定死的。
+      //
+      // 体力账：所有工作额度要吃的体力 + 农务体力 − 自然回复 = 每 24 小时的缺口，
+      // 再除以「一块口粮地每 24 小时净回多少体力」。
+      // 线上硬编码 4 块时 24 块地全拿来种口粮都填不满：钓鱼 80×4、挖矿 100×3、
+      // 炸矿 10×6 加起来 680 点/岛日 = 4,080 点/天，自然回复只有 480 点，
+      // 4 块番茄地净产约 1,900 点 —— 缺口 1,700 点全在啃库存，迟早吃空。
+      //
+      // cfg.farm.foodPlots 变成**下限**：用户显式设了就至少种这么多。
+      const mode0 = planner.modeOf(empty[0])
+      const foodPick = planner.pick(mode0, true)
+      const cashPick = planner.pick(mode0, false)
+      const perPlotEnergy = foodPick?.value || 0
+      let dynamicFoodPlots = 0
+      if (perPlotEnergy > 1) {
+        const W = R.WORLD
+        const workE = (cfg.work?.fish ? (W.daily.fish || 0) * (W.cost.fish || 0) : 0) +
+          (cfg.work?.mine ? (W.daily.mine || 0) * (W.cost.mine || 0) : 0) +
+          (cfg.work?.bomb ? (W.daily.bomb || 0) * (W.cost.bomb || 0) : 0)
+        // 一自然日有几个岛日（现在 ISLE_SPAN=14400 → 6 个）
+        const islePerDay = Math.max(1, Math.round(86400 / (R.ISLE_SPAN || 14400)))
+        const farmE = (s.plotN || 0) * (cashPick?.cy?.energy || 0)
+        const regenPerDay = 86400 / (W.regen || 180)
+        const demand = workE * islePerDay + farmE - regenPerDay * 0.9
+        dynamicFoodPlots = Math.ceil(Math.max(0, demand) / perPlotEnergy)
+      }
+      const foodCount = Math.min(empty.length, Math.max(cfg.farm.foodPlots || 0, dynamicFoodPlots))
       const plantedNames = {}
-      let planted = 0, skippedOffline = 0
+      let planted = 0, skippedOffline = 0, failedPlant = 0
       empty.forEach((i, idx) => {
         const mode = planner.modeOf(i)
         const wantFood = idx < foodCount
@@ -621,7 +647,8 @@ export function planRound(world, cfg, log = () => {}) {
           if (!alt || alt.crop.id === pick.crop.id) { skippedOffline++; return }
           pick = alt
         }
-        if (!push({ a: 'plant', i, c: pick.crop.id })) return
+        // 种植要 2 点体力，不够就是失败——这跟「判断不划算主动留空」是两回事
+        if (!push({ a: 'plant', i, c: pick.crop.id })) { failedPlant++; return }
         planted++
         plantedNames[pick.crop.name] = (plantedNames[pick.crop.name] || 0) + 1
         planner.add(pick.crop.id, mode)
@@ -632,7 +659,8 @@ export function planRound(world, cfg, log = () => {}) {
       }
       if (skippedOffline) summary.push(`  离线避让：${skippedOffline} 块先空着（种什么都赶在离线时段成熟）`)
       // 主动留空的地要说清原因，否则日志里「24 块只种 4 块」看起来像 bug
-      const heldEmpty = empty.length - planted - skippedOffline
+      const heldEmpty = empty.length - planted - skippedOffline - failedPlant
+      if (failedPlant) summary.push(`  还有 ${failedPlant} 块空地：体力不够种（每块要 ${R.WORLD.cost.plant || 2} 点），下轮再来`)
       if (heldEmpty > 0 && !prefer) {
         summary.push(`  留空 ${heldEmpty} 块：一块地每岛日要吃 30 多点体力，` +
           `这些体力拿去钓/挖/炸能赚 ${fmt(soilCost)} D/点，种地回不了本`)
