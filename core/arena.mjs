@@ -248,10 +248,14 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
   try { gear = await arenaGear(world) } catch (e) { log('擂台读取失败：' + e.message); return { battles: 0 } }
 
   // 先花钱养成（训练/买装/强化），再按养成后的面板穿装备、加点
+  // 花掉的 D 要往上带：这些接口不走 world.act，响应里也没有 earn/spend，
+  // 不显式记账就会在 GUI 上变成「其他变动」（2026-11-13 训练 13,500 +
+  // 买装 5,720 全被算成不明去向）。equip/points/chest 都不花钱。
+  let spend = 0
   try {
     const sp = await arenaSpend(world, cfg, gear, memo, log)
     if (sp.gear) gear = sp.gear
-    if (sp.cost) gear = await arenaGear(world)
+    if (sp.cost) { spend += sp.cost; gear = await arenaGear(world) }
   } catch (e) { log('擂台养成出错：' + e.message) }
 
   try {
@@ -391,5 +395,5 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
   // today / maxBattles 一起返回：这两个数只在这里拿得到（要发 /battle/gear 请求），
   // nextWake 是纯函数不能发请求，只能靠调用方把它们缓存进 memo。
   // level 给偷菜用（对手档案缺失时退回等级差估算）。
-  return { battles, today: gear.daily?.battles ?? 0, maxBattles: a.battles ?? 30, day: world.R.worldDay(world.now), level: gear.level || 1 }
+  return { battles, spend, today: gear.daily?.battles ?? 0, maxBattles: a.battles ?? 30, day: world.R.worldDay(world.now), level: gear.level || 1 }
 }

@@ -508,6 +508,12 @@ export class Engine {
         // 今日已打场次只在这里拿得到（要发 /battle/gear）。存进 memo，
         // nextWake 才能判断「擂台是不是也打完了」，进而决定要不要长睡。
         if (ar) {
+          // 擂台养成花的 D 单独记账：/api/pet/battle/{train,buy,enhance} 不走
+          // world.act，没有 earn/spend 回执，以前直接掉进 GUI 的「其他变动」。
+          if (ar.spend > 0) {
+            totalSpend += ar.spend
+            this.credit(0, ar.spend)
+          }
           this.memo.arenaDay = ar.day
           this.memo.arenaToday = ar.today ?? 0
           this.memo.arenaMax = ar.maxBattles ?? 30
