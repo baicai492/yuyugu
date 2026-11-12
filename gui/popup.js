@@ -7,6 +7,13 @@ const wan = (n) => (Math.abs(n) >= 10000 ? (n / 10000).toFixed(1) + ' 万' : fmt
 const pct = (x) => (x >= 0 ? '+' : '') + (x * 100).toFixed(0) + '%'
 // 带正负号的万位缩写（旧版 signed + wan 的组合），用于「现金 +120.3 万」这类短标注
 const signedWan = (n) => (n === 0 ? '0' : (n > 0 ? '+' : '−') + wan(Math.abs(n)))
+// 余额税（规则 B12_TAX）：300 万以内免，300~1000 万的部分 0.1%，1000 万以上的部分 0.3%
+const balanceTax = (coins) => {
+  const excess = Math.max(0, (Number(coins) || 0) - 3000000)
+  const low = Math.min(excess, 7000000)
+  const high = Math.max(0, excess - 7000000)
+  return (low * 1 + high * 3) / 1000
+}
 
 let port = 8787
 let alive = false
@@ -176,6 +183,12 @@ function renderOverview() {
     otherRow.hidden = false
     $('other').textContent = signedWan(other)
     $('other').className = other >= 0 ? 'up' : 'down'
+    // 余额税是这一行的大头：300 万以内免，300~1000 万的部分 0.1%，
+    // 1000 万以上的部分 0.3%，每个岛日扣一次（规则 B12_TAX）。
+    // 直接写在 tooltip 里，免得看到「−7.9 万」以为哪里亏了。
+    otherRow.title = `余额税：300 万以内免，300~1000 万部分 0.1%，1000 万以上部分 0.3%，每个岛日扣一次。\n` +
+      `按当前余额 ${fmt(w.coins)}，每次约 ${fmt(balanceTax(w.coins))} D` +
+      (status.world?.nextIsleAt ? `（下一岛日 ${new Date(status.world.nextIsleAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}）` : '')
   } else {
     otherRow.hidden = true
   }
