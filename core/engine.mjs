@@ -953,60 +953,7 @@ export class Engine {
       history: this.history.slice(-240),
       // 修仙面板的数据。灵石不能换 D 币，界面上必须写清楚（见 GUI）。
       xian: this.xianView(),
-      // D 币和可卖库存之外的资源（灵石在 xian 里，不在这里重复估值）。
-      resources: this.resourcesView(),
     }
-  }
-
-  /**
-   * 非 D 币资源总览：补给、囤货仓库、擂台装备。
-   *
-   * 灵石/药材/种子/丹药在 xianView 里（灵石不能换 D 币，不能并进库存估值）；
-   * 这里只统计岛上真正会被托管消耗和积压的东西，用来回答「钱和货以外还有什么」。
-   */
-  resourcesView() {
-    const w = this.world
-    if (!w.ready) return null
-    const s = w.state || {}
-    const sum = (qs) => (Array.isArray(qs) ? qs.reduce((a, b) => a + (Number(b) || 0), 0) : 0)
-    const inv = s.inv || {}
-    const supplies = { bait: sum(inv.bait), bomb: sum(inv.bomb), feed: sum(inv.feed) }
-
-    // vault 是 inv 的子集，统计「锁住多少」而不是再加一份资产。
-    let vaultKinds = 0
-    let vaultUnits = 0
-    for (const qs of Object.values(s.b12?.vault || {})) {
-      const n = sum(qs)
-      if (n > 0) { vaultKinds++; vaultUnits += n }
-    }
-
-    // 擂台装备只在跑过擂台后才有内存缓存；为了面板不额外发请求，没缓存就不显示。
-    let arena = null
-    const g = this.memo?.battleGear
-    if (g && Array.isArray(g.items)) {
-      const cat = new Map((g.catalog || []).map((c) => [c.id, c]))
-      const byRarity = { 1: 0, 2: 0, 3: 0, 4: 0 }
-      let enhTotal = 0
-      for (const it of g.items) {
-        const r = Number(cat.get(it.id)?.rarity || 1)
-        byRarity[r] = (byRarity[r] || 0) + 1
-        enhTotal += Number(it.enh || 0)
-      }
-      const d = g.daily || {}
-      arena = {
-        gear: g.items.length,
-        byRarity,
-        enhTotal,
-        level: g.level ?? null,
-        freePoints: g.free ?? null,
-        chest: d.chest ?? null,
-        chestMax: d.chestMax ?? null,
-        chestReady: d.ready === true,
-        battles: d.battles ?? null,
-      }
-    }
-
-    return { supplies, vault: { kinds: vaultKinds, units: vaultUnits }, arena }
   }
 
   /** 修仙快照（GUI 用；世界状态没就绪时返回 null） */

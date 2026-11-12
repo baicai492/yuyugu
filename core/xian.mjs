@@ -13,9 +13,9 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, CAN_MAX, COST, EN_MAX, EN_REGEN, FUSIONS,
+  BREW_MAX, BREW_MIN, CAN_MAX, COST, EN_MAX, EN_REGEN, FIGHT_DAILY, FUSIONS,
   HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS,
-  ROOT_GROW, STORY_END, TECH_PRICE, TECHS,
+  ROOT_GROW, STAGES, STORY_END, TECH_PRICE, TECHS,
   act as xsAct, cvNeed, fuseKey, plotView, rootMult, tick as xsTick,
 } from './xian-rules.mjs'
 
@@ -849,6 +849,24 @@ export function xianSnapshot(world, cfg = {}) {
   let nextWake = Infinity
   try { nextWake = nextXianWakeSec(world, t, {}, opts) } catch {}
 
+  // 资源统计：灵石口径的家底 + 每日计量。
+  // 灵石换不成 D 币，所以这里的所有估值只用来对比「修仙内部攒了多少」，不并入现金收益。
+  const sumQty = (o) => Object.values(o || {}).reduce((a, b) => a + (Number(b) || 0), 0)
+  const sumVal = (o, table, key) => Object.entries(o || {})
+    .reduce((a, [k, n]) => a + (Number(n) || 0) * (Number(table[k]?.[key]) || 0), 0)
+  const bagQty = sumQty(sim.bag)
+  const seedQty = sumQty(sim.seeds)
+  const pillQty = sumQty(sim.pills)
+  const bagValue = sumVal(sim.bag, HERBS, 'sell')
+  const seedValue = sumVal(sim.seeds, HERBS, 'seed')
+  const pillValue = sumVal(sim.pills, PILLS, 'sell')
+  const groundValue = (sim.plots || []).reduce(
+    (a, p) => a + (p?.c && p.g >= 3 ? (Number(HERBS[p.c]?.sell) || 0) : 0), 0)
+  const groundQty = mature + growing
+  const today = xsDay(t)
+  const pillUse = sim.dp?.d === today ? Number(sim.dp.n || 0) : 0
+  const fightUse = sim.df?.d === today ? Number(sim.df.n || 0) : 0
+
   return {
     exists: true,
     enabled: Boolean(xc.enabled),
@@ -875,6 +893,21 @@ export function xianSnapshot(world, cfg = {}) {
     bag: { ...(sim.bag || {}) },
     seeds: { ...(sim.seeds || {}) },
     pills: { ...(sim.pills || {}) },
+    // 灵石口径的资源汇总（详细说明见 GUI「资源统计」）：
+    // 药材按卖价、种子按买价（成本）、丹药按参考卖价、地里成熟作物按卖价。
+    assets: {
+      stone: Number(sim.stone || 0),
+      bagQty, seedQty, pillQty,
+      bagValue, seedValue, pillValue, groundValue,
+      groundQty, groundMature: mature,
+      total: Number(sim.stone || 0) + bagValue + seedValue + pillValue + groundValue,
+    },
+    daily: {
+      pillUse, pillMax: PILL_DAILY,
+      fightUse, fightMax: FIGHT_DAILY,
+      cleared: Object.keys(sim.clear || {}).length,
+      stageTotal: Object.keys(STAGES).length,
+    },
     brew: sim.brew ? { pill: sim.brew.p, readyIn: Math.max(0, Number(sim.brew.t || 0) + BREW_READY_SEC - t) } : null,
     meditate: sim.med ? { elapsed: Math.max(0, t - Number(sim.med.t || 0)), cap: MED_MAX } : null,
     techs: [...(sim.techs || [])],
