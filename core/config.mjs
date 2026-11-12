@@ -167,6 +167,11 @@ export const DEFAULTS = {
     pointsPlan: 'atk',           // atk 攻击流 / vit 生存流 / agi 闪避流
     train: false,                // 花钱突破训练（默认关）
     trainBudget: 0,
+    // 养大肥鱼：只影响守家/偷菜的对战胜负，不直接赚钱。
+    // true = 总是养；false = 不养；'auto' = 偷菜开着或离线时段会被偷时才养。
+    // 每天总预算包含训练、买史诗装备和强化。
+    spend: 'auto',
+    dailyBudget: 150000,
   },
 
   // 串门
@@ -184,6 +189,10 @@ export const DEFAULTS = {
       scanEvery: 1800,           // 多久扫一次目录（秒）
       pages: 6,                  // 扫几页（每页 20 家）
       visitsPerScan: 30,         // 每次扫完/巡逻去几家上限（旧版默认 30；实际能偷的通常 0~3 家）
+      // 手动排除的岛 id：目录扫描和巡逻都不会碰它们（旧版 steal.avoid）
+      avoid: [],
+      // 跳过被自己标记过的岛（旧版 steal.skipMarked，站点返回 marked 字段时才生效）
+      skipMarked: true,
       // 「盯名单」：服务端的可偷筛选只看得到此刻已经被漏掉的货，
       // 好货都是解禁瞬间被抢走。要抢到就得提前访问、记下每块地的解禁时刻，
       // 再让 nextWake 掐那一秒醒来（旧版 v1 的做法）。
@@ -194,6 +203,8 @@ export const DEFAULTS = {
       dirPages: 60,
       checkEvery: 1800,          // 某座岛多久没看过就值得再看一眼（秒）；对齐旧版 recheck
       watchEvery: 120,           // 巡逻一批的最短间隔（秒）；53 座岛约 7 分钟轮完一圈
+      prepLeadSec: 8,            // 解禁时刻提前几秒醒来准备（旧版 prep+lead）
+      minEV: 3000,               // 期望收益低于这个就不去偷（旧版 steal.minEV）
       useCloak: true,            // 买轻步斗篷（被发现率 −10 个百分点）
       useSack: true,             // 买折叠菜篮（每处多拿 1 个）
       protectAware: true,        // 遵守 30 分钟保护期
@@ -222,10 +233,15 @@ export const DEFAULTS = {
     alert: 'guard1',             // 潮铃：发现率 +10 个百分点
     combat: 'guard2',            // 贝壳护具：守家生命 +8%
     protect: 1800,               // 保护期（秒）
+    // 离线时段开着时只买「一格一只」的动物，减少没人收时的畜产损失（旧版）
+    safeAnimals: false,
   },
 
   // 离线时段（交给管家）
-  offline: { useButler: true, from: '01:00', to: '08:30' },
+  // enabled=true 时，种地规划会避开「成熟时刻落在离线时段」的作物：
+  // 那段时间没人收，超过保护期就被偷（每次只收 1 个）。
+  // 站内管家在离线时段会兜底收菜，所以默认关；管家等级低/常没体力时再打开。
+  offline: { enabled: false, useButler: true, from: '01:00', to: '08:30' },
 
   // 日志
   log: {

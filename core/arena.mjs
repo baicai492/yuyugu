@@ -74,15 +74,109 @@ export async function openChests(world, gear, log = () => {}) {
 }
 
 /**
+ * 花 D币 养大肥鱼（只影响守家和偷菜时的对战，不直接赚钱）。
+ * 旧版 arenaSpend：每天突破训练、每个槽位补一件史诗装备、已穿的装备强化到 +10。
+ * spend='auto' 时只有「偷菜开着 / 离线时段里会被偷」才花——否则这些钱赚不回来。
+ * memo 里记今天已花多少，跨轮/跨重启都不会重复超预算。
+ */
+export async function arenaSpend(world, cfg, gear, memo, log = () => {}) {
+  const a = cfg.arena || {}
+  const R = world.R
+  const day = R?.worldDay?.(world.now) ?? ''
+  if (memo && memo.arenaCostDay !== day) { memo.arenaCostDay = day; memo.arenaCost = 0 }
+  const on = a.spend === true || a.train === true ||
+    (a.spend === 'auto' && (cfg.social?.steal?.enabled || cfg.offline?.enabled))
+  if (!on || !gear?.prices) return { gear, cost: 0 }
+  // 养成每天只做一次（旧版 m.spent）：后面每轮都重试只会白发请求
+  if (memo?.arenaSpendDay === day) return { gear, cost: 0 }
+  if (memo) memo.arenaSpendDay = day
+
+  const p = gear.prices
+  const cat = Object.fromEntries((gear.catalog || []).map((c) => [c.id, c]))
+  const op = () => ({ operation: randomUUID() })
+  const reserve = cfg.invest?.reserveCoins ?? 0
+  let g = gear, spent = 0
+  const budget0 = Math.max(0, (a.dailyBudget ?? 150000) - (memo?.arenaCost || 0))
+  let budget = budget0
+  const notes = []
+  const pay = (c) => { budget -= c; spent += c }
+  const coinOf = () => (g.coins ?? world.coins ?? 0)
+  const keep = (r) => { if (r?.gear) g = r.gear; else if (r?.daily) g = r }
+  const fmt = (n) => Math.round(n).toLocaleString('en-US')
+
+  // 1) 突破训练：从大额档开始（旧版顺序 300/200/100/50/10）
+  for (const xp of [300, 200, 100, 50, 10]) {
+    for (let guard = 0; guard < 20; guard++) {
+      const trained = g.daily?.trained || 0
+      if ((p.trainDaily || 0) - trained < xp) break
+      let c = 0
+      for (let i = trained; i < trained + xp; i++) {
+        const tier = (p.trainTiers || []).find(([upTo]) => i < upTo) || (p.trainTiers || []).at(-1)
+        c += tier ? tier[1] : 0
+      }
+      if (!(c > 0) || c > budget || coinOf() - c < reserve) break
+      try {
+        keep(await api(world, `/api/pet/battle/train?xp=${xp}`, op()))
+        pay(c); notes.push(`训练 +${xp}`)
+      } catch { break }
+    }
+  }
+
+  // 2) 每个槽位补一件史诗（rarity 3）。传说不出售，只能靠宝箱/掉落。
+  const score = (c) => (c.rarity || 0) * 100 + (c.stats?.atk || 0) * 8 + (c.stats?.hp || 0)
+    + (c.stats?.def || 0) * 6 + (c.stats?.agi || 0) * 3 + (c.stats?.spd || 0) * 3
+  const shopPrice = p.shop?.[3]
+  for (const slot of ['armor', 'weapon', 'charm']) {
+    const own = Math.max(0, ...(g.items || []).map((x) => (cat[x.id]?.slot === slot ? cat[x.id].rarity || 0 : 0)))
+    const pick = (g.catalog || []).filter((c) => c.slot === slot && c.rarity === 3)
+      .sort((x, y) => score(y) - score(x))[0]
+    if (!pick || own >= 3 || !(shopPrice > 0)) continue
+    if (shopPrice > budget || coinOf() - shopPrice < reserve) continue
+    try {
+      keep(await api(world, `/api/pet/battle/buy?item=${pick.id}`, op()))
+      pay(shopPrice); notes.push(`买${pick.name}`)
+      keep(await api(world, '/api/pet/battle/equip', { slot, item: pick.id }))
+    } catch { /* 买失败就跳过这个槽位 */ }
+  }
+
+  // 3) 强化：三件齐头并进，先强化等级最低的那件，直到 +10
+  for (let k = 0; k < 30; k++) {
+    const worn = Object.values(g.gear || {}).filter((x) => x && (x.enh || 0) < 10)
+      .sort((x, y) => (x.enh || 0) - (y.enh || 0))[0]
+    if (!worn) break
+    const rarity = cat[worn.id]?.rarity ?? 1
+    const c = Math.round((p.enhanceBase?.[worn.enh || 0] || 0) * (p.enhanceRarity?.[rarity] || 1))
+    if (!(c > 0) || c > budget || coinOf() - c < reserve) break
+    try {
+      keep(await api(world, `/api/pet/battle/enhance?item=${worn.id}`, op()))
+      pay(c); notes.push(`${cat[worn.id]?.name || worn.id} +${(worn.enh || 0) + 1}`)
+    } catch { break }
+  }
+
+  if (spent) {
+    if (memo) memo.arenaCost = (memo.arenaCost || 0) + spent
+    log(`擂台养成（今日已花 ${fmt(memo?.arenaCost || spent)} D / 上限 ${fmt(a.dailyBudget ?? 150000)}）：${notes.join('，')}`)
+  }
+  return { gear: g, cost: spent }
+}
+
+/**
  * 擂台日常：打满有掉落的场次、开宝箱、换装、加点。
  * 每场之间必须间隔 8 秒（服务端限制），这里用 8.5 秒留余量。
  */
-export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) {
+export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } = {}) {
   const a = cfg.arena || {}
   if (!a.enabled) return { battles: 0 }
 
   let gear
   try { gear = await arenaGear(world) } catch (e) { log('擂台读取失败：' + e.message); return { battles: 0 } }
+
+  // 先花钱养成（训练/买装/强化），再按养成后的面板穿装备、加点
+  try {
+    const sp = await arenaSpend(world, cfg, gear, memo, log)
+    if (sp.gear) gear = sp.gear
+    if (sp.cost) gear = await arenaGear(world)
+  } catch (e) { log('擂台养成出错：' + e.message) }
 
   let battles = 0
   if (a.autoEquip) await autoEquip(world, gear, log)
@@ -170,27 +264,8 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) 
     } catch {}
   }
 
-  // 训练（花钱买经验，默认关）
-  if (a.train && (a.trainBudget || 0) > 0) {
-    try {
-      gear = await arenaGear(world)
-      const left = Math.max(0, (gear.prices?.trainDaily || 300) - (gear.daily?.trained || 0))
-      let budget = a.trainBudget
-      const tiers = gear.prices?.trainTiers || [[100, 30], [200, 45], [300, 60]]
-      let done = gear.daily?.trained || 0
-      for (const [upTo, price] of tiers) {
-        const can = Math.min(left, upTo - done)
-        if (can <= 0) continue
-        const cost = can * price
-        if (cost > budget) continue
-        try {
-          await api(world, `/api/pet/battle/train?xp=${can}`, { operation: randomUUID() })
-          budget -= cost; done += can
-          log(`突破训练 +${can} 经验（${cost} D）`)
-        } catch (e) { log('训练失败：' + e.message); break }
-      }
-    } catch (e) { log('训练读取失败：' + e.message) }
-  }
+  // 训练/买装/强化已经挪到开头的 arenaSpend：那里有每日预算和 reserveCoins 保护，
+  // 而且必须在打对手之前完成，否则本轮的胜负还是按旧面板算的。
 
   // today / maxBattles 一起返回：这两个数只在这里拿得到（要发 /battle/gear 请求），
   // nextWake 是纯函数不能发请求，只能靠调用方把它们缓存进 memo。

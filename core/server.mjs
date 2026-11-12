@@ -230,11 +230,17 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
     })
   }
   server.on('error', (e) => {
-    if (e.code === 'EADDRINUSE' && tries++ < 20) {
+    if (e.code === 'EADDRINUSE' && tries++ < 5) {
       setTimeout(tryListen, 300)
       return
     }
     engine.log(`本地服务启动失败：${e.message}`, 'err')
+    // 端口被别人占着还继续托管 = 两个实例同时提交动作，世界状态会互相覆盖
+    // （实测一次重启留下两个进程，日志里两条「托管启动」，动作重复提交）。
+    // 宁可这次不跑，也不能双写。
+    try { engine.savePersist?.() } catch {}
+    engine.log('已退出：同一个端口只允许一个托管实例（用 --port= 换端口，或先停掉旧进程）', 'err')
+    process.exit(1)
   })
   tryListen()
   return server

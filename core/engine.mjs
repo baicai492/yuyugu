@@ -56,6 +56,9 @@ export class Engine {
     if (st.arenaDay) this.memo.arenaDay = st.arenaDay
     if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
     if (st.arenaMax) this.memo.arenaMax = st.arenaMax
+    if (st.arenaSpendDay) this.memo.arenaSpendDay = st.arenaSpendDay
+    if (st.arenaCostDay) this.memo.arenaCostDay = st.arenaCostDay
+    if (st.arenaCost != null) this.memo.arenaCost = st.arenaCost
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -99,6 +102,10 @@ export class Engine {
         arenaDay: this.memo.arenaDay || '',
         arenaToday: this.memo.arenaToday || 0,
         arenaMax: this.memo.arenaMax || 0,
+        // 擂台养成：今天做没做过、花了多少。不存的话每次重启都会重新花一份预算。
+        arenaSpendDay: this.memo.arenaSpendDay || '',
+        arenaCostDay: this.memo.arenaCostDay || '',
+        arenaCost: this.memo.arenaCost || 0,
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -200,6 +207,48 @@ export class Engine {
     this.savePersist()      // day 已确定，立刻落盘（否则重启后 restore 拿到空 day）
   }
 
+  /**
+   * 按服务端数据补今天的账（旧版 recoverBook）。
+   * 日志被清空、换机器、进程重启前的操作都能补上：
+   *   收入 = 赚钱榜里自己今天的累计（已扣税）
+   *   卖货税 = 税务流水里今天的 pet-world-sale-tax
+   *   支出 = 08:00 余额税后的余额 + 今日收入 − 现在的余额
+   * 每天只做一次；接口失败就下次再试，不影响托管。
+   */
+  async recoverBookFromServer() {
+    const R = this.world.R
+    const day = R.worldDay(this.world.now)
+    if (this.memo.srvBook?.day === day) return
+    const c = this.world.client
+    if (!c?.get) return
+    let rank, tax
+    try {
+      rank = await c.get('/api/pet/world/rank/earn/day?limit=1')
+      tax = await c.get('/api/pet/world/tax')
+    } catch { return }
+    const hist = (tax?.history || []).filter((h) => R.worldDay(h.created_at) === day)
+    const saleTax = hist.filter((h) => h.kind === 'pet-world-sale-tax').reduce((x, h) => x - h.delta, 0)
+    const earn = rank?.day === day && rank?.mine ? Number(rank.mine.value) || 0 : 0
+    if (earn > this.ledger.earn) {
+      this.log(`今日收入按服务端补账：+${fmt(earn)}（日志里是 +${fmt(this.ledger.earn)}）`)
+      this.ledger.earn = earn
+    }
+    if (saleTax > this.ledger.tax) {
+      this.log(`今日卖货税按服务端补账：${fmt(saleTax)}（日志里是 ${fmt(this.ledger.tax)}）`)
+      this.ledger.tax = saleTax
+    }
+    const bal = hist.find((h) => h.kind === 'pet-world-balance-tax')
+    if (bal && earn) {
+      const spend = (bal.balance_after + earn) - this.world.coins
+      if (spend > this.ledger.spend) {
+        this.log(`今日支出按服务端补账：−${fmt(spend)}（日志里是 −${fmt(this.ledger.spend)}）`)
+        this.ledger.spend = spend
+      }
+    }
+    this.memo.srvBook = { day }
+    this.savePersist()
+  }
+
   /** 一轮完整的巡视 */
   async tick() {
     const w = this.world
@@ -212,6 +261,7 @@ export class Engine {
     this.setStep('读取世界状态')
     await w.refresh()
     this.ensureLedger()
+    await this.recoverBookFromServer()
 
     // 站点规则热重载：定期查版本号，变了就重新下载并补喂 clockStart。
     // 旧版（Chrome 插件）是每 30 分钟查一次，重写 v2 时漏掉了这个，
@@ -233,7 +283,14 @@ export class Engine {
     // 市场供需反推（供卖货与预测）
     try {
       const obs = M.inferSupply(R, w.prices, w.isleDay)
-      w.externalSoldRatio = M.learnExternal(w.externalSoldRatio, obs, {})
+      // 反推出的供需里包含**自己**今天卖的量。先把这部分扣掉，剩下的才是外部供给，
+      // 否则预测会把「自己卖压价」误判成「别人也在卖」，越卖越不敢卖。
+      const mine = {}
+      for (const [id, r] of Object.entries(obs.rows)) {
+        const sold = w.state?.cnt?.['sc_' + id] || 0
+        if (sold > 0) mine[id] = sold / Math.max(1, r.depth)
+      }
+      w.externalSoldRatio = M.learnExternal(w.externalSoldRatio, obs, mine)
       w.lastSupply = obs
     } catch {}
 
@@ -290,7 +347,7 @@ export class Engine {
         totalTax += res.tax || 0
         totalActions += (res.out || []).filter((o) => o?.ok).length
         this.credit(res.earn || 0, res.spend || 0, res.tax || 0)   // 边赚边记，GUI 立刻能看到
-        if (plan.summary.length) this.log(plan.summary.join('；'))
+        if (plan.summary.length) this.log(`第 ${rounds} 轮：${plan.summary.join('；')}`)
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
       } catch (e) {
         this.log('提交失败：' + e.message, 'err')
@@ -323,6 +380,7 @@ export class Engine {
         const ar = await arenaDaily(w, cfg, this.log.bind(this), {
           // 擂台每场 8.5 秒，30 场要 4 分钟。逐场回报进度，GUI 才不会看着像卡死。
           onBattle: (n, need) => this.setStep(`擂台 · 第 ${n}/${need} 场`),
+          memo: this.memo,
         })
         // 今日已打场次只在这里拿得到（要发 /battle/gear）。存进 memo，
         // nextWake 才能判断「擂台是不是也打完了」，进而决定要不要长睡。

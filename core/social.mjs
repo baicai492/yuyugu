@@ -255,6 +255,7 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
   if (memo.stealWatch && now - (memo.stealWatchAt || 0) < every) return memo.stealWatch
 
   const watch = {}
+  const avoid = new Set((st.avoid || []).map(Number))   // 手动排除的岛
   let cursor = null, seen = 0, kept = 0, pages = 0
   for (let p = 0; p < (st.dirPages ?? 12); p++) {
     let d
@@ -264,6 +265,9 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
     for (const o of d.neighbors || []) {
       seen++
       if (o.newbie) continue
+      if (avoid.has(o.id)) continue
+      // 被自己标记过的岛跳过（旧版 skipMarked；站点有 marked 字段时才生效）
+      if (st.skipMarked && o.marked) continue
       const act = Number(o.active) || 0
       // 深页全是早就没人玩的 Lv1 空岛（active 缺失）。至少要 24 小时内活跃过。
       if (!act || now - act > 86400) continue
@@ -534,7 +538,7 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
   const canPay = (needE) => world.state.en >= needE || !!energyActions(R, world.state, world.prices, {
     need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
   })
-  const worth = targets.some((t) => stealEV(t, myLevel, energyValue) >= (st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
+  const worth = targets.some((t) => stealEV(t, myLevel, energyValue) >= (st.minEV ?? st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
   if (worth) await ensureThiefItems(world, cfg, log)
   let skippedEV = 0
   for (const tg of targets) {
@@ -548,7 +552,7 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
     // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
     // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
     const ev = stealEV(tg, myLevel, energyValue)
-    if (ev < (st.minValue ?? 3000)) { skippedEV++; continue }
+    if (ev < (st.minEV ?? st.minValue ?? 3000)) { skippedEV++; continue }
     // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
     // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，
     // 而补体力只要几十上百 D。上限 steal.maxEnergyCost 防止口粮太贵时倒亏。
