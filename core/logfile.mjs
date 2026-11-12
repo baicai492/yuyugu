@@ -167,9 +167,9 @@ export function readLogHistory(dir, { days = 3, maxLines = 800 } = {}) {
 }
 
 /**
- * 从 ledger.csv 里取今天的起点（当天第一条记录）。
- * 这样重启程序后，「今日净增」还能接着算，不会归零。
- * 返回 { day, startCoins, startStock, firstTime } 或 null
+ * 从 ledger.csv 里取今天的起点（离今天 0 点最近的那条记录）。
+ * 这样重启程序后，「今日净增」还能接着算，不会归零，也不会只剩重启之后的部分。
+ * 返回 { day, startCoins, startStock, firstTime, from } 或 null
  */
 export function todayStartFromLedger(dir, nowMs = Date.now()) {
   const file = resolve(dir, 'ledger.csv')
@@ -194,23 +194,38 @@ export function todayStartFromLedger(dir, nowMs = Date.now()) {
       prevLast = rec                                 // 覆盖式，最终是今天之前最后一条
     }
   }
-  // 今天已有记录 → 用今天第一条
-  if (todayFirst) {
-    return { day: todayBj, startCoins: todayFirst.coins, startStock: todayFirst.stock, firstTime: todayFirst.time, from: 'today' }
-  }
-  // 今天还没记录 → 用昨天收盘（=今天起点）
-  if (prevLast) {
-    return { day: todayBj, startCoins: prevLast.coins, startStock: prevLast.stock, firstTime: prevLast.time, from: 'yesterday' }
-  }
-  return null
+  // 起点必须尽量贴近今天 0 点。
+  //
+  // ledger.csv 每小时最多写一条，「今天第一条」可能已经是 00:58 甚至更晚。
+  // 直接拿它当起点会漏掉 0 点到它之间的所有变动——重启后 现金盈亏/库存变动
+  // 看起来就像从重启那一刻才开始算（线上 01:00 重启后 现金盈亏从 +1,880
+  // 变成 0、库存变动从 +28.9 万变成 −3,221，就是这个原因）。
+  // 昨天最后一条和今天第一条里，取离 0 点更近的那条；进程停了很久时，
+  // 今天第一条自然会更近。
+  const midnight = Date.parse(`${todayBj}T00:00:00+08:00`)
+  const candidates = []
+  if (todayFirst) candidates.push({ ...todayFirst, from: 'today' })
+  if (prevLast) candidates.push({ ...prevLast, from: 'yesterday' })
+  if (!candidates.length) return null
+  candidates.sort((a, b) =>
+    Math.abs(parseBeijingTime(a.time) - midnight) - Math.abs(parseBeijingTime(b.time) - midnight))
+  const pick = candidates[0]
+  return { day: todayBj, startCoins: pick.coins, startStock: pick.stock, firstTime: pick.time, from: pick.from }
 }
 
 /**
  * 从今天的日志文件里重建「今日收支」。
  *
  * 为什么需要这个：state.json 是覆盖写的，一旦某次写坏（比如 day 是空字符串
- * 导致恢复失败），当天的收支累计就永久丢了。日志文件是只追加的，
- * 每一轮的「本轮收支：+X / −Y（税 Z）」都留在里面，可以重算出来。
+ * 导致恢复失败），当天的收支累计就永久丢了。日志文件是只追加的，每一轮的
+ * 「本轮收支：+X / −Y（税 Z）」都留在里面，可以重算出来。
+ *
+ * 但只累加「本轮收支」会漏掉不在轮次里的收入（五子棋奖励、服务端补账等）。
+ * 引擎补账时会在日志里留一行「今日收入按服务端补账：+X（日志里是 +Y）」，
+ * 这里按时间顺序重放：
+ *   普通轮次  → 累加
+ *   补账行    → 把当天累计抬到服务端给出的总额（只升不降，和服务端补账代码一致）
+ * 这样重启后重建出来的数和重启前最后的 ledger 完全一致。
  *
  * 返回 { earn, spend, tax, rounds, from }
  */
@@ -223,16 +238,29 @@ export function todayBookFromLog(dir, nowMs = Date.now()) {
   let text = ''
   try { text = readFileSync(file, 'utf8') } catch { return empty }
   // 本轮收支：+45,200 / −2,700（税 0）
-  const re = /本轮收支：\+([\d,]+) \/ −([\d,]+)（税 ([\d,]+)）/
+  const reRound = /本轮收支：\+([\d,]+) \/ −([\d,]+)（税 ([\d,]+)）/
+  const reEarn = /今日收入按服务端补账：\+([\d,]+)/
+  const reSpend = /今日支出按服务端补账：−([\d,]+)/
+  const reTax = /今日卖货税按服务端补账：([\d,]+)/
+  const n = (s) => Number(s.replace(/,/g, '')) || 0
   let earn = 0, spend = 0, tax = 0, rounds = 0
   for (const line of text.split(/\r?\n/)) {
     if (!line.startsWith(todayBj)) continue
-    const m = re.exec(line)
-    if (!m) continue
-    earn += Number(m[1].replace(/,/g, '')) || 0
-    spend += Number(m[2].replace(/,/g, '')) || 0
-    tax += Number(m[3].replace(/,/g, '')) || 0
-    rounds++
+    const m = reRound.exec(line)
+    if (m) {
+      earn += n(m[1])
+      spend += n(m[2])
+      tax += n(m[3])
+      rounds++
+      continue
+    }
+    // 补账行：服务端给的是「当天累计总额」，不是增量，只升不降
+    const me = reEarn.exec(line)
+    if (me) { earn = Math.max(earn, n(me[1])); rounds++; continue }
+    const ms = reSpend.exec(line)
+    if (ms) { spend = Math.max(spend, n(ms[1])); rounds++; continue }
+    const mt = reTax.exec(line)
+    if (mt) { tax = Math.max(tax, n(mt[1])); rounds++; continue }
   }
   if (!rounds) return empty
   return { earn, spend, tax, rounds, from: file }

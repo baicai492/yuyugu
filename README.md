@@ -112,8 +112,8 @@ node scripts/install-host.mjs --ext-id=<你的扩展ID>
 
 | 数据 | 来源 |
 |---|---|
-| 今日收支（收入/支出/卖货税） | `state.json` + `ledger.csv` 当天第一条 |
-| 今日净增（D币 + 库存） | 同上，重启不清零 |
+| 今日收支（收入/支出/卖货税） | 从今日日志重放（轮次累计 + 服务端补账行按总额覆盖），state.json 仅兜底 |
+| 今日净增（D币 + 库存） | 同上，起点取 `ledger.csv` 里离今天 0 点最近的一条，重启不清零 |
 | 资产曲线（走势图） | `ledger.csv` 全部历史 |
 | 今天帮过哪些岛 | `state.json` 的 `helped` |
 | 上次扫偷菜目录的时间 | `state.json` 的 `stealScanAt` |

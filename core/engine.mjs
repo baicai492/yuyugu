@@ -205,11 +205,11 @@ export class Engine {
     // 磁盘上的起点必须合理：正数、且不超过当前余额的 5 倍（防 CSV 被改坏）
     const usable = fromFile && fromFile.startCoins > 0 && fromFile.startCoins < coinsNow * 5
 
-    // 收支累计：**今天的日志是唯一可信的来源**。
-    //
-    // 日志按日期分文件、只追加不覆盖，天然按自然日隔离；state.json 是覆盖写，
-    // 一旦哪天跨日没清零（就是上面那个 bug），脏值还会被存进去、重启后继续用。
-    // 所以只要今天的日志里有轮次记录，就以它为准，state.json 仅在日志为空时兜底。
+    // 收支累计：今天的日志是可信来源（日志按日期分文件、只追加不覆盖）。
+    // 日志里除了每轮的「本轮收支」，还记了服务端的「按服务端补账」——
+    // todayBookFromLog 会把补账当成「重置到今天累计值」处理，所以五子棋奖励
+    // 这类不在轮次里的收入也不会丢。state.json 仅在日志为空时兜底：
+    // 它是覆盖写，一旦哪天跨日没清零（就是上面那个 bug），脏值会一直跟着。
     let earn = this.ledger.earn || 0
     let spend = this.ledger.spend || 0
     let tax = this.ledger.tax || 0

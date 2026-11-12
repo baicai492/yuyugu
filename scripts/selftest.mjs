@@ -4,6 +4,10 @@ import { loadRules, loadRulesCached } from '../core/rules.mjs'
 import { solveGomoku, verifyGomoku, playLine } from '../core/gomoku.mjs'
 import * as M from '../core/market.mjs'
 import { DEFAULTS, mergeConfig } from '../core/config.mjs'
+import { todayBookFromLog, todayStartFromLedger } from '../core/logfile.mjs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 let pass = 0, fail = 0
 const ok = (name, cond, extra = '') => {
@@ -156,6 +160,50 @@ console.log('\n[5] 配置')
   const c = mergeConfig(DEFAULTS, { npc: { gomokuLevel: 2 }, sell: { days: 5 } })
   ok('深度合并', c.npc.gomokuLevel === 2 && c.npc.gomoku === true && c.sell.days === 5)
   ok('默认五子棋参数', c.npc.gomokuLines === 60 && c.npc.gomokuJitter === 0.5)
+}
+
+console.log('\n[6] 重启后的「今日」口径')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'yuyugu-test-'))
+  try {
+    const now = Date.parse('2026-11-13T01:00:00+08:00')
+    const day = '2026-11-13'
+    // 日志：轮次 + 服务端补账（补账行给的是当天累计总额，不是增量）
+    writeFileSync(join(dir, `yuyugu-${day}.log`), [
+      `${day} 00:10:00 本轮收支：+6,716 / −0（税 0）`,
+      `${day} 00:18:00 今日收入按服务端补账：+26,100（日志里是 +6,716）`,
+      `${day} 00:45:00 本轮收支：+49,416 / −0（税 0）`,
+      `${day} 00:50:00 今日支出按服务端补账：−1,200（日志里是 −0）`,
+      `${day} 00:55:00 今日卖货税按服务端补账：900（日志里是 0）`,
+      `2026-11-12 23:59:00 本轮收支：+9,702,964 / −7,634,393（税 0）`,   // 昨天的不算
+    ].join('\n'))
+    const book = todayBookFromLog(dir, now)
+    ok('补账行按总额重放', book.earn === 75_516, `earn=${book.earn}`)
+    ok('补账支出只升不降', book.spend === 1_200, `spend=${book.spend}`)
+    ok('补账税', book.tax === 900, `tax=${book.tax}`)
+
+    // 起点：昨天 23:57 和今天 00:58 里，离今天 0 点更近的是昨天那条
+    writeFileSync(join(dir, 'ledger.csv'), [
+      'time,coins,stock_value,energy,plots,animals,rod,pick,spr,house',
+      '2026-11-12 23:57:26,19309215,10364523,80,8,2,1,1,0,1',
+      '2026-11-13 00:58:35,19311095,10653637,80,8,2,1,1,0,1',
+    ].join('\n'))
+    const s1 = todayStartFromLedger(dir, now)
+    ok('起点取离 0 点最近的记录', s1?.startCoins === 19_309_215 && s1?.from === 'yesterday',
+      `${s1?.firstTime} / ${s1?.from}`)
+
+    // 反过来：今天 00:01 有记录、昨天 23:00 有记录，应取今天那条
+    writeFileSync(join(dir, 'ledger.csv'), [
+      'time,coins,stock_value,energy,plots,animals,rod,pick,spr,house',
+      '2026-11-12 23:00:00,19000000,10000000,80,8,2,1,1,0,1',
+      '2026-11-13 00:01:00,19050000,10100000,80,8,2,1,1,0,1',
+    ].join('\n'))
+    const s2 = todayStartFromLedger(dir, now)
+    ok('今天已有贴近 0 点的记录时取今天', s2?.startCoins === 19_050_000 && s2?.from === 'today',
+      `${s2?.firstTime} / ${s2?.from}`)
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
