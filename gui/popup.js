@@ -248,6 +248,10 @@ async function refreshMarket() {
 
 // ---------- 渲染：设置 ----------
 // labels：字段 → 中文含义；hints：字段 → 一句话解释（鼠标悬停可见）
+// 三态开关（旧版 popup 的「花 D币 养大肥鱼」）：值可能是布尔，也可能是字符串 'auto'，
+// 所以下拉框的 value 用 JSON 编码，读回来再解析，避免 "true" 被当成字符串。
+const SPEND_OPTS = [['开了偷菜或离线时才花', 'auto'], ['总是', true], ['从不', false]]
+
 const FIELD_GROUPS = [
   {
     title: '总开关',
@@ -303,6 +307,15 @@ const FIELD_GROUPS = [
     hints: { 'vault.enabled': '把「等涨更划算」的货锁进仓库，防止被管家低价卖掉' },
   },
   {
+    title: '加工',
+    fields: ['craft.enabled', 'craft.minMargin', 'craft.maxPerRound'],
+    labels: { 'craft.enabled': '自动加工', 'craft.minMargin': '最低利润率', 'craft.maxPerRound': '每轮最多做几份' },
+    hints: {
+      'craft.enabled': '成品预期卖价明显高于原料才做（旧版插件也有这一项）',
+      'craft.minMargin': '利润低于这个比例就不加工（0.05 = 5%）',
+    },
+  },
+  {
     title: '货船',
     fields: ['cargo.enabled', 'cargo.minMargin'],
     labels: { 'cargo.enabled': '自动进货', 'cargo.minMargin': '最低预期利润' },
@@ -318,31 +331,67 @@ const FIELD_GROUPS = [
     },
   },
   {
+    title: '防偷',
+    fields: ['defense.guardItems', 'offline.enabled', 'offline.from', 'offline.to'],
+    labels: {
+      'defense.guardItems': '自动续守家道具',
+      'offline.enabled': '有固定离线时段（种地避开）',
+      'offline.from': '离线开始（北京时）',
+      'offline.to': '离线结束（北京时）',
+    },
+    hints: {
+      'defense.guardItems': '被偷后 24 小时内、或设了离线时段时，续潮铃和贝壳护具（约 2400 D/天）',
+      'offline.enabled': '这段时间没人收菜，成熟后超过 30 分钟保护期会被偷，所以种地会避开让它在这段时间成熟',
+      'offline.from': '格式 HH:MM，例如 01:00',
+    },
+  },
+  {
     title: '擂台',
-    fields: ['arena.enabled', 'arena.battles', 'arena.openChests', 'arena.autoEquip'],
-    labels: { 'arena.enabled': '打擂台', 'arena.battles': '每天场次', 'arena.openChests': '自动开宝箱', 'arena.autoEquip': '自动换装' },
-    hints: { 'arena.battles': '前 30 场有掉落，每场间隔 8.5 秒' },
+    fields: ['arena.enabled', 'arena.battles', 'arena.openChests', 'arena.autoEquip', 'arena.spend', 'arena.dailyBudget'],
+    labels: {
+      'arena.enabled': '打擂台',
+      'arena.battles': '每天场次',
+      'arena.openChests': '自动开宝箱',
+      'arena.autoEquip': '自动换装',
+      'arena.spend': '花 D币 养大肥鱼',
+      'arena.dailyBudget': '每日养成上限（D币）',
+    },
+    hints: {
+      'arena.battles': '前 30 场有掉落，每场间隔 8.5 秒',
+      'arena.spend': '训练、买史诗装备、强化；只影响守家和偷菜的对战胜负，不直接赚钱',
+      'arena.dailyBudget': '训练 + 买装 + 强化合计每天最多花这么多',
+    },
+    selects: { 'arena.spend': SPEND_OPTS },
   },
   {
     title: '串门 · 帮忙',
-    fields: ['social.help.enabled', 'social.help.perDay'],
-    labels: { 'social.help.enabled': '自动帮忙', 'social.help.perDay': '每天帮几家' },
-    hints: { 'social.help.perDay': '每家 1 体力，得 200 D + 2 经验' },
+    fields: ['social.help.enabled', 'social.help.perDay', 'social.help.minEnergy'],
+    labels: { 'social.help.enabled': '自动帮忙', 'social.help.perDay': '每天帮几家', 'social.help.minEnergy': '低于这点体力就不帮' },
+    hints: {
+      'social.help.perDay': '每家 1 体力，得 200 D + 2 经验',
+      'social.help.minEnergy': '帮忙是性价比最高的事（1 体力换 200 D），门槛别设太高',
+    },
   },
   {
     title: '串门 · 偷菜',
-    fields: ['social.steal.enabled', 'social.steal.minValue', 'social.steal.maxEnergy', 'social.steal.visitsPerScan', 'social.steal.scanEvery'],
+    fields: ['social.steal.enabled', 'social.steal.minValue', 'social.steal.minEV', 'social.steal.maxEnergy', 'social.steal.visitsPerScan', 'social.steal.scanEvery', 'social.steal.useCloak', 'social.steal.useSack'],
     labels: {
       'social.steal.enabled': '开启偷菜',
       'social.steal.minValue': '最低目标价值',
+      'social.steal.minEV': '一趟期望收益下限',
       'social.steal.maxEnergy': '单次体力上限',
       'social.steal.visitsPerScan': '每轮去几家',
       'social.steal.scanEvery': '扫描间隔（秒）',
+      'social.steal.useCloak': '买轻步斗篷',
+      'social.steal.useSack': '买折叠菜篮',
     },
     hints: {
       'social.steal.enabled': '风险高：被发现要打守家战，输了按市价 1.2 倍赔（默认关闭）',
       'social.steal.minValue': '一批货市价低于这个值就不去偷',
+      'social.steal.minEV': '扣掉体力机会成本和被发现风险后，净期望低于这个值就不去',
       'social.steal.scanEvery': '多久重新扫一遍邻居目录',
+      'social.steal.useCloak': '被发现率 −10 个百分点，24 小时有效',
+      'social.steal.useSack': '每处多拿 1 个，24 小时有效',
     },
   },
 ]
@@ -373,7 +422,19 @@ function renderSettings() {
       const hint = g.hints?.[path]
       if (hint) { lab.title = hint; lab.classList.add('has-hint') }
       let input
-      if (typeof v === 'boolean') {
+      const opts = g.selects?.[path]
+      if (opts) {
+        // 三态开关：value 用 JSON 编码，才能区分 true / false / 'auto'
+        input = document.createElement('select')
+        for (const [label, val] of opts) {
+          const o = document.createElement('option')
+          o.textContent = label
+          o.value = JSON.stringify(val)
+          input.append(o)
+        }
+        input.value = JSON.stringify(v)
+        input.onchange = () => setPath(config, path, JSON.parse(input.value))
+      } else if (typeof v === 'boolean') {
         input = document.createElement('input')
         input.type = 'checkbox'
         input.checked = v
