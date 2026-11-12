@@ -139,6 +139,7 @@ function renderOverview() {
   $('dayNetSub').textContent =
     `现金 ${signedWan(dCash)} · 库存 ${signedWan(dStock)}` +
     `（起 ${fmt(led.startCoins)} → ${fmt(w.coins)}）`
+  $('dayNetSub').title = '库存按当前市价估值。灵石只在修仙内部循环、换不成 D 币，不计入净增（见「其他资源」）。'
   $('coins').textContent = fmt(w.coins)
   $('stock').textContent = '库存 ' + fmt(w.stock)
   $('isleTime').textContent = `第 ${w.isleNo} 天 · ${w.season}·${w.weather} · ${String(w.hour).padStart(2, '0')}:00${w.longNight ? ' · 长夜' : ''}`
@@ -160,6 +161,39 @@ function renderOverview() {
     : `${Math.floor(w.energy)} / ${w.energyMax}`
   $('scale').textContent = `${w.plots} / ${w.barn}/${w.barnN} / ${w.traps}`
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
+
+  // 其他资源：D 币和可卖库存之外的东西。
+  // 灵石只在修仙内部循环、换不成 D 币，所以单独列，绝不并进上面的「今日净增」。
+  const x = status.xian
+  if (x?.exists) {
+    const p = x.plots || {}
+    $('rStone').textContent = fmt(x.stone)
+    $('rGarden').textContent = `Lv${x.gardenLv} · 田 ${p.open}/${p.total}（熟 ${p.mature} · 长 ${p.growing} · 空 ${p.empty}${p.dry ? ` · 待浇 ${p.dry}` : ''}）`
+    const sumVals = (o) => Object.values(o || {}).reduce((a, b) => a + (Number(b) || 0), 0)
+    const busy = [x.meditate ? '打坐中' : '', x.brew ? '炼丹中' : ''].filter(Boolean)
+    $('rXianItems').textContent =
+      `${sumVals(x.bag)} / ${sumVals(x.seeds)} / ${sumVals(x.pills)} 件` +
+      (busy.length ? ` · ${busy.join('/')}` : '')
+  } else {
+    $('rStone').textContent = '未开启修仙'
+    $('rGarden').textContent = '—'
+    $('rXianItems').textContent = '—'
+  }
+  const res = status.resources
+  const sp = res?.supplies
+  $('rSupplies').textContent = sp ? `饵 ${sp.bait} · 炸 ${sp.bomb} · 料 ${sp.feed}` : '—'
+  const v = res?.vault
+  $('rVault').textContent = v ? (v.units > 0 ? `${v.kinds} 种 · ${v.units} 件` : '无预留') : '—'
+  const ar = res?.arena
+  if (ar) {
+    const r = ar.byRarity || {}
+    $('rArena').textContent =
+      `${ar.gear} 件（普${r[1] || 0} 稀${r[2] || 0} 史${r[3] || 0} 传${r[4] || 0}）· 强化 +${ar.enhTotal}` +
+      (ar.chestMax ? ` · 宝箱 ${ar.chest ?? 0}/${ar.chestMax}${ar.chestReady ? ' 可开' : ''}` : '')
+  } else {
+    // 装备列表只在跑过擂台后缓存在内存里，面板不为此额外发请求
+    $('rArena').textContent = '打一场擂台后显示'
+  }
 
   const q = w.quotas || {}
   const names = { fish: '钓鱼', mine: '挖矿', craft: '加工', bomb: '炸矿', coffee: '咖啡', npc: '52弟', gomokuPaid: '五子棋计奖' }
