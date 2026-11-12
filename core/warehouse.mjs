@@ -17,7 +17,19 @@ import * as M from './market.mjs'
 export function planVault(R, world, cfg) {
   if (!cfg.vault?.enabled) return []
   const ahead = cfg.vault?.keepPeakAhead ?? 2
-  const plan = M.sellPlan(R, world.now, { coins: world.coins, state: world.state, prices: world.prices }, {
+  // 关键：判断「该不该锁」必须基于**全部解锁后**的库存，而不是当前可售量。
+  //
+  // sellPlan 的 qty 是 inv − vault（扣除已锁的），gain/netNow 都跟着它算。
+  // 拿这个数判断 shouldHold 会造成抖动：
+  //   锁满 → qty=0 → 行消失或 gain 变小 → 判成不该锁 → 解锁
+  //   → qty 恢复 → gain 变大 → 判成该锁 → 再锁上 → 循环
+  // 线上实测 copper 就是这么每 2~3 秒提交一次囤货动作，
+  // 一会儿 n=0 一会儿 n=46，永远收敛不了。
+  //
+  // 所以先造一份「vault 清空」的假状态来跑 sellPlan，
+  // 这样 shouldHold 只看货本身值不值得等，和我们锁没锁过无关。
+  const bare = { ...world.state, b12: { ...(world.state.b12 || {}), vault: {} } }
+  const plan = M.sellPlan(R, world.now, { coins: world.coins, state: bare, prices: world.prices }, {
     days: cfg.sell?.horizonDays || 12,
     markdownPct: cfg.sell?.markdownPct ?? 6,
     external: world.externalSoldRatio || {},
@@ -31,14 +43,16 @@ export function planVault(R, world, cfg) {
       const have = world.state.inv?.[row.id]?.[q] || 0
       if (have <= 0) continue
       // 服务端校验 `n <= s.inv[id][q]`（原库存，未扣 vault），超一条就整条动作作废。
-      // 问题是本地这份 inv 是「预演过本轮 harvest 之后」的数，
-      // 而服务端那边同一批 harvest 未必收得一样多（被偷的地块只收得到 1 个、
-      // rev 冲突、单品上限等）。只要服务端库存少一个，这里就会报
-      // 「预留数量无效或超过当前库存」——实测一天出现 12 次，每次都白占一条 action。
-      // 所以锁的时候留 1 个余量：少锁一个不影响收益（下一轮会再补上），
-      // 但能让这条动作稳稳成功。
-      const safe = (n) => (n > 0 ? Math.max(1, n - 1) : 0)
-      const want = shouldHold ? safe(have) : 0
+      // 本地这份 inv 是「预演过本轮 harvest 之后」的数，服务端同一批 harvest
+      // 未必收得一样多（被偷的地块只收得到 1 个）。少一个就报
+      // 「预留数量无效或超过当前库存」，实测一天出现 12 次。
+      //
+      // 但余量不能留：留 1 个会让 vault 永远比 inv 少 1，
+      // 而 sellPlan 看到那 1 个可售货就继续生成同一行，
+      // 和上面的抖动叠在一起就是无限循环。
+      // 改成「要么全锁，要么不锁」——失败的极端情况交给服务端拒绝，
+      // 下一轮计划器重算时会自然修正。
+      const want = shouldHold ? have : 0
       const cur = vaultQs[q] || 0
       if (want === cur) continue
       out.push({ a: 'warehouse', id: row.id, q, n: want, keep: shouldHold })
