@@ -516,41 +516,54 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     if (!watchTargets.length) return { stolen: 0, value: 0 }
     return await stealFromTargets(world, cfg, log, memo, watchTargets)
   }
-  if (snipeReady) {
-    memo.stealWakeAt = world.now
-    memo.stealWakePending = true
+  // 到点（snipeReady）或已过点还在宽限内（overdue）都走快速路径。
+  //
+  // overdue 以前会「绕过扫描间隔做全量扫描」——一次几十秒，扫完目标早没了，
+  // 而且下一次解禁照样被拖过去。过点的记录只有两种结局：货被抢光，
+  // 或者我们体力/胜率不够；两种情况都只需要去目标岛确认一下，不需要扫全服。
+  if (snipeReady || overdue) {
+    if (snipeReady) {
+      memo.stealWakeAt = world.now
+      memo.stealWakePending = true
+    }
     // 掐点这一轮**不扫目录**。以前这里只打一行日志就继续往下走，
     // 于是「醒来 → refreshWatchList 拉 40~50 页目录 → watchRound 访问
     // 12 家（每家 sleep 900ms）→ 才开始偷」，几十秒过去了，
     // 解禁的货早被别人抢光。线上 2026-11-12 记下 250 处待解禁、偷到 0 件。
     const cands = nearestUnlockTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 3)
-    log(`偷菜：解禁时刻到了，直接抢 ${cands.length} 家（不扫目录）`)
-    const out = []
-    for (const c of cands) {
-      let info
-      try { info = await visitInfo(world, c.targetId) } catch { continue }
-      const isle = info.isle || {}
-      const rules = info.rules || {}
-      try {
-        const { rec } = updateIsleSchedule({ isle, rules, now: world.now, prev: memo.stealSchedule[c.targetId] || null })
-        memo.stealSchedule[c.targetId] = rec
-      } catch { /* 调度只是优化，算不出来不影响正常偷 */ }
-      const { targets, value } = targetsFromIsle(R, world, isle, rules)
-      if (!targets.length) continue
-      out.push({
-        id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard,
-        targets, value,
-        detect: R.b12Detection(info.state || {}, world.state, world.now, 0),
-        fineMax: rules.fineMax || 5000,
-        energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
-      })
+    if (cands.length) {
+      log(`偷菜：${snipeReady ? '解禁时刻到了' : '有已解禁未处理的目标'}，直接抢 ${cands.length} 家（不扫目录）`)
+      const out = []
+      for (const c of cands) {
+        let info
+        try { info = await visitInfo(world, c.targetId) } catch { continue }
+        const isle = info.isle || {}
+        const rules = info.rules || {}
+        try {
+          const { rec } = updateIsleSchedule({ isle, rules, now: world.now, prev: memo.stealSchedule[c.targetId] || null })
+          memo.stealSchedule[c.targetId] = rec
+        } catch { /* 调度只是优化，算不出来不影响正常偷 */ }
+        const { targets, value } = targetsFromIsle(R, world, isle, rules)
+        if (!targets.length) continue
+        out.push({
+          id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard,
+          targets, value,
+          detect: R.b12Detection(info.state || {}, world.state, world.now, 0),
+          fineMax: rules.fineMax || 5000,
+          energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
+        })
+      }
+      if (out.length) return await stealFromTargets(world, cfg, log, memo, out)
+      // 到点了但货已经没了（被抢 / 被偷满）。把这些过时记录清掉，
+      // 否则下一轮还是 overdue，主循环会被它反复催醒。
+      for (const c of cands) {
+        const rec = memo.stealSchedule?.[c.targetId]
+        if (rec) rec.upcoming = (rec.upcoming || []).filter((u) => u.unlockAt > world.now)
+      }
+      return { stolen: 0, value: 0 }
     }
-    if (out.length) return await stealFromTargets(world, cfg, log, memo, out)
-    // 到点了但货已经没了（被抢 / 被偷满）。不要再退回全量扫描——
-    // 那会把这一轮拖成几十秒，下一次解禁照样错过。直接收工等下一轮。
-    return { stolen: 0, value: 0 }
+    // 没有可去的候选（记录刚好被 sweep 清掉）→ 落回正常流程
   }
-  if (overdue && world.now - lastScan < every) log(`偷菜：有已解禁未处理的目标，提前扫描`)
 
   memo.stealScanAt = world.now
   // 先进 watchlist 看一批：它们带着「成熟 + 保护期」算出来的精确解禁时刻，
