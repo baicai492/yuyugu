@@ -30,7 +30,15 @@ export function planVault(R, world, cfg) {
     for (let q = 0; q < 3; q++) {
       const have = world.state.inv?.[row.id]?.[q] || 0
       if (have <= 0) continue
-      const want = shouldHold ? have : 0
+      // 服务端校验 `n <= s.inv[id][q]`（原库存，未扣 vault），超一条就整条动作作废。
+      // 问题是本地这份 inv 是「预演过本轮 harvest 之后」的数，
+      // 而服务端那边同一批 harvest 未必收得一样多（被偷的地块只收得到 1 个、
+      // rev 冲突、单品上限等）。只要服务端库存少一个，这里就会报
+      // 「预留数量无效或超过当前库存」——实测一天出现 12 次，每次都白占一条 action。
+      // 所以锁的时候留 1 个余量：少锁一个不影响收益（下一轮会再补上），
+      // 但能让这条动作稳稳成功。
+      const safe = (n) => (n > 0 ? Math.max(1, n - 1) : 0)
+      const want = shouldHold ? safe(have) : 0
       const cur = vaultQs[q] || 0
       if (want === cur) continue
       out.push({ a: 'warehouse', id: row.id, q, n: want, keep: shouldHold })

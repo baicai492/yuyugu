@@ -44,6 +44,21 @@
  */
 export const EXPIRED_GRACE_SEC = 300
 
+/**
+ * 已经过点多久之后就不再拿它当「唤醒理由」。
+ *
+ * 这和 EXPIRED_GRACE_SEC 是两件事：
+ *   · EXPIRED_GRACE_SEC 决定「记录还留多久」（多久后从表里删掉）
+ *   · 这个值决定「还催不催主循环醒来」
+ *
+ * 线上实测：一条记录解禁后，nextUnlock 连续 300 秒都返回 wakeIn=1，
+ * 于是主循环每 1~4 秒醒一次、扫一遍邻居目录——04:47 那次连续空转了两分钟。
+ * 解禁瞬间醒来一次就够了；没偷到就是没偷到（目标已被别人偷走、
+ * 或守家太强），多醒几次也不会有不同结果。
+ * 30 秒足够覆盖「醒来 → 拉状态 → 提交」的延迟。
+ */
+export const WAKE_GRACE_SEC = 30
+
 export function updateIsleSchedule({ isle, rules, now, prev }) {
   const protect = Number(rules?.protect) || 1800
   const rec = prev ? { ...prev, plots: { ...(prev.plots || {}) }, pens: { ...(prev.pens || {}) } } : { plots: {}, pens: {} }
@@ -116,17 +131,16 @@ export function updateIsleSchedule({ isle, rules, now, prev }) {
  * leadSec 是提前量：榜一用 T_prep 提前展开（换装 + 冷却），
  * 我们只需要提前几秒让主循环醒来、拉一次最新世界状态即可。
  */
-export function nextUnlock(schedule, now, { leadSec = 8, graceSec = EXPIRED_GRACE_SEC } = {}) {
+export function nextUnlock(schedule, now, { leadSec = 8, graceSec = EXPIRED_GRACE_SEC, wakeGraceSec = WAKE_GRACE_SEC } = {}) {
   let best = null
   for (const [id, rec] of Object.entries(schedule || {})) {
     for (const u of rec.upcoming || []) {
-      // 已经过了解禁时刻的，只给一小小段宽限（graceSec）用来「刚到点就抢」，
-      // 超过就当作没赶上——它会由 updateIsleSchedule 在下次访问时重新校准。
+      // 已经过了解禁时刻的，只给一小段宽限（wakeGraceSec）用来「刚到点就抢」。
       //
-      // 这里以前是 now - 30，宽限太长：只要有一条记录过期了没偷到，
-      // nextUnlock 就会返回 wakeIn=1 的候选，主循环每几秒醒一次空转，
-      // 一直持续到 updateIsleSchedule 把那条约 1 小时后才清掉。
-      if (u.unlockAt < now - graceSec) continue
+      // 注意这里**不能**用 graceSec（300 秒）：那是「记录保留多久」，
+      // 拿它当唤醒宽限会让主循环在解禁后 5 分钟内每 1~4 秒醒一次。
+      // 线上 04:47 就是这样空转了两分钟，10 点那段则累积了 230 次假唤醒。
+      if (u.unlockAt < now - wakeGraceSec) continue
       if (!best || u.unlockAt < best.at) {
         best = { at: u.unlockAt, targetId: Number(id), item: u.item, exact: u.exact, kind: u.kind }
       }
@@ -135,7 +149,7 @@ export function nextUnlock(schedule, now, { leadSec = 8, graceSec = EXPIRED_GRAC
   if (!best) return null
   // 提前 leadSec 秒醒来，留出拉状态 + 提交的时间。
   // 已经到点（at <= now）时 wakeIn 会是 0 或负数，夹到 1 秒即可——
-  // 但这种情况只在 graceSec 宽限内出现，不会再变成长期空转。
+  // 但这种情况只在 wakeGraceSec 宽限内出现，不会再变成长期空转。
   best.wakeIn = Math.max(1, best.at - now - leadSec)
   return best
 }

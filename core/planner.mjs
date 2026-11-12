@@ -601,11 +601,23 @@ export function planRound(world, cfg, log = () => {}) {
       const salePrice = expPrices[r.id] || prices[r.id] || r.price
       return { r, margin: salePrice - cost }
     }).filter((x) => x.margin > 0).sort((a, b) => b.margin - a.margin)
+    // 加工也要体力（cost.craft，通常 1 点）。体力见底时它是和收割抢资源的那一方：
+    // 实测 24 块番茄全是熟/将熟，体力 0，程序每轮把刚回的那 1 点拿去加工，
+    // 地里 7 块熟的反而一直收不了。加工产物本来就「暂不卖」，不差这几分钟；
+    // 但熟地晚收一分钟就多一分钟被偷的风险。
+    let ripeCount = 0
+    for (let i = 0; i < s.plotN; i++) {
+      const p = s.plots[i]
+      if (!p) continue
+      if (R.cropStage(p, t, R.sprinkled(s, i) || weather === 1).stage === 3) ripeCount++
+    }
+    const craftKeep = ripeCount * (R.WORLD.cost.harvest || 1)
+    const craftBudget = Math.max(0, Math.floor(s.en) - craftKeep)
     for (const { r, margin } of ranked) {
       if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
       const n = Math.min(
         left - made,
-        Math.floor(s.en),
+        craftBudget - made,
         ...Object.entries(r.in).map(([id, k]) => Math.floor(have(id) / k)),
       )
       if (n <= 0) continue
@@ -1004,12 +1016,22 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
   }
 
   // ---------- 小屋：只加体力上限 ----------
-  // 脚本从不让体力攒满，上限提升基本没有实际收益，默认不买（maxHouse = 0）。
+  //
+  // 每级 +20 体力上限。以前默认不买，理由是「脚本从不让体力攒满」——
+  // 但线上日志显示恰恰相反：体力长期卡在 0/100（连续 231 次），
+  // 24 块待收的地只能每 180 秒收一块，一轮要 72 分钟，
+  // 期间陆续成熟的地全在树上等着被偷。上限本身就是瓶颈。
+  //
+  // 收益按「多出来的 20 点体力拿去钓鱼能多赚多少」估：
+  // 一天的体力总量是固定的（86400/180 ≈ 480 点），但上限决定了
+  // 「能不能一次攒够、一口气干完一轮」，等于减少了成熟→收割的延迟。
+  // 保守只按「每天多白嫖 20 点」即 480 点里多出来的 1/24 算。
   if (s.tools.house < Math.min(W.houseMax, cfg.invest?.maxHouse ?? 0)) {
     const housePrice = R.upgradePrice(s, 'house')
-    // 上限 +20 约等于每天多白嫖 20 点体力
-    const foodCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
-    if (housePrice != null) add(`小屋 Lv${s.tools.house + 1}`, { a: 'upgrade', k: 'house' }, housePrice, 20 * Math.min(foodCost, 600))
+    const perEnergy = cfg.work.fish ? fishEV(R, s, t, prices, false) / (W.cost.fish || 4) : 0
+    // 每点体力至少值 600 D（低于这个数就说明钓鱼/挖矿都不划算，那也不该扩）
+    const dailyGain = 20 * Math.max(600, perEnergy)
+    if (housePrice != null) add(`小屋 Lv${s.tools.house + 1}`, { a: 'upgrade', k: 'house' }, housePrice, dailyGain)
   }
 
   out.sort((a, b) => a.payback - b.payback)
