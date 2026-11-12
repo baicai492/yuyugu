@@ -694,6 +694,12 @@ function bind() {
     const btn = $('btnRestart')
     btn.disabled = true
     $('statusline').textContent = '正在重启主程序…'
+    // 旧进程退出到新进程监听之间有几百毫秒到两秒的空窗。
+    // 期间 1.5 秒一次的自动刷新会去请求 /api/status，连接被拒的
+    // TypeError: Failed to fetch 会把状态栏盖成「读取状态失败」，
+    // 看着像重启失败。先把 alive 置 false，自动刷新就不再发请求；
+    // 下面的 ping 循环成功后会由 connect() 重新置回 true。
+    alive = false
     try { await cmd('restart') } catch { /* 旧进程可能来不及回包就退出了，忽略 */ }
     logSince = 0; logLines = []
     let up = false
