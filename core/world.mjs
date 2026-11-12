@@ -14,6 +14,8 @@ export class World {
     this.coins = 0
     this.prices = {}
     this.now = 0
+    this.snapshotNow = 0   // 最近一次快照里的服务端时间
+    this.clockOffset = 0   // 服务端时间 − 本地时间（秒），每次 accept 校准
     this.clockStart = 0
     this.fetchedAt = 0
     this.lastOut = []
@@ -39,9 +41,32 @@ export class World {
     if (j.rev != null) this.rev = j.rev
     if (j.coins != null) this.coins = j.coins
     if (j.prices) this.prices = j.prices
-    if (j.now) this.now = j.now
+    if (j.now) {
+      this.now = j.now
+      this.snapshotNow = j.now
+      // 服务端时间与本地时钟的偏移。之后 tickClock() 用它把 now 往前推，
+      // 不必等下一次网络往返——偷菜掐点依赖「此刻」而不是「上次拉取时」。
+      // 误差约一个 RTT，秒级决策可以接受。
+      this.clockOffset = j.now - Date.now() / 1000
+    }
     this.fetchedAt = Date.now()
     return this
+  }
+
+  /**
+   * 把 now 推进到「当前」。
+   *
+   * w.now 原本只在 accept() 时更新。可是一次巡视可能跑几分钟（扫目录、
+   * 擂台 30 场），等走到偷菜段时 now 还是几分钟前的——掐点判断会以为
+   * 「还没到解禁时刻」，实际早过了。这里用本地时钟 + 校准偏移补上。
+   *
+   * 只往前推，不往回退：服务端快照里的时间永远是下界。
+   */
+  tickClock() {
+    if (!this.snapshotNow) return this.now
+    const est = Math.floor(Date.now() / 1000 + (this.clockOffset || 0))
+    if (est > this.now) this.now = est
+    return this.now
   }
 
   async refresh() {

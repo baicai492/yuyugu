@@ -443,6 +443,9 @@ function waveTargets(schedule, watch, now, leadSec, limit = 5) {
 export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const st = cfg.social?.steal
   if (!st?.enabled) return { stolen: 0, value: 0 }
+  // 掐点判断依赖「此刻」，而 world.now 只在上次 accept 时更新。
+  // 一次巡视可能已经跑了几个分钟（扫目录、擂台），这里先校准一次。
+  world.tickClock?.()
   const R = world.R
   const lastScan = memo.stealScanAt || 0
   const every = st.scanEvery ?? 1800

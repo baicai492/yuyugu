@@ -356,6 +356,9 @@ export class Engine {
     let totalActions = 0        // 本轮真正提交成功的动作数（判断「有没有推进」用）
     while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
       this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
+      // 一次规划循环可能横跨几分钟（每批要串行提交、等 http 间隔）。
+      // 用校准过的本地时钟把 now 推上来，别拿几分钟前的快照时间做决策。
+      w.tickClock()
       // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
       // world 是每轮共享的对象，规划器往里写 stolenAt 也能被这里读回来。
       if (this.memo.stolenAt) w.stolenAt = this.memo.stolenAt
@@ -398,8 +401,12 @@ export class Engine {
     // 实际偷到 0 件。所以只在「确实有目标进入解禁窗口」时插队，
     // 平时仍按原顺序（下面那块）走，不改变日常节奏。
     let stealSnipeDone = false
+    w.tickClock()
+    const snipeLead = cfg.social?.steal?.enabled
+      ? (cfg.social.steal.prepLeadSec || waveLeadSec(this.memo.stealSchedule || {}, w.now))
+      : 8
     if (cfg.social?.steal?.enabled && !cfg.dry &&
-        shouldSnipe(this.memo, this.memo.stealSchedule, w.now)) {
+        shouldSnipe(this.memo, this.memo.stealSchedule, w.now, { leadSec: snipeLead })) {
       try {
         this.setStep('串门 · 偷菜（掐点）')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
