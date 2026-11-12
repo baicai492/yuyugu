@@ -9,9 +9,8 @@ import { saveConfig } from './config.mjs'
 import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir } from './logfile.mjs'
 
 // 主程序版本号：GUI 标题栏显示为 v<版本>。
-// 从 v1 的 Chrome 插件架构换成 v2 的 Node 主程序后这里一直漏改，
-// 面板上就一直挂着「v1」，看起来像加载了旧代码。
-export const VERSION = 3
+// 这套是 v2（Node 主程序 + Chrome 仅 GUI）。加战斗内核那次误升到 3，已改回。
+export const VERSION = 2
 
 const ALLOW_ORIGIN = [
   'chrome-extension://',

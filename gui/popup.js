@@ -78,7 +78,7 @@ async function loadStatus() {
     status = j.status
     config = j.config
     renderOverview()
-    $('ver').textContent = 'v' + (j.version || 3)
+    $('ver').textContent = 'v' + (j.version || 2)
   } catch (e) {
     // 重启空窗、进程刚退出都会走到这里。进行中的重启不算故障；
     // 其它情况才报，并且下一次读取成功时由 renderOverview 覆盖掉。

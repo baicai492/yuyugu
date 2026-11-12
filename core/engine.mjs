@@ -682,7 +682,6 @@ export class Engine {
     const why = []
     if (s.en < 4) why.push(`体力 ${Math.floor(s.en)} 太低`)
     if (!cfg.work?.fish) why.push('钓鱼关着')
-    if (R.b12IsLongNight(t)) why.push('长夜')
     if (why.length && !work.length) bits.push(`无事可做：${why.join('、')}`)
 
     return `下次巡视 ${Math.round(sleep)} 秒后｜` + (bits.length ? bits.join('｜') : '没有待办')

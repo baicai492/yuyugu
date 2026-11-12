@@ -1036,7 +1036,12 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const fishLeftQ = Math.max(0, (W.daily.fish || 0) - fishUsed)
     const regenLeft = Math.floor(Math.max(0, boundaryIn) / regen)
     const canFinishQuota = s.en + regenLeft >= fishLeftQ * (W.cost.fish || 4)
-    const fishOK = !R.b12IsLongNight(t) &&
+    // 长夜（22:00–08:00）岛钟暂停、额度不刷新，但**体力照常按现实时间回复**，
+    // 站点规则也不禁止下竿（同一时段挖矿一直在正常跑，额度照样扣）。
+    // 以前这里整个长夜禁钓，10 小时白回约 200 点体力全在上限里溢出，
+    // 面板上「钓鱼 0/80」一整天不动就是这么来的。
+    // 长夜里鱼池按冻结的岛钟选鱼，不是最优时段，但体力本来就是白来的。
+    const fishOK =
       (fishNowEV >= fishBestEV * windowRatio || boundaryIn < deadlineSec || !canFinishQuota)
 
     // --- 跨期体力预算 ---
