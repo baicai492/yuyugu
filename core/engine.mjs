@@ -10,7 +10,7 @@ import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
-import { nextUnlock } from './steal-schedule.mjs'
+import { shouldSnipe, noteSnipeResult } from './steal-schedule.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -354,6 +354,18 @@ export class Engine {
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.value || 0
         this.credit(r.value || 0)
+        // 记录这次「因解禁而醒」的结果，喂给自适应节流：
+        // 偷到了就恢复 60 秒的敏锐节奏，白醒一趟就放宽一倍（封顶 15 分钟）。
+        if ((r.stolen || 0) > 0) {
+          noteSnipeResult(this.memo, r.stolen)
+        } else if (this.memo.stealWakePending) {
+          const before = this.memo.stealWakeGap || 60
+          noteSnipeResult(this.memo, 0)
+          if (this.memo.stealWakeGap > before) {
+            this.log(`偷菜：这一趟没抢到，下次因解禁唤醒的间隔放宽到 ${this.memo.stealWakeGap} 秒`)
+          }
+        }
+        this.memo.stealWakePending = false
       } catch (e) { this.log('偷菜出错：' + e.message, 'err') }
     }
 
@@ -654,10 +666,19 @@ export class Engine {
     // 也只能干看着，然后那些解禁记录还会被重新算一遍，形成
     // 「醒来 → 扫一遍 → 什么都没做 → 再睡 → 再醒」的空转。
     // 线上 14:25~14:29 就是这么每 62 秒转一轮的。
+    //
+    // 光有体力门槛还不够：巡逻 53 座岛会记下 380 条解禁时刻，
+    // 平均每 20 秒就有一条到点，于是变成每 30~60 秒醒一次、
+    // 每次都是「扫了 8 座岛，找到 0 家可偷」。真正的问题不是醒得不勤，
+    // 而是这种「成熟 + 保护期」的目标到点时早就被别人偷满了。
+    //
+    // shouldSnipe 带自适应节流：偷到过就 60 秒一次，连续白醒就翻倍到 15 分钟。
     if (this.cfg.social?.steal?.enabled && w.state.en >= 5) {
       const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
-      const nx = nextUnlock(this.memo.stealSchedule || {}, t, { leadSec })
-      if (nx && nx.at - t <= leadSec) {
+      const nx = shouldSnipe(this.memo, this.memo.stealSchedule || {}, t, { leadSec })
+      if (nx) {
+        this.memo.stealWakeAt = t
+        this.memo.stealWakePending = true
         return `偷菜解禁：${nx.item || '目标'}（${nx.exact ? '时刻确定' : '估计'}）`
       }
     }

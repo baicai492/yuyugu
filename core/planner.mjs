@@ -8,7 +8,7 @@
 //   4. 投资只看回本周期
 import * as M from './market.mjs'
 import { planVault } from './warehouse.mjs'
-import { nextUnlock } from './steal-schedule.mjs'
+import { nextUnlock, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 
 const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -909,13 +909,18 @@ export function planRound(world, cfg, log = () => {}) {
       const useBait = cfg.work.bait && (s.inv.bait?.[0] || 0) > 0
       // 钓到的鱼、挖到的矿都要囤到价格峰值才卖，按未来均价估才准
       const fishVal = cfg.work.fish && fishLeft > 0 && fishOK ? fishEV(R, s, t, expPrices, useBait) : -1
-      const mineVal = cfg.work.mine && mineLeft >= 3 ? mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick) : -1
+      // 挖矿剩 1~2 次时也做（体力够就直接挖），只是**不值得为它吃口粮**。
+      // 以前写成 mineLeft >= 3 才算，实测岛上剩 2 次挖矿时规划器直接判「没事可做」，
+      // 而 nextWake 又按「还有额度」每 60 秒催一次，于是整天每 60 秒醒一次、
+      // 醒来什么都不干（线上 14:44~14:47 稳定复现）。
+      const mineLowQuota = mineLeft > 0 && mineLeft < 3
+      const mineVal = cfg.work.mine && mineLeft > 0 ? mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick) : -1
       const bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, expPrices, true) : -1
       // 不按当前体力筛任务：体力不够时下面会决定「吃口粮补」还是「等自然回复」。
       // 按体力筛的话，体力见底会直接跳出，永远等不到吃口粮那一步。
       const jobs = []
       if (fishVal > 0) jobs.push({ a: { a: 'fish', bait: useBait }, cost: W.cost.fish, v: fishVal / W.cost.fish, label: '钓鱼', lazy: false })
-      if (mineVal > 0) jobs.push({ a: { a: 'mine', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.mine, v: mineVal / W.cost.mine, label: '挖矿', lazy: true })
+      if (mineVal > 0) jobs.push({ a: { a: 'mine', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.mine, v: mineVal / W.cost.mine, label: '挖矿', lazy: true, lowQuota: mineLowQuota })
       if (bombVal > 0) jobs.push({ a: { a: 'bomb', f: Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick]) }, cost: W.cost.bomb, v: bombVal / W.cost.bomb, label: '炸矿', lazy: true })
       jobs.sort((x, y) => y.v - x.v)
       const job = jobs.find((j) => !skipJobs.has(j.label))
@@ -939,6 +944,9 @@ export function planRound(world, cfg, log = () => {}) {
       // 它要留给 keepWindow 内成熟的地收割。这是防偷的硬底线。
       const usable = s.en - keep
       if (usable < job.cost) {
+        // 剩最后 1~2 次挖矿：体力够就挖，但绝不为了它吃口粮——
+        // 口粮成本 300+ D/点，而这点额度明天就重置了，不值得投资。
+        if (job.lowQuota) { skipJobs.add(job.label); continue }
         // 可用的不够干这活。挖矿/炸矿没有时段限制，可以等自然回复——
         // 只要换岛日前回复得够，白白等回来比花口粮买体力划算得多。
         // 钓鱼不行：鱼有时段，过了就没了。
@@ -1490,7 +1498,9 @@ export function nextWake(world, cfg, memo = {}) {
       return Math.max(0, (R.WORLD.daily[k] || 0) - used)
     }
     const workLeft = (cfg.work?.fish ? iqLeft('fish') : 0) +
-      (cfg.work?.mine ? iqLeft('mine') : 0) +
+      // 矿洞没层可挖（s.mine.max=0）时 mineEV 是 0，规划器不会选挖矿。
+      // 这里也不能把它算成「有事可做」，否则就是每 60 秒醒一次、什么都不干。
+      (cfg.work?.mine && (s.mine?.max || 0) > 0 ? iqLeft('mine') : 0) +
       (cfg.work?.bomb ? iqLeft('bomb') : 0)
     if (workLeft > 0 && s.en >= Math.min(R.WORLD.cost.fish ?? 4, R.WORLD.cost.mine ?? 3, R.WORLD.cost.bomb ?? 6)) {
       hasPending = true
@@ -1521,7 +1531,13 @@ export function nextWake(world, cfg, memo = {}) {
     // 精确解禁调度：把「某块地/某个畜栏什么时候能偷」也算进唤醒时刻。
     // 这是到点扫描做不到的——成熟后要过 protect(1800 秒) 才能偷，
     // 到点扫描很容易每次都差几分钟，永远偷不到刚解禁的那批。
-    const nx = nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 })
+    //
+    // 但要加自适应节流：巡逻一圈会记下几百条解禁时刻，平均 20 秒有一条到点，
+    // 不节流就是「1 秒后醒 → 什么都没偷到 → 再 1 秒后醒」。
+    // 偷到过 60 秒一次，连续白醒翻倍到 15 分钟（见 steal-schedule.mjs）。
+    const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
+    const wakeReady = t - (memo.stealWakeAt || 0) >= gap
+    const nx = wakeReady ? nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 }) : null
     if (nx) {
       // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
       push(Math.min(left > 0 ? left : 5, nx.wakeIn))

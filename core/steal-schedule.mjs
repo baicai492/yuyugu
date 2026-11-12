@@ -76,24 +76,26 @@ export function updateIsleSchedule({ isle, rules, now, prev }) {
       unlockAt = now
       exact = true
     } else if (ripe) {
-      // 成熟了但还不能偷 → 在保护期内。
+      // 成熟了但还不能偷 —— 在保护期内。
       //
-      // 服务端不给「什么时候成熟的」，所以第一次看到一块熟地时，
-      // 它可能刚熟、也可能已经保护了 29 分钟。
-      // 以前保守记「还要等满 protect（1800 秒）」→ 真解禁时早被抢光了，
-      // 线上实测巡逻看到 48 块成熟在保护期，一块都没抢到。
-      //
-      // 改成先用短间隔探一次（min(protect, 900)）：
-      //   · 到点再看发现解禁 → 立刻偷，抢在那批「只等 30 分钟周期扫描」的人前面
-      //   · 还没解禁 → 记录会再往后推，最多两次就收敛
-      // 之前记过更早的就取更早的，不会越推越晚。
-      const step = Math.min(protect, 900)
-      unlockAt = old?.unlockAt != null ? Math.min(old.unlockAt, now + step) : now + step
-      // 这不是确切时刻，标 false：nextWake 只把它当唤醒候选，不当「保证能偷到」
-      exact = false
+      // **不记**。线上实测：巡逻看到的成熟地 90% 是 stolen=2（已被偷满 2 个，
+      // 服务端直接锁死），剩下的在保护期里的，等它解禁时也早被别人抢光。
+      // 靠服务端不给的「成熟时刻」硬猜一个解禁点，猜中了也抢不到，
+      // 猜不中就让主循环空转——14:32 的日志里就是每 30 秒醒一次、每次都
+      // 「扫了 0 座岛，找到 0 家可偷」。
+      // 这一类目标的唯一价值是「现在就能偷」（stealable 分支），已经处理在上面。
+      return
     } else if (readyIn > 0) {
-      // 还没成熟 → 成熟时刻是确定的（left），解禁 = 成熟 + 保护期
-      unlockAt = now + readyIn + protect
+      // 还没成熟 → 成熟时刻是确定的（left），解禁 = 成熟 + 保护期。
+      // 这是唯一值得掐的时刻：我们能算准它什么时候熟，准点过去。
+      //
+      // 只记 1 小时内会成熟的：watchlist 53 座岛约 14 分钟轮完一圈，
+      // 更远的地巡逻时会被重新算一次，不用提前堆在表里。
+      // 以前阈值是 2 小时，53 座岛 × 7 块在长的地 = 380 条记录，
+      // 平均每 20 秒有一条到点，把主循环催得团团转（线上 14:32~14:35）。
+      const at = now + readyIn + protect
+      if (at - now > 3600 + protect) return
+      unlockAt = at
       exact = true
     } else {
       return
@@ -162,6 +164,53 @@ export function nextUnlock(schedule, now, { leadSec = 8, graceSec = EXPIRED_GRAC
   // 但这种情况只在 wakeGraceSec 宽限内出现，不会再变成长期空转。
   best.wakeIn = Math.max(1, best.at - now - leadSec)
   return best
+}
+
+/**
+ * 偷菜狙击的自适应节流上下限（秒）。
+ *
+ * 为什么要节流：巡逻一圈 53 座岛会记下几百条「解禁时刻」，平均每 20 秒左右
+ * 就有一条到点。如果每一条都唤醒主循环，就成了「醒来 → 扫一遍 → 什么都没偷到
+ * → 退避 → 又被下一条催醒」。线上 14:32~14:35 整整刷了 3 分钟这种日志，
+ * 一行偷菜收益都没有。
+ *
+ * 偷到就恢复敏锐（60 秒），连续偷不到就逐步放宽到 900 秒——
+ * 抢不到的原因（被别人抢先 / 守家太强）不会因为多醒几次而改变。
+ */
+export const SNIPE_MIN_GAP_SEC = 60
+export const SNIPE_MAX_GAP_SEC = 900
+
+/**
+ * 「此刻值不值得为偷菜解禁醒一次」——带节流。
+ *
+ * 和直接调 nextUnlock 的区别：
+ *   1. 距上次狙击不足 stealWakeGap 秒 → 不醒（不管有多少条到点）
+ *   2. 只认「leadSec 秒内就要解禁」的那一条，未来几个小时的不算
+ *
+ * @returns 命中的那条 nextUnlock 结果，或 null
+ */
+export function shouldSnipe(memo, schedule, now, { leadSec = 8, graceSec = WAKE_GRACE_SEC } = {}) {
+  const gap = Math.max(SNIPE_MIN_GAP_SEC, memo?.stealWakeGap || SNIPE_MIN_GAP_SEC)
+  if (now - (memo?.stealWakeAt || 0) < gap) return null
+  const nx = nextUnlock(schedule || {}, now, { leadSec, wakeGraceSec: graceSec })
+  if (!nx) return null
+  if (nx.at < now - graceSec) return null
+  if (nx.at - now > leadSec) return null
+  return nx
+}
+
+/**
+ * 一次狙击结束后回调：偷到了就恢复敏锐，连续没偷到就逐步放宽间隔。
+ * got 是这一轮偷到的件数（0 表示白醒一趟）。
+ */
+export function noteSnipeResult(memo, got) {
+  if (!memo) return
+  if (got > 0) {
+    memo.stealWakeGap = SNIPE_MIN_GAP_SEC
+    return
+  }
+  const cur = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
+  memo.stealWakeGap = Math.min(SNIPE_MAX_GAP_SEC, cur * 2)
 }
 
 /**

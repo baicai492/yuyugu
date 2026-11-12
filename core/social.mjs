@@ -4,7 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC } from './steal-schedule.mjs'
+import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -431,14 +431,21 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     return { stolen: 0, value: 0 }
   }
 
+  // 「解禁时刻到了」必须同时满足两件事才算数：
+  //   1. 节流窗口已过 —— 巡逻一圈会记下几百条解禁时刻，平均每 20 秒有一条到点。
+  //      不加节流的话每一轮都会判定「有精确时刻」，绕过 scanEvery 全量扫描，
+  //      而每次都是「扫了 8 座岛，找到 0 家可偷」。线上 14:32~14:35 刷了 3 分钟。
+  //      偷到过就 60 秒一次，连续白醒就翻倍到 15 分钟（见 steal-schedule.mjs）。
+  //   2. 这条记录还没过点（nx.at >= now − leadSec）—— 用 <= 单向判断会让
+  //      过去很久的记录也算命中，配合 nextWake 的 1 秒候选变成几秒一醒。
+  const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
+  const wakeReady = world.now - (memo.stealWakeAt || 0) >= gap
   const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec })
-  // 「到点了」必须是「还没过点」才算：nx.at 已经过去时（负数差值）也满足 <= 13，
-  // 会让每一轮都打断扫描间隔，配合 nextWake 的 1 秒候选变成几秒一醒的空转。
-  const snipeReady = !!nx && nx.at >= world.now - leadSec && nx.at - world.now <= leadSec + 5
+  const snipeReady = wakeReady && !!nx && nx.at >= world.now - leadSec && nx.at - world.now <= leadSec + 5
   // 宽限必须和 nextUnlock 的 WAKE_GRACE_SEC 一致。
   // 用 EXPIRED_GRACE_SEC（300 秒）会变成：解禁后 300 秒内每一轮都绕过扫描间隔，
   // 而 nextWake 只在前 30 秒里催醒——中间的 270 秒就成了「醒了就扫、扫了也没用」。
-  const overdue = Object.values(memo.stealSchedule || {})
+  const overdue = wakeReady && Object.values(memo.stealSchedule || {})
     .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - WAKE_GRACE_SEC))
 
   if (world.now - lastScan < every && !snipeReady && !overdue) {
@@ -450,8 +457,11 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     if (!watchTargets.length) return { stolen: 0, value: 0 }
     return await stealFromTargets(world, cfg, log, memo, watchTargets)
   }
-  if (snipeReady) log(`偷菜：精确解禁时刻已到，提前打断扫描间隔`)
-  else if (overdue && world.now - lastScan < every) log(`偷菜：有已解禁未处理的目标，提前扫描`)
+  if (snipeReady) {
+    memo.stealWakeAt = world.now
+    memo.stealWakePending = true
+    log(`偷菜：精确解禁时刻已到，提前打断扫描间隔`)
+  } else if (overdue && world.now - lastScan < every) log(`偷菜：有已解禁未处理的目标，提前扫描`)
 
   memo.stealScanAt = world.now
   // 先进 watchlist 看一批：它们带着「成熟 + 保护期」算出来的精确解禁时刻，
