@@ -4,7 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock, nextWave, waveLeadSec, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { updateIsleSchedule, nextUnlock, nextWave, waveLeadSec, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
