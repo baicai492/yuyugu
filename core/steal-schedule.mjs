@@ -77,10 +77,20 @@ export function updateIsleSchedule({ isle, rules, now, prev }) {
       exact = true
     } else if (ripe) {
       // 成熟了但还不能偷 → 在保护期内。
-      // 如果之前记过更早的估计，沿用；否则就是「现在才成熟」或「已经保护了一段时间」，
-      // 我们不知道具体进展，只能按最坏情况（还要等满 protect）估计。
-      unlockAt = old?.unlockAt != null ? Math.min(old.unlockAt, now + protect) : now + protect
-      exact = old?.unlockAt != null
+      //
+      // 服务端不给「什么时候成熟的」，所以第一次看到一块熟地时，
+      // 它可能刚熟、也可能已经保护了 29 分钟。
+      // 以前保守记「还要等满 protect（1800 秒）」→ 真解禁时早被抢光了，
+      // 线上实测巡逻看到 48 块成熟在保护期，一块都没抢到。
+      //
+      // 改成先用短间隔探一次（min(protect, 900)）：
+      //   · 到点再看发现解禁 → 立刻偷，抢在那批「只等 30 分钟周期扫描」的人前面
+      //   · 还没解禁 → 记录会再往后推，最多两次就收敛
+      // 之前记过更早的就取更早的，不会越推越晚。
+      const step = Math.min(protect, 900)
+      unlockAt = old?.unlockAt != null ? Math.min(old.unlockAt, now + step) : now + step
+      // 这不是确切时刻，标 false：nextWake 只把它当唤醒候选，不当「保证能偷到」
+      exact = false
     } else if (readyIn > 0) {
       // 还没成熟 → 成熟时刻是确定的（left），解禁 = 成熟 + 保护期
       unlockAt = now + readyIn + protect

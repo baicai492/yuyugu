@@ -177,8 +177,15 @@ export const DEFAULTS = {
       scanEvery: 1800,           // 多久扫一次目录（秒）
       pages: 6,                  // 扫几页（每页 20 家）
       visitsPerScan: 8,          // 每次扫完去几家
-      useCloak: true,            // 买潜行斗篷
-      useSack: true,             // 买折叠菜篮
+      // 「盯名单」：服务端的可偷筛选只看得到此刻已经被漏掉的货，
+      // 好货都是解禁瞬间被抢走。要抢到就得提前访问、记下每块地的解禁时刻，
+      // 再让 nextWake 掐那一秒醒来（旧版 v1 的做法）。
+      dirEvery: 7200,            // 多久重建一次盯名单（秒）；旧版 2 小时
+      dirPages: 12,              // 建名单翻几页（每页 20 家）；实测前 120 家有 42 家种了地
+      checkEvery: 3600,          // 某座岛多久没看过就值得再看一眼（秒）
+      watchEvery: 120,           // 巡逻一批的最短间隔（秒）；53 座岛约 7 分钟轮完一圈
+      useCloak: true,            // 买轻步斗篷（被发现率 −10 个百分点）
+      useSack: true,             // 买折叠菜篮（每处多拿 1 个）
       protectAware: true,        // 遵守 30 分钟保护期
     },
   },

@@ -264,6 +264,11 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
   const st = cfg.social?.steal
   const R = world.R
   const now = world.now
+  // 巡逻是「顺手」做的，不该每轮巡视都花 10 秒在这上面。
+  // 两分钟一批，53 座活跃岛 7 分钟轮完一圈，够掐解禁时刻了。
+  const every = st.watchEvery ?? 120
+  if (now - (memo.stealWatchRoundAt || 0) < every) return []
+  memo.stealWatchRoundAt = now
   const watch = memo.stealWatch || {}
   const ids = Object.keys(watch)
   if (!ids.length) return []
@@ -379,16 +384,41 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const overdue = Object.values(memo.stealSchedule || {})
     .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - EXPIRED_GRACE_SEC))
 
-  if (world.now - lastScan < every && !snipeReady && !overdue) return { stolen: 0, value: 0 }
+  if (world.now - lastScan < every && !snipeReady && !overdue) {
+    // 还没到全量扫描的时候，但可以顺手巡逻几家 watchlist：
+    // 服务端的「可偷」筛选只看得到「此刻已经被别人漏掉的」，
+    // 真正的好货是解禁瞬间就被抢的，必须提前记下解禁时刻才能掐到。
+    await refreshWatchList(world, cfg, log, memo)
+    const watchTargets = await watchRound(world, cfg, log, memo)
+    if (!watchTargets.length) return { stolen: 0, value: 0 }
+    return await stealFromTargets(world, cfg, log, memo, watchTargets)
+  }
   if (snipeReady) log(`偷菜：精确解禁时刻已到，提前打断扫描间隔`)
   else if (overdue && world.now - lastScan < every) log(`偷菜：有已解禁未处理的目标，提前扫描`)
 
   memo.stealScanAt = world.now
-  const targets = await scanStealTargets(world, cfg, log, memo)
+  // 先进 watchlist 看一批：它们带着「成熟 + 保护期」算出来的精确解禁时刻，
+  // 是拿到「刚好解禁那几块地」的唯一途径；顺便也能捞到此刻就能偷的。
+  await refreshWatchList(world, cfg, log, memo)
+  const watched = await watchRound(world, cfg, log, memo)
+  const scanned = await scanStealTargets(world, cfg, log, memo)
+  const seen = new Set(watched.map((x) => x.id))
+  const targets = [...watched, ...scanned.filter((x) => !seen.has(x.id))]
+  return await stealFromTargets(world, cfg, log, memo, targets)
+}
+
+/** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
+async function stealFromTargets(world, cfg, log, memo, targets) {
+  const st = cfg.social?.steal
+  const R = world.R
   let stolen = 0, value = 0, tried = 0
   // 有目标但一个都偷不了时，说明是体力不够。要说明白，
   // 否则日志里只有「找到 N 家可偷」然后什么都没发生，看不出原因。
   let starved = 0
+  // 真要去偷之前把道具补齐：轻步斗篷（被发现率 −10 个百分点）、
+  // 折叠菜篮（每处多拿 1 个）。旧版有这一步，新版漏了。
+  const worth = targets.some((t) => t.value >= (st.minValue ?? 3000) && world.state.en >= Math.min(t.energy, st.maxEnergy ?? 15))
+  if (worth) await ensureThiefItems(world, cfg, log)
   for (const tg of targets) {
     if (tried >= (st.visitsPerScan ?? 8)) break
     if (tg.value < (st.minValue ?? 3000)) continue
