@@ -140,6 +140,17 @@ export class Engine {
    */
   credit(earn = 0, spend = 0, tax = 0) {
     if (!earn && !spend && !tax) return
+    // 跨自然日的第一笔收支：正常路径由 tick 开头的 ensureLedger 处理，
+    // 但收尾统计、后台任务也可能先记账。这里再兜一次，绝不能把昨天的
+    // 累计继续加到今天头上（2026-11-13 跨日后「今日收入 970 万」）。
+    if (this.world?.ready && this.ledger.day) {
+      const day = this.world.R.worldDay(this.world.now)
+      if (this.ledger.day !== day) {
+        this.ledger.earn = 0
+        this.ledger.spend = 0
+        this.ledger.tax = 0
+      }
+    }
     this.ledger.earn += earn
     this.ledger.spend += spend
     this.ledger.tax += tax
@@ -173,8 +184,17 @@ export class Engine {
     // 已经算过今天就跳过——但 startCoins 必须是有效值（>0），
     // 否则说明是从 state.json 恢复了一个只有 day 的空账本，需要重算。
     if (this.ledger.day === day && this.ledger.startCoins > 0) return
-    // 从 state.json 恢复的累计值只在同一天有效
-    if (this.ledger.pendingDay && this.ledger.pendingDay !== day) {
+    // 跨自然日：恢复的累计值只在同一天有效。
+    //
+    // 这里必须同时看 ledger.day 和 pendingDay：
+    //   · pendingDay 只在「重启」时有值（restore 从 state.json 带出来的）；
+    //   · 进程一直在跑、跨过 0 点时 pendingDay 早就被删掉了，只有 ledger.day
+    //     能说明账本属于哪一天。以前只判断 pendingDay，导致跨日不清零——
+    //     2026-11-13 00:02 线上就是这样把 11-12 的 970 万收入和 763 万支出
+    //     原样算进了新的一天（当天其实只赚了 4,916）。
+    const dayChanged = Boolean(this.ledger.day) && this.ledger.day !== day
+    const pendingChanged = Boolean(this.ledger.pendingDay) && this.ledger.pendingDay !== day
+    if (dayChanged || pendingChanged) {
       this.ledger.earn = 0; this.ledger.spend = 0; this.ledger.tax = 0
     }
     delete this.ledger.pendingDay
@@ -185,16 +205,25 @@ export class Engine {
     // 磁盘上的起点必须合理：正数、且不超过当前余额的 5 倍（防 CSV 被改坏）
     const usable = fromFile && fromFile.startCoins > 0 && fromFile.startCoins < coinsNow * 5
 
-    // 收支累计：优先用 state.json 恢复值；如果它是 0（或者这次启动是「新的一天」），
-    // 就从今天的日志文件里重算——日志只追加不覆盖，是唯一可信的历史。
+    // 收支累计：**今天的日志是唯一可信的来源**。
+    //
+    // 日志按日期分文件、只追加不覆盖，天然按自然日隔离；state.json 是覆盖写，
+    // 一旦哪天跨日没清零（就是上面那个 bug），脏值还会被存进去、重启后继续用。
+    // 所以只要今天的日志里有轮次记录，就以它为准，state.json 仅在日志为空时兜底。
     let earn = this.ledger.earn || 0
     let spend = this.ledger.spend || 0
     let tax = this.ledger.tax || 0
-    if (!earn && !spend && !tax) {
+    {
       const book = todayBookFromLog(this.logDir)
       if (book.rounds > 0) {
-        earn = book.earn; spend = book.spend; tax = book.tax
-        this.log(`今日收支从日志重建：+${fmt(earn)} / −${fmt(spend)}（税 ${fmt(tax)}，${book.rounds} 轮）`)
+        if (earn !== book.earn || spend !== book.spend) {
+          this.log(`今日收支以日志为准：+${fmt(book.earn)} / −${fmt(book.spend)}（税 ${fmt(book.tax)}；state.json 里是 +${fmt(earn)} / −${fmt(spend)}）`)
+        }
+        earn = book.earn
+        spend = book.spend
+        // 税也以日志为准（日志按天隔离，昨天带过来的 26 万必须丢掉）；
+        // 旧版本把税写成 0 的脏值由下面的 todayTaxFromLog 兜底。
+        tax = book.tax
       }
     }
     // 税单独兜一次底：旧版本把「卖货税」记成了恒 0（取错字段，见 world.act），
