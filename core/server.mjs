@@ -220,7 +220,8 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             const handoff = () => {
               let child = null
               try {
-                const out = openSync(resolve(root, 'logs', `host-${new Date().toISOString().slice(0, 10)}.log`), 'a')
+                // 本地日期：toISOString 是 UTC，北京时间 0–8 点会写成前一天
+                const out = openSync(resolve(root, 'logs', `host-${new Date().toLocaleDateString('sv-SE')}.log`), 'a')
                 child = spawn(process.execPath, [main, ...args], {
                   cwd: root, detached: true, stdio: ['ignore', out, out], windowsHide: true,
                 })

@@ -77,7 +77,8 @@ async function launch(port = 8787) {
 
   if (!existsSync(MAIN)) return { ok: false, msg: '找不到 yuyugu2.mjs：' + MAIN }
   const logDir = resolve(ROOT, 'logs')
-  const out = openSync(resolve(logDir, `host-${new Date().toISOString().slice(0, 10)}.log`), 'a')
+  // 用本地日期（toISOString 是 UTC，北京时间 0–8 点会写成前一天，排查时找不到）
+  const out = openSync(resolve(logDir, `host-${new Date().toLocaleDateString('sv-SE')}.log`), 'a')
 
   const child = spawn(process.execPath, [MAIN, `--port=${port}`, '--no-console'], {
     cwd: ROOT,
