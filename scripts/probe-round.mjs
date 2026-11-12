@@ -27,6 +27,27 @@ if (clearN > 0) {
 }
 Object.defineProperty(w, 'isleDay', { get() { return R.isleDay(this.now) } })
 
+// 复现第 8 段的 keep 计算，否则「体力明明够却不干活」看不出原因
+{
+  const W = R.WORLD, st = w.state
+  const weather = R.weatherOf(R.isleDay(w.now))
+  const regen = W.regen || 180
+  const workCost = Math.max(W.cost.fish || 0, W.cost.mine || 0, W.cost.bomb || 0)
+  const win = Math.max(workCost, 1) * regen
+  let soon = 0, mature = 0
+  for (let i = 0; i < st.plotN; i++) {
+    const p = st.plots[i]; if (!p) continue
+    const s2 = R.cropStage(p, w.now, R.sprinkled(st, i) || weather === 1)
+    if (s2.stage === 3) { mature++; continue }
+    if (s2.stage >= 0 && s2.left < win) soon++
+  }
+  const keep = Math.min(soon * (W.cost.harvest || 1), Math.floor(R.energyMax(st) / 2))
+  console.log(`keep=${keep}（${win} 秒内 ${soon} 块要熟，已熟 ${mature}）｜可用体力 ${st.en - keep}`)
+  const iq = st.iq?.d === R.isleIndex(w.now) ? st.iq : {}
+  console.log(`额度剩余：钓鱼 ${W.daily.fish - (iq.fish || 0)}｜挖矿 ${W.daily.mine - (iq.mine || 0)}｜炸矿 ${W.daily.bomb - (iq.bomb || 0)}`)
+  console.log('')
+}
+
 const { actions, summary, sleep } = planRound(w, cfg, () => {})
 const count = {}
 for (const a of actions) count[a.a] = (count[a.a] || 0) + 1

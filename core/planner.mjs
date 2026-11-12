@@ -826,6 +826,18 @@ export function planRound(world, cfg, log = () => {}) {
       // 收益必须高于口粮成本，否则不值得做
       if (job.v <= eatCost * (cfg.work.minValueRatio ?? 1.2)) break
 
+      // 本岛日剩下的时间自然能回多少体力？够不够把剩余额度刷完？
+      // 刷不完就值得吃口粮把额度做掉：挖矿 937 D/体力、口粮 162 D/体力，
+      // 净赚 775。以前只要 regenBudget 够就无脑「等自然回复」，
+      // 实测体力 8、keep 6（可用 2 点）、挖矿要 3 点，于是每轮什么都不做、
+      // 退避 60 秒，97 次挖矿额度整岛日烂在那里。
+      const regenLeft = Math.floor(Math.max(0, boundaryIn) / regen)
+      const quotaEnergy =
+        (fishLeft > 0 && fishOK ? fishLeft : 0) * (W.cost.fish || 0) +
+        Math.max(0, mineLeft) * (W.cost.mine || 0) +
+        Math.max(0, bombLeft) * (W.cost.bomb || 0)
+      const worthEating = quotaEnergy > regenLeft
+
       // 可用体力 = 现有体力 − 农场预留。keep 里的那部分不能动，
       // 它要留给 keepWindow 内成熟的地收割。这是防偷的硬底线。
       const usable = s.en - keep
@@ -840,7 +852,7 @@ export function planRound(world, cfg, log = () => {}) {
         // 实测线上就是这样：体力 0、keep 10、regenBudget 50，
         // 于是每轮都 break 等回复，6 分钟只种了 1 块地。
         // 这种情况说明回复速度已经跟不上成熟速度，必须吃口粮。
-        if (job.lazy && regenBudget >= job.cost && usable >= 0) { skipJobs.add(job.label); continue }
+        if (job.lazy && regenBudget >= job.cost && usable >= 0 && !worthEating) { skipJobs.add(job.label); continue }
         // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
         // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
         //
