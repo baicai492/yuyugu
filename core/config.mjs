@@ -81,7 +81,14 @@ export const DEFAULTS = {
     coffee: true,                // 喝咖啡（可超上限）
     minEnergyToWork: 4,
     coffeeAfterRatio: 0.5,       // 体力低于上限的这个比例时开始喝
-    reserveEnergy: 2500,         // 口粮库存攒到这个体力当量就不再买了
+    // 口粮的「两条水位线」，旧版 food.reserveE / maxStockE：
+    //   reserveE   —— 必须留的底线。卖货前先留出这么多体力当量的口粮，
+    //                 低于它就不许再卖（否则体力 0 时没东西吃，地熟了收不了）
+    //   reserveEnergy —— 攒到这个数就**不再买**（货船买口粮、种口粮地都以此为目标）
+    // 以前只有一个 reserveEnergy，被当成「必须留」的底线用，
+    // 结果要么留太多（加工/卖货都动不了），要么留太少（口粮被卖光）。
+    reserveE: 600,
+    reserveEnergy: 2500,
   },
 
   // 钓鱼/挖矿

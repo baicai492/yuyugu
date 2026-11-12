@@ -589,13 +589,51 @@ export function planRound(world, cfg, log = () => {}) {
     const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, prices, cfg))
     const planner = makeCropPlanner(R, s, t, prices, cfg, weather, soilCost)
 
-    // 已经在长的作物先记账：它们同样占用今天的阶梯价名额和加工坊容量，
-    // 不记的话新种的会以为自己还能按全价/加工价卖。
+    // --- 口粮地该留几块：旧版是**算**出来的，不是拍脑袋定死的 ---
+    //
+    // 体力账：所有工作额度要吃的体力 + 农务体力 − 自然回复 = 每 24 小时的缺口，
+    // 再除以「一块口粮地每 24 小时净回多少体力」。
+    // 线上硬编码 4 块时 24 块地全拿来种口粮都填不满：钓鱼 80×4、挖矿 100×3、
+    // 炸矿 10×6 加起来 680 点/岛日 = 4,080 点/天，自然回复只有 480 点，
+    // 4 块番茄地净产约 1,900 点 —— 缺口 1,700 点全在啃库存，迟早吃空。
+    //
+    // cfg.farm.foodPlots 变成**下限**：用户显式设了就至少种这么多。
+    const defMode = (s.plotN > 0 && (R.sprinkled(s, 0) || weather === 1)) ? 'auto'
+      : (s.plots.find(Boolean) ? planner.modeOf(s.plots.findIndex(Boolean)) : (cfg.farm?.water ? 'manual' : 'none'))
+    const foodPick = planner.pick(defMode, true)
+    const cashPick = planner.pick(defMode, false)
+    const perPlotEnergy = foodPick?.value || 0
+    let needTotal = cfg.farm.foodPlots || 0
+    if (perPlotEnergy > 1) {
+      const W = R.WORLD
+      const workE = (cfg.work?.fish ? (W.daily.fish || 0) * (W.cost.fish || 0) : 0) +
+        (cfg.work?.mine ? (W.daily.mine || 0) * (W.cost.mine || 0) : 0) +
+        (cfg.work?.bomb ? (W.daily.bomb || 0) * (W.cost.bomb || 0) : 0)
+      // 一自然日有几个岛日（现在 ISLE_SPAN=14400 → 6 个）
+      const islePerDay = Math.max(1, Math.round(86400 / (R.ISLE_SPAN || 14400)))
+      const farmE = (s.plotN || 0) * (cashPick?.cy?.energy || 0)
+      const regenPerDay = 86400 / (W.regen || 180)
+      const demand = workE * islePerDay + farmE - regenPerDay * 0.9
+      needTotal = Math.max(needTotal, Math.ceil(Math.max(0, demand) / perPlotEnergy))
+    }
+    needTotal = Math.min(needTotal, s.plotN || needTotal)
+
+    // --- 已经在长的作物先分类：前 needTotal 块口粮作物算口粮，其余计入销售产量 ---
+    //
+    // 旧版就是这么分的，v2 把这一层丢了——所有在长的都 planner.add()，
+    // 于是「要吃掉的口粮」被当成「今天能卖的货」计了收入。
+    // 后果：planner 觉得番茄特别赚 → 继续种番茄 → 但那些番茄全被吃掉，
+    // 卖货清单上又挂着它们 → 真的卖掉一部分 → 口粮库存塌方。
+    const foodCropId = foodPick?.crop?.id
+    let foodGrowing = 0
     for (let i = 0; i < s.plotN; i++) {
       const p = s.plots[i]
       if (!p) continue
       const st = R.cropStage(p, t, R.sprinkled(s, i) || weather === 1)
-      if (st.stage >= 0) planner.add(p.c, planner.modeOf(i))
+      if (st.stage < 0) continue
+      // 已经在长的口粮作物占用口粮名额，不算「可卖的产量」
+      if (p.c === foodCropId && foodGrowing < needTotal) { foodGrowing++; continue }
+      planner.add(p.c, planner.modeOf(i))
     }
 
     const empty = []
@@ -605,33 +643,8 @@ export function planRound(world, cfg, log = () => {}) {
       const prefer = cfg.farm.preferCrop
         ? R.CROPS.find((c) => c.id === cfg.farm.preferCrop && c.seasons.includes(season))
         : null
-      // 口粮地该留几块：旧版是**算**出来的，不是拍脑袋定死的。
-      //
-      // 体力账：所有工作额度要吃的体力 + 农务体力 − 自然回复 = 每 24 小时的缺口，
-      // 再除以「一块口粮地每 24 小时净回多少体力」。
-      // 线上硬编码 4 块时 24 块地全拿来种口粮都填不满：钓鱼 80×4、挖矿 100×3、
-      // 炸矿 10×6 加起来 680 点/岛日 = 4,080 点/天，自然回复只有 480 点，
-      // 4 块番茄地净产约 1,900 点 —— 缺口 1,700 点全在啃库存，迟早吃空。
-      //
-      // cfg.farm.foodPlots 变成**下限**：用户显式设了就至少种这么多。
-      const mode0 = planner.modeOf(empty[0])
-      const foodPick = planner.pick(mode0, true)
-      const cashPick = planner.pick(mode0, false)
-      const perPlotEnergy = foodPick?.value || 0
-      let dynamicFoodPlots = 0
-      if (perPlotEnergy > 1) {
-        const W = R.WORLD
-        const workE = (cfg.work?.fish ? (W.daily.fish || 0) * (W.cost.fish || 0) : 0) +
-          (cfg.work?.mine ? (W.daily.mine || 0) * (W.cost.mine || 0) : 0) +
-          (cfg.work?.bomb ? (W.daily.bomb || 0) * (W.cost.bomb || 0) : 0)
-        // 一自然日有几个岛日（现在 ISLE_SPAN=14400 → 6 个）
-        const islePerDay = Math.max(1, Math.round(86400 / (R.ISLE_SPAN || 14400)))
-        const farmE = (s.plotN || 0) * (cashPick?.cy?.energy || 0)
-        const regenPerDay = 86400 / (W.regen || 180)
-        const demand = workE * islePerDay + farmE - regenPerDay * 0.9
-        dynamicFoodPlots = Math.ceil(Math.max(0, demand) / perPlotEnergy)
-      }
-      const foodCount = Math.min(empty.length, Math.max(cfg.farm.foodPlots || 0, dynamicFoodPlots))
+      // 还要种几块口粮：总数减去已经在长的
+      const foodCount = Math.min(empty.length, Math.max(0, needTotal - foodGrowing))
       const plantedNames = {}
       let planted = 0, skippedOffline = 0, failedPlant = 0
       empty.forEach((i, idx) => {
@@ -687,9 +700,14 @@ export function planRound(world, cfg, log = () => {}) {
     // 加工成成品反而亏（成品不区分品质，一份成品只值一份价钱）。
     // 另外还要扣掉「口粮预留」——那部分是要吃的，不能拿去加工，
     // 否则体力回不上来，地里的庄稼就收不了。
+    //
+    // 留多少：cfg.energy.reserveE（旧版的「口粮底线」，默认 600 点体力当量）。
+    // 以前这里用的是 reserveEnergy（2500）——那是「攒到这个数就不再买」的上限，
+    // 不是「必须留」的底线。拿上限当底线会把几乎所有口粮锁死，
+    // 加工坊反而没原料可用。
     const foodReserve = {}
     {
-      let need = cfg.energy?.reserveEnergy ?? 2500
+      let need = cfg.energy?.reserveE ?? 600
       for (const f of foodChoices(R, s, prices)) {
         if (need <= 0) break
         const take = Math.min(f.n, Math.ceil(need / Math.max(1, f.restore)))
@@ -971,6 +989,25 @@ export function planRound(world, cfg, log = () => {}) {
 
   // ---------- 9. 卖货（择时） ----------
   if (cfg.sell?.enabled) {
+    // 口粮预留（旧版有，v2 漏了）：
+    // 卖货只看「价格到没到峰值」，不看「这些货是接下来要吃的」。
+    // 线上实测：玉米 ×111 在 36% 峰值被判「该卖」——111 个玉米是 1,554 点体力，
+    // 而整个库存的口粮当量才 2,278 点。卖掉一半，体力 0 时就没东西可吃，
+    // 地熟了也收不了（被偷）。
+    //
+    // 留的底线用 cfg.energy.reserveE（旧版 food.reserveE，默认 600 点）。
+    // 按「每点体力最便宜」的口粮顺序留，和吃的时候顺序一致。
+    const foodKeep = {}
+    {
+      let need = cfg.energy?.reserveE ?? 600
+      for (const f of foodChoices(R, s, prices)) {
+        if (need <= 0) break
+        const take = Math.min(f.n, Math.ceil(need / Math.max(1, f.restore)))
+        ;(foodKeep[f.id] ||= [0, 0, 0])[f.q] = take
+        need -= take * f.restore
+      }
+    }
+    const sellable = (id, q) => Math.max(0, R.b12Available(s, id, q) - (foodKeep[id]?.[q] || 0))
     const plan = M.sellPlan(R, t, { ...world, state: s, coins }, {
       days: cfg.sell.horizonDays || 12,
       markdownPct: cfg.sell.markdownPct ?? 6,
@@ -1016,7 +1053,7 @@ export function planRound(world, cfg, log = () => {}) {
           if (!hoarded.includes(r.name)) hoarded.push(r.name)
           continue
         }
-        const have = R.b12Available(s, r.id, q)
+        const have = sellable(r.id, q)
         if (have <= 0) continue
         const take = Math.min(999, have, r.n)
         if (push({ a: 'sell', id: r.id, q, n: take })) { r.n -= take; sold++; units += take }
