@@ -744,7 +744,9 @@ function bind() {
       try { await cmd('restart') } catch { /* 旧进程可能来不及回包就退出了，忽略 */ }
       logSince = 0; logLines = []
       let up = false
-      for (let i = 0; i < 40; i++) {          // 最多等 20 秒
+      // 最多等 60 秒：新进程要先加载规则模块（联网失败会退回缓存，最坏 30 秒）
+      // 再拉世界状态；主程序那边还会盯 30 秒，新进程起不来就自己恢复监听。
+      for (let i = 0; i < 120; i++) {
         await new Promise((r) => setTimeout(r, 500))
         try { await api('/api/ping'); up = true; break } catch {}
       }
@@ -752,7 +754,7 @@ function bind() {
         await connect()
         $('statusline').textContent = '已重启，加载的是最新代码'
       } else {
-        $('statusline').textContent = '重启后 20 秒内没连上，请看 logs/host-*.log'
+        $('statusline').textContent = '重启超过 60 秒没连上，请看 logs/host-*.log'
       }
     } finally {
       restarting = false

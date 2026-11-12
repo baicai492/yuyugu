@@ -11,13 +11,23 @@ const CACHE_DIR = resolve(ROOT, 'cache')
 let R = null, currentVer = '', loadedAt = 0
 
 /** 从站点页面里取当前版本号（app.js?v=xxxx / pets.js?v=xxxx） */
-export async function fetchVersion(baseUrl, cookie) {
-  const res = await fetch(baseUrl + '/pets', {
-    headers: { cookie, 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
-    signal: AbortSignal.timeout(20000),
-  })
-  const text = await res.text()
-  return /pets\.js\?v=([0-9a-f]+)/.exec(text)?.[1] || /app\.js\?v=([0-9a-f]+)/.exec(text)?.[1] || ''
+export async function fetchVersion(baseUrl, cookie, { timeoutMs = 15000, tries = 2 } = {}) {
+  let lastErr = null
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(baseUrl + '/pets', {
+        headers: { cookie, 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const text = await res.text()
+      return /pets\.js\?v=([0-9a-f]+)/.exec(text)?.[1] || /app\.js\?v=([0-9a-f]+)/.exec(text)?.[1] || ''
+    } catch (e) {
+      lastErr = e
+      // 第二次尝试前等一秒：站点偶发抽风时，一次 15 秒超时后直接重试往往就通了
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 1000))
+    }
+  }
+  throw lastErr
 }
 
 /** 找缓存里最新的一份规则文件（离线可用，避免每次都要联网） */
@@ -42,15 +52,35 @@ export async function loadRulesCached() {
   return R
 }
 
+/**
+ * 用缓存兜底：网络抖动 / 站点抽风时不该让主程序起不来。
+ * 规则模块自 63568b46 起内容未变，缓存与线上是同一份。
+ */
+async function useCacheOrThrow(reason) {
+  const cached = await loadRulesCached().catch(() => null)
+  if (cached) {
+    // 用 stderr 而不是日志文件：此时 Engine 还没建好
+    console.warn(`规则模块联网失败（${reason}），先用本地缓存 rules-${currentVer}.mjs 启动；下次巡检会重新检查`)
+    return cached
+  }
+  throw new Error(reason + '，且本地没有缓存的规则模块（需要先联网成功运行一次）')
+}
+
 /** 下载指定版本的规则模块到 cache/ 并 import 它 */
 export async function loadRules({ baseUrl = 'https://52dmeme.com', ver, cookie, force = false } = {}) {
-  const v = ver || await fetchVersion(baseUrl, cookie || '')
+  let v = ver || ''
   if (!v) {
-    // 拿不到版本号（没 cookie / 网络不通）时退回缓存
-    const cached = await loadRulesCached().catch(() => null)
-    if (cached) return cached
-    throw new Error('取不到站点版本号，且本地没有缓存的规则模块')
+    // 取不到版本号（没 cookie / 网络不通）时退回缓存。
+    // 以前这里只处理「拿到空字符串」，fetch 抛错（超时、DNS、连接被重置）会直接
+    // 冒到 main().catch 让进程退出——2026-11-13 00:21 就是这样：GUI 点重启，
+    // 新进程拿版本号时 fetch failed，自己退了，旧进程也早就退出了，托管控了 10 分钟。
+    try {
+      v = await fetchVersion(baseUrl, cookie || '')
+    } catch (e) {
+      return useCacheOrThrow(`取站点版本号失败：${e.message}`)
+    }
   }
+  if (!v) return useCacheOrThrow('取不到站点版本号')
   if (R && currentVer === v && !force) return R
 
   if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true })
@@ -58,12 +88,17 @@ export async function loadRules({ baseUrl = 'https://52dmeme.com', ver, cookie, 
   // 缓存超过 1 小时就重新拉，避免站点悄悄改内容而不换版本号
   const stale = !existsSync(file) || Date.now() - statSync(file).mtimeMs > 3600_000
   if (stale) {
-    const res = await fetch(`${baseUrl}/pet-world-rules.js?v=${v}`, {
-      headers: { 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
-      signal: AbortSignal.timeout(30000),
-    })
-    if (!res.ok) throw new Error(`下载规则模块失败：HTTP ${res.status}`)
-    const text = await res.text()
+    let text
+    try {
+      const res = await fetch(`${baseUrl}/pet-world-rules.js?v=${v}`, {
+        headers: { 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
+        signal: AbortSignal.timeout(30000),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      text = await res.text()
+    } catch (e) {
+      return useCacheOrThrow(`下载规则模块失败：${e.message}`)
+    }
     if (!text.includes('export function applyActions')) throw new Error('规则模块结构变了（缺少 applyActions），需要人工确认')
     writeFileSync(file, text, 'utf8')
   }

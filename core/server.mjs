@@ -1,6 +1,7 @@
 // 本地 HTTP 服务：给 Chrome GUI 插件提供状态、配置、行情与指令。
 // 只监听 127.0.0.1，且要求 Origin 白名单 + 可选 token，防止被网页里的脚本乱调。
 import { createServer } from 'node:http'
+import { createConnection } from 'node:net'
 import { spawn } from 'node:child_process'
 import { openSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
@@ -45,6 +46,15 @@ async function readJson(req) {
   }
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new Error('请求体不是合法 JSON') }
+}
+
+/** 端口是否已经有人监听（重启交棒时判断新进程有没有起来） */
+function portUp(port) {
+  return new Promise((ok) => {
+    const sock = createConnection({ host: '127.0.0.1', port }, () => { sock.destroy(); ok(true) })
+    sock.on('error', () => ok(false))
+    sock.setTimeout(800, () => { sock.destroy(); ok(false) })
+  })
 }
 
 /**
@@ -190,22 +200,62 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             const main = resolve(root, 'yuyugu2.mjs')
             // 带上原来的启动参数，但去掉会让新进程只跑一轮就退出的 --once
             const args = process.argv.slice(2).filter((a) => a !== '--once')
-            // 必须等回包真正写出去再退出，否则 GUI 看到的是「连接被重置」，
-            // 分不清是重启成功还是崩溃了。
-            setTimeout(() => {
+
+            // 新进程起不来时不能「老的已经退了、新的也没了」——2026-11-13 00:21
+            // 就是这样：新进程加载规则模块时 fetch failed 直接退出，旧进程 500ms
+            // 后也已经自杀，托管彻底停了 10 分钟（GUI 只提示「20 秒内没连上」）。
+            // 现在的做法：交棒后盯着端口，新进程没接过去就把自己重新监听、继续跑旧代码。
+            const revive = () => {
               try {
-                // 先放开端口，让新进程能立刻 bind —— 否则它会撞 EADDRINUSE
-                try { server.close() } catch {}
+                // close() 之后 Server 对象可以重新 listen（同一闭包里的 server 引用仍然有效，
+                // 这样下一次「重启」点下去关掉的也还是这个对象）
+                server.listen(port, '127.0.0.1', () => {
+                  engine.log(`重启失败，旧进程已恢复监听：http://127.0.0.1:${port}`, 'err')
+                })
+              } catch (e) {
+                engine.log('旧进程重新监听失败：' + e.message, 'err')
+                process.exit(1)
+              }
+            }
+            const handoff = () => {
+              let child = null
+              try {
                 const out = openSync(resolve(root, 'logs', `host-${new Date().toISOString().slice(0, 10)}.log`), 'a')
-                const child = spawn(process.execPath, [main, ...args], {
+                child = spawn(process.execPath, [main, ...args], {
                   cwd: root, detached: true, stdio: ['ignore', out, out], windowsHide: true,
                 })
                 child.unref()
                 writeFileSync(resolve(root, 'logs', 'yuyugu.pid'), String(child.pid), 'utf8')
               } catch (e) {
-                console.error('重启失败：' + e.message)
+                engine.log('重启失败：' + e.message, 'err')
+                return revive()
               }
-              process.exit(0)
+              // 等新进程把端口接过去。规则模块联网失败现在会退回缓存（见 core/rules.mjs），
+              // 但世界状态拉取失败之类的启动错误仍可能让子进程退出，所以这里必须盯着。
+              const t0 = Date.now()
+              const check = async () => {
+                if (await portUp(port)) return process.exit(0)   // 交棒成功
+                if (child.exitCode !== null || child.signalCode !== null) {
+                  engine.log('重启失败：新进程启动后退出（见 logs/host-*.log），旧进程继续运行', 'err')
+                  return revive()
+                }
+                if (Date.now() - t0 > 30000) {
+                  engine.log('重启失败：新进程 30 秒内没接管端口，旧进程继续运行', 'err')
+                  try { process.kill(child.pid) } catch {}
+                  return revive()
+                }
+                setTimeout(check, 400)
+              }
+              setTimeout(check, 400)
+            }
+
+            // 必须等回包真正写出去再退出，否则 GUI 看到的是「连接被重置」，
+            // 分不清是重启成功还是崩溃了。
+            setTimeout(() => {
+              // 先放开端口，让新进程能立刻 bind —— 否则它会撞 EADDRINUSE。
+              // closeAllConnections 让 close 回调立刻触发，不然 GUI 的 keep-alive 会拖住交棒。
+              try { server.closeAllConnections?.() } catch {}
+              try { server.close(handoff) } catch { handoff() }
             }, 500)
             return
           }
