@@ -194,7 +194,7 @@ node scripts/install-host.mjs --ext-id=<你的扩展ID>
 常用项：
 
 - `invest.maxPaybackDays` / `invest.reserveCoins`：投资门槛与保留现金
-- `sell.horizonDays` / `sell.markdownPct`：往后看几个岛日、离峰值差几个点就卖
+- `sell.horizonDays` / `sell.markdownPct`：往后看几个岛日、未来预测价的风险折让（越大越倾向现在卖）
 - `sell.futureSellShare`：未来到货里按多少比例算「会拿去卖」（默认 0.7，其余当口粮/加工原料）
 - `npc.gomokuLevel`：1/2/3 对应倍率 0.8/1.2/1.5
 - `social.steal.enabled`：偷菜开关（默认关）

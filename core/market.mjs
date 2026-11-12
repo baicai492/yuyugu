@@ -542,7 +542,9 @@ export function sellPlan(R, now, world, cfg = {}) {
       netNow: nowQuote.net, netAtPeak: best.net, gain: best.net - nowQuote.net,
       // 一直等到 horizon 末再清算能拿多少（真实阶梯，不是单日全价）
       netIfWait: liqQuote.net, liqUnit: liq.unitPrice, liqDays: liq.keepDays,
-      line: Math.round(best.price * (1 - markdown)),
+      // 折让只作用于未来岛日：峰值就在今天时再打折会让「卖线」低于现价，
+      // 看上去像「现价已经超过卖线却不卖」，其实 MCMF 今天该卖就卖。
+      line: Math.round(best.price * (best.k === 0 ? 1 : 1 - markdown)),
       todayQty: alloc.today,
       allocPlan: alloc.plan,
       allocNet: allocQuote.net,
