@@ -1226,10 +1226,14 @@ export function planRound(world, cfg, log = () => {}) {
       summary.push(`卖出 ${sold} 格 / ${soldUnits} 件，约 ${fmt(soldGross)} D`)
       for (const s2 of soldNames.slice(0, 8)) summary.push(`  · ${s2}`)
     }
-    // 没卖但值得等：也记一笔，方便判断策略是否合理
+    // 没卖但值得等：也记一笔，方便判断策略是否合理。
+    // 用「期末清算价」而不是「峰值日全卖」——后者被单日全价额度撑得虚高。
     const waiting = plan.rows.filter((r) => !r.sellNow && r.gain > 0).slice(0, 3)
     for (const r of waiting) {
-      summary.push(`  · ${r.name}×${r.qty} 暂不卖：峰值 ${(r.peakPct * 100).toFixed(0)}%（+${r.peakIn} 个岛日），可多赚 ${fmt(r.gain)} D`)
+      const extra = (r.netIfWait || 0) - r.netNow
+      summary.push(`  · ${r.name}×${r.qty} 暂不卖：峰值 +${r.peakIn} 个岛日，` +
+        `拖到期末按真实阶梯清算约 ${fmt(r.netIfWait)} D` +
+        `（比现在 ${extra >= 0 ? '+' : ''}${fmt(extra)}）`)
     }
   }
 

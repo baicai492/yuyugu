@@ -181,6 +181,53 @@ export function allocateSale(R, id, qty, fc, { isCrop = false, soldToday = 0, qA
 }
 
 /**
+ * 终端清算（简化版）：不再假设「未来某天能按峰值一次全卖」，而是把货
+ * 压到 horizon 的最后 keepDays 个岛日，按那几天的真实阶梯价逐件卖掉，
+ * 算出「最迟什么时候、能拿回多少钱」。
+ *
+ * 为什么需要：sellPlan 的 peak 是「某一天全卖」的乐观估计——作物一天
+ * 只有 150 件全价，一批 600 件在峰值日根本卖不出全价。这个函数给
+ * 「一直等下去」一个可执行的下界，日志里能看到等峰值的真实收益，
+ * 而不是被单日全价额度撑起来的虚高数字。
+ *
+ * 榜一的 objective.mjs 用它做整个规划的目标函数（期末净资产 = 现金 +
+ * 真实清算价值）；我们只做卖货决策和日志，不引入完整的 rollout。
+ */
+export function liquidationValue(R, id, qty, fc, { isCrop = false, qAvg = 1, keepDays = 4 } = {}) {
+  if (!(qty > 0) || !fc?.length) return { gross: 0, unitPrice: 0, byDay: [] }
+  const start = Math.max(0, fc.length - Math.max(1, keepDays))
+  const buckets = []
+  for (let k = start; k < fc.length; k++) {
+    const p = Number(fc[k].price?.[id]) || 0
+    if (p <= 0) continue
+    if (!isCrop) { buckets.push({ k, cap: Infinity, unit: p * qAvg }); continue }
+    const tiers = R.CROP_TIERS || [[Infinity, 1]]
+    let from = 0
+    for (const [upTo, pct] of tiers) {
+      if (upTo === Infinity) {
+        buckets.push({ k, cap: Infinity, unit: p * pct * qAvg })
+        break
+      }
+      const cap = Math.max(0, upTo - from)
+      if (cap > 0) buckets.push({ k, cap, unit: p * pct * qAvg })
+      from = Math.max(from, upTo)
+    }
+  }
+  buckets.sort((a, b) => b.unit - a.unit)
+  let left = qty, gross = 0
+  const byDay = new Array(fc.length).fill(0)
+  for (const b of buckets) {
+    if (left <= 0) break
+    const take = Math.min(left, b.cap)
+    if (!(take > 0)) continue
+    byDay[b.k] += take
+    gross += take * b.unit
+    left -= take
+  }
+  return { gross, unitPrice: qty > 0 ? gross / qty : 0, byDay, keepDays }
+}
+
+/**
  * 择时卖出总表。返回每件货的现价/峰值/建议。
  * world 需要 { coins, state, prices }
  */
@@ -217,6 +264,12 @@ export function sellPlan(R, now, world, cfg = {}) {
     const alloc = allocateSale(R, id, qty, fc, {
       isCrop, soldToday, qAvg: qSum / qty, markdown,
     })
+    // 终端清算：把这批货压到 horizon 末尾几天按真实阶梯卖掉，
+    // 给「一直等」一个可执行的下界（峰值是全卖单日的虚高口径）。
+    const liq = liquidationValue(R, id, qty, fc, {
+      isCrop, qAvg: qSum / qty, keepDays: cfg.terminalDays ?? 4,
+    })
+    const liqQuote = netSaleQuote(R, wallet, paid, Math.round(liq.gross))
 
     let best = { k: 0, price: p0, net: nowQuote.net, gross: grossNow }
     for (let k = 1; k < fc.length; k++) {
@@ -236,6 +289,8 @@ export function sellPlan(R, now, world, cfg = {}) {
       peak: best.price, peakIn: best.k, peakPct: best.price / base - 1,
       peakDay: fc[best.k].day,
       netNow: nowQuote.net, netAtPeak: best.net, gain: best.net - nowQuote.net,
+      // 一直等到 horizon 末再清算能拿多少（真实阶梯，不是单日全价）
+      netIfWait: liqQuote.net, liqUnit: liq.unitPrice, liqDays: liq.keepDays,
       line: Math.round(best.price * (1 - markdown)),
       todayQty: alloc.today,
       allocPlan: alloc.plan,

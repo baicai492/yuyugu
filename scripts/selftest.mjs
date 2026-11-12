@@ -64,6 +64,20 @@ console.log('\n[4] 市场预测')
   ok('300 万以下免税', q1.tax === 0, `税 ${q1.tax}`)
   const q2 = M.netSaleQuote(R, 20_000_000, 0, 100000)
   ok('大额收 3%', q2.tax > 0, `税 ${q2.tax}`)
+
+  // 跨期分配：今天价低、未来更高时，作物只卖今天的全价额度
+  const cropId = R.CROPS[0].id
+  const fcLow = [{ price: { [cropId]: 100 } }, { price: { [cropId]: 200 } }]
+  const aLow = M.allocateSale(R, cropId, 600, fcLow, { isCrop: true, soldToday: 0, markdown: 0.06 })
+  ok('跨期：今天低就只卖今天能卖掉的', aLow.today === 0, `today=${aLow.today}`)
+  const fcHigh = [{ price: { [cropId]: 200 } }, { price: { [cropId]: 100 } }]
+  const aHigh = M.allocateSale(R, cropId, 600, fcHigh, { isCrop: true, soldToday: 0, markdown: 0.06 })
+  ok('跨期：今天高就今天全卖', aHigh.today === 600, `today=${aHigh.today}`)
+  // 终端清算：600 件作物压到末尾，只能按 150 全价 + 250 件 85% + 其余 70%
+  const liq = M.liquidationValue(R, cropId, 600, fcHigh, { isCrop: true, keepDays: 2 })
+  const expectLiq = 150 * 200 + 250 * 200 * 0.85 + 200 * 200 * 0.7
+  ok('终端清算按真实阶梯算', Math.abs(liq.gross - expectLiq) < 1, `gross=${Math.round(liq.gross)} 期望 ${expectLiq}`)
+  ok('清算均价低于全价', liq.unitPrice < 200, `单价 ${liq.unitPrice.toFixed(1)}`)
 }
 
 console.log('\n[5] 配置')
