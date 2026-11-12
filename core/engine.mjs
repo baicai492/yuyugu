@@ -202,15 +202,16 @@ export class Engine {
     await w.refresh()
     this.ensureLedger()
 
-    // 站点规则热重载：每小时查一次版本号，变了就重新下载并补喂 clockStart。
-    // 以前只在进程启动时加载一次，站点改规则后要等到下次重启才能用上新公式，
+    // 站点规则热重载：定期查版本号，变了就重新下载并补喂 clockStart。
+    // 旧版（Chrome 插件）是每 30 分钟查一次，重写 v2 时漏掉了这个，
+    // 变成只在进程启动时加载一次——站点改规则后要等下次重启才能用上新公式，
     // 中间会一直「悄悄用错的规则做决策」，不报错、只是收益变低。
     try {
       const lastChk = this.memo.rulesCheckedAt || 0
-      if (w.now - lastChk > 3600) {
+      if (w.now - lastChk > 1800) {
         this.memo.rulesCheckedAt = w.now
         const u = await checkRulesUpdate({ baseUrl: this.cfg.baseUrl })
-        if (u?.changed) this.log(`站点规则已更新：${u.from} → ${u.to}，已热替换（时钟已重新校准）`)
+        if (u?.changed) this.log(`站点更新：规则模块 ${u.from} → ${u.to}（时钟已重新校准）`)
       }
     } catch (e) { /* 规则检查失败不影响托管 */ }
 

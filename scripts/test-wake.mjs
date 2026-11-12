@@ -158,5 +158,30 @@ console.log('\n[7] 体力 0 但有口粮 + 有熟地 → 必须立刻醒（不�
   ok(nap2 > 5, '体力 0 且无口粮 → 等体力回复，不空转', `got=${nap2}`)
 }
 
+console.log('\n[8] 有地块即将成熟 → 不能睡到 idleSleepCap 把成熟时刻漏掉')
+{
+  // 线上真实 bug：11:51 那一轮日志写着「205 秒后熟一块」，
+  // 实际却睡了 1800 秒。原因是 nextWake 收尾的「没事可做就长睡」分支
+  // 直接 return cap，把 push(st.left) 这个事件候选丢了。
+  // 地熟了没人收 = 被偷，这条必须守住。
+  const season = R.seasonOf(R.isleDay(now))
+  const growing = R.CROPS.find((c) => c.seasons.includes(season) && !c.regrow)
+  // 先算出「auto 洒水」下的总时长，再倒推种植时刻，让剩余成熟时间落在 300~1500 秒
+  const probe = { c: growing.id, t: now, w: 3, g: 0, y: 0, sv: [] }
+  const total = R.cropStage(probe, now, true).total
+  const wantLeft = 600
+  const plots = Array(6).fill(null).map(() => ({
+    c: growing.id, t: now - Math.max(1, Math.round(total - wantLeft)), w: 3, g: 0, y: 0, sv: [],
+  }))
+  const st = R.cropStage(plots[0], now, true)
+  ok(st.stage >= 0 && st.stage < 3 && st.left > 120 && st.left < 1800,
+    '构造出的地会在 120~1800 秒后成熟', `left=${Math.round(st.left)} total=${Math.round(total)}`)
+  const w = mkWorld({ plots })
+  const nap = nextWake(w, workOnly, allDone)
+  ok(nap <= Math.ceil(st.left) + 5,
+    '醒在成熟时刻（不能睡过它）', `nap=${nap} left=${Math.round(st.left)}`)
+  ok(nap < cap, '不会睡满 idleSleepCap', `nap=${nap} cap=${cap}`)
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

@@ -493,7 +493,7 @@ export function planRound(world, cfg, log = () => {}) {
   if (collected) summary.push(`收产物 ${collected} 窝`)
   if (trapped) summary.push(`收蟹笼 ${trapped} 个`)
 
-  // ---------- 3. 牧场：喂食 / 摸摸 / 补饲料 ----------
+  // ---------- 3. 牧场：喂食 / 摸摸 / 补饲料 / 卖退休的 ----------
   const nowTs = t
   let fed = 0, petted = 0
   const hungry = []
@@ -503,6 +503,19 @@ export function planRound(world, cfg, log = () => {}) {
     if (stage.retired) continue
     if (t - pen.f >= 8 * 3600) hungry.push(i)
     if (!s.cnt['pet' + i]) { if (push({ a: 'pet', i })) petted++ }
+  }
+  // 退休（产完最后一轮）的动物必须卖掉腾位置，否则永远占着畜栏。
+  // 旧版有一轮只卖一只的写法，重写 v2 时漏了——`if (stage.retired) continue`
+  // 直接把它跳过，于是畜栏满了以后再也买不了新动物。
+  // 先收完最后一轮产物再卖（animalReady 还有货就先别卖）。
+  {
+    const dead = s.barn.findIndex((pen) => {
+      const st = R.b12AnimalStage(pen, t)
+      return st.retired && !R.animalReady(pen, t).ready
+    })
+    if (dead >= 0 && push({ a: 'sellAnimal', i: dead })) {
+      summary.push(`卖掉退休的${R.ANIMALS?.find((a) => a.id === s.barn[dead]?.k)?.name || '动物'}，腾出畜栏`)
+    }
   }
   if (hungry.length) {
     const have = s.inv.feed?.[0] || 0
@@ -594,7 +607,24 @@ export function planRound(world, cfg, log = () => {}) {
   if (cfg.craft?.enabled) {
     const left = R.WORLD.daily.craft - ((s.iq?.d === R.isleIndex(t) ? s.iq.craft : 0) || 0)
     let made = 0
-    const have = (id) => [0, 1, 2].reduce((a, q) => a + R.b12Available(s, id, q), 0)
+    const haveQ = (id, q) => R.b12Available(s, id, q)
+    // 只用普通(0)和银星(1)做原料，金星(2)留着直接卖。
+    // 旧版就是这么做的，重写 v2 时漏了：金星单价 ×1.5，
+    // 加工成成品反而亏（成品不区分品质，一份成品只值一份价钱）。
+    // 另外还要扣掉「口粮预留」——那部分是要吃的，不能拿去加工，
+    // 否则体力回不上来，地里的庄稼就收不了。
+    const foodReserve = {}
+    {
+      let need = cfg.energy?.reserveEnergy ?? 2500
+      for (const f of foodChoices(R, s, prices)) {
+        if (need <= 0) break
+        const take = Math.min(f.n, Math.ceil(need / Math.max(1, f.restore)))
+        ;(foodReserve[f.id] ||= [0, 0, 0])[f.q] = take
+        need -= take * f.restore
+      }
+    }
+    const freeQ = (id, q) => Math.max(0, haveQ(id, q) - (foodReserve[id]?.[q] || 0))
+    const have = (id) => freeQ(id, 0) + freeQ(id, 1)
     // 原料按现价算（今天就要消耗掉），产品按未来均价算（做好要囤到峰值才卖）
     const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
       const cost = Object.entries(r.in).reduce((a, [id, n]) => a + (prices[id] || 0) * n, 0)
@@ -1315,9 +1345,16 @@ export function nextWake(world, cfg, memo = {}) {
   // 为什么不能直接睡满 dayLeft：等待期虽然是只读巡检，但它同时负责发现
   // 「被偷了」「有突发」。睡 6 小时不醒，就等于放弃了这层保护。
   // 30 分钟醒一次，一晚从 ~300 轮请求降到 ~14 轮，够用了。
+  //
+  // 关键：raw 可能已经是「205 秒后有一块地要熟」这种事件驱动的短等待。
+  // 以前这里直接 return cap，把该事件丢了——线上实测 11:51 明明
+  // 205 秒后要熟一块，却睡了 1800 秒，熟地晾在那儿等被偷。
+  // 所以只在 raw 真的很大（没什么近期待办）时才拉长到 cap：
+  // 取 min(cap, raw)，即「有近事件就按事件，没有才睡满 cap」。
   if (!hasPending && raw >= maxSleep) {
     const cap = w.idleSleepCap ?? 1800
-    return Math.max(maxSleep, Math.min(cap, Math.ceil(dayLeft)))
+    const tillBoundary = Math.max(maxSleep, Math.min(cap, Math.ceil(dayLeft)))
+    return Math.min(raw, tillBoundary)
   }
   return Math.min(raw, wonByBackoff ? backoffCap : maxSleep)
 }
