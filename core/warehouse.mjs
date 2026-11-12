@@ -43,16 +43,18 @@ export function planVault(R, world, cfg) {
       const have = world.state.inv?.[row.id]?.[q] || 0
       if (have <= 0) continue
       // 服务端校验 `n <= s.inv[id][q]`（原库存，未扣 vault），超一条就整条动作作废。
-      // 本地这份 inv 是「预演过本轮 harvest 之后」的数，服务端同一批 harvest
-      // 未必收得一样多（被偷的地块只收得到 1 个）。少一个就报
-      // 「预留数量无效或超过当前库存」，实测一天出现 12 次。
-      //
+      // world.state 是**本轮预演过**的状态（收获、加工、卖出都会改它），
+      // 而服务端此刻的库存是一次动作都没执行的版本——本轮刚收的番茄它还不知道。
+      // 所以上限要取「预演后」和「本轮开始时」的较小值，否则每轮都白白失败一条。
+      const raw = world.rawInv?.[row.id]?.[q]
+      const cap = raw == null ? have : Math.min(have, raw)
+      if (cap <= 0) continue
       // 但余量不能留：留 1 个会让 vault 永远比 inv 少 1，
       // 而 sellPlan 看到那 1 个可售货就继续生成同一行，
       // 和上面的抖动叠在一起就是无限循环。
       // 改成「要么全锁，要么不锁」——失败的极端情况交给服务端拒绝，
       // 下一轮计划器重算时会自然修正。
-      const want = shouldHold ? have : 0
+      const want = shouldHold ? cap : 0
       const cur = vaultQs[q] || 0
       if (want === cur) continue
       out.push({ a: 'warehouse', id: row.id, q, n: want, keep: shouldHold })

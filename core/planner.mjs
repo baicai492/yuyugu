@@ -879,7 +879,12 @@ export function planRound(world, cfg, log = () => {}) {
   // ---------- 8.5 囤货仓库：把「等峰值更划算」的货锁起来 ----------
   if (cfg.vault?.enabled) {
     let locked = 0
-    for (const a of planVault(R, { now: t, state: s, coins, prices, externalSoldRatio: world.externalSoldRatio }, cfg)) {
+    // rawInv 是「本轮开始前」的库存（world.state 没被预演过）：
+    // 囤货数量不能超过服务端此刻真正的库存，否则整条动作被拒。
+    for (const a of planVault(R, {
+      now: t, state: s, coins, prices,
+      rawInv: world.state?.inv, externalSoldRatio: world.externalSoldRatio,
+    }, cfg)) {
       if (push(a)) locked++
     }
     if (locked) summary.push(`囤货仓库调整 ${locked} 项`)
