@@ -154,57 +154,229 @@ export function netSaleQuote(R, wallet, paid, gross) {
 }
 
 /**
+ * 未来到货：地里还没熟的作物，按「哪个岛日能收多少」列出来。
+ *
+ * 为什么卖货要用到它：作物每个自然日只有 150 件全价、250 件 85% 的额度，
+ * 明后天陆续成熟的货会占掉那些额度。今天手里这批货如果还按「未来某天
+ * 还有一份全价额度」去等，等到的就是第二档、第三档。
+ *
+ * 估算偏满（宁可催我们早点卖）：每块地每次收获期望 1.3 + 0.08w 个
+ * （w=3 → 1.54），品质期望 1.285 倍（金星 35% / 银星 44% / 普通 21%），
+ * 再乘 sellShare（默认 0.7）——剩下的当口粮和加工原料。
+ * 已成熟（stage 3）的地不计：它们要么本轮已经收进 inventory 参与了卖出，
+ * 要么在等体力，算进来会重复计数。
+ */
+export function cropArrivals(R, s, now, fc, { sellShare = 0.7 } = {}) {
+  const out = {}
+  if (!s?.plots?.length || !fc?.length) return out
+  const bucketAt = (at) => {
+    for (let k = 0; k < fc.length; k++) if (fc[k].end != null && at < fc[k].end) return k
+    return -1
+  }
+  const rainy = R.weatherOf(R.isleDay(now)) === 1
+  for (let i = 0; i < s.plots.length; i++) {
+    const p = s.plots[i]
+    if (!p?.c) continue
+    const crop = R.CROPS?.find((c) => c.id === p.c)
+    if (!crop) continue
+    const auto = R.sprinkled(s, i) || rainy
+    const st = R.cropStage(p, now, auto)
+    if (!st || st.stage < 0 || st.stage >= 3) continue
+    // w=3：我们每轮都会把能浇的浇满，收获时的浇水数就是 3
+    const w = 3
+    const n = (1.3 + 0.08 * w) * sellShare
+    const p2 = 0.05 + 0.1 * w, p1 = 0.2 + 0.08 * w
+    const qAvg = p2 * 1.5 + p1 * 1.25 + (1 - p1 - p2)
+    const cycles = crop.regrow && p.h + 1 < (crop.times || 1) ? (crop.times || 1) - (p.h + 1) : 0
+    // 下一茬的生长时间：regrow 分钟 × 岛日快 0.8 × 熟得快 0.6（浇水/洒水器）
+    const nextSec = (crop.regrow || 0) * 60 * 0.8 * 0.8 * 0.6
+    let at = now + st.left
+    for (let c = 0; c <= cycles; c++) {
+      const k = at > now ? bucketAt(at) : 0
+      if (k >= 0) (out[p.c] ||= []).push({ k, at, n, qAvg })
+      at += nextSec
+    }
+  }
+  return out
+}
+
+/**
+ * 精确分配（最小费用流）：把供应按「可用时点 × 自然日阶梯容量」分到各岛日。
+ *
+ * 逐件贪心在两种情况下会错：
+ *   1. 供应有可用时点（明后天成熟的作物不能今天卖）——早到的货能填早档，
+ *      晚到的不能，贪心会把早货填到后面的高价档，把前面的档空着；
+ *   2. 阶梯容量按自然日而不是按岛日——同一个自然日有 3~4 个岛日，
+ *      150/400 的额度是那几天共享的，不是每天各一份。
+ *
+ * 规模很小：供应 ≤ 桶数+1 组 × 自然日 ≤ 4 × 3 档，节点不到 40 个，
+ * 连续最短路（SPFA）增广几十次就收敛。收益口径与旧版一致：
+ * 未来岛日的预测价先打 (1−markdown) 折扣，今天用真实报价。
+ */
+function assignCrops(R, id, fc, supplies, { soldToday = 0, markdown = 0 } = {}) {
+  const tiers = R.CROP_TIERS || [[Infinity, 1]]
+  const NT = tiers.length
+  const L = fc.length
+  // 桶 → 自然日。没有 at 的合成数据按「一桶一天」处理，等价于旧行为。
+  const dayKey = fc.map((f, k) => (f?.at != null ? R.worldDay(f.at) : '#' + k))
+  const todayKey = dayKey[0]
+  const dayKeys = [...new Set(dayKey)]
+  const dOf = dayKey.map((d) => dayKeys.indexOf(d))
+  const D = dayKeys.length
+
+  // 每个自然日每档的剩余容量；今天要扣掉已经卖掉的件数
+  const caps = dayKeys.map((d) => {
+    const used = d === todayKey ? Math.max(0, soldToday) : 0
+    const out = []
+    let from = used
+    for (const [upTo] of tiers) {
+      if (!Number.isFinite(upTo)) { out.push(Infinity); break }
+      out.push(Math.max(0, upTo - from))
+      from = Math.max(from, upTo)
+    }
+    return out
+  })
+
+  // 每组供应在每个自然日能拿到的最好单价，和对应的桶下标
+  const best = supplies.map((sp) => dayKeys.map((_, di) => {
+    let bk = -1, bv = 0
+    for (let k = 0; k < L; k++) {
+      if (dOf[k] !== di || k < sp.u) continue
+      const p = Number(fc[k].price?.[id]) || 0
+      if (p <= 0) continue
+      const v = p * (k === 0 ? 1 : Math.max(0, 1 - markdown))
+      if (v > bv) { bv = v; bk = k }
+    }
+    return { k: bk, v: bv }
+  }))
+
+  const P = supplies.length
+  const totalSupply = supplies.reduce((a, sp) => a + sp.n, 0) || 1
+  const SRC = 0
+  const supNode = (i) => 1 + i
+  const dtNode = (di, ti) => 1 + P + di * NT + ti
+  const SNK = 1 + P + D * NT
+  const N = SNK + 1
+  const to = [], cap = [], cost = [], next = [], head = new Array(N).fill(-1)
+  const add = (u, v, c, w) => {
+    to.push(v); cap.push(c); cost.push(w); next.push(head[u]); head[u] = to.length - 1
+    to.push(u); cap.push(0); cost.push(-w); next.push(head[v]); head[v] = to.length - 1
+  }
+
+  const dayEdges = []
+  for (let i = 0; i < P; i++) {
+    add(SRC, supNode(i), supplies[i].n, 0)
+    for (let di = 0; di < D; di++) {
+      const b = best[i][di]
+      if (b.k < 0 || !(b.v > 0)) continue
+      for (let ti = 0; ti < NT; ti++) {
+        const c = caps[di][ti]
+        if (!(c > 0)) continue
+        // 容量不能写 Infinity：回收流量要用「初始容量 − 剩余容量」，
+        // Infinity − Infinity 会变成 NaN，第三次增广的流量就统计不到。
+        const ecap = Math.min(Number.isFinite(c) ? c : supplies[i].n, supplies[i].n)
+        const idx = to.length
+        add(supNode(i), dtNode(di, ti), ecap, -(b.v * tiers[ti][1] * supplies[i].m))
+        dayEdges.push({ idx, init: ecap, k: b.k, i })
+      }
+    }
+  }
+  for (let di = 0; di < D; di++) {
+    for (let ti = 0; ti < NT; ti++) {
+      const c = caps[di][ti]
+      if (c > 0) add(dtNode(di, ti), SNK, Number.isFinite(c) ? c : totalSupply, 0)
+    }
+  }
+
+  // SPFA 连续最短路：每次增广一条负费用（= 正收益）路径，直到没有正收益
+  const EPS = 1e-9
+  for (let iter = 0; iter < 500; iter++) {
+    const dist = new Array(N).fill(Infinity)
+    const pe = new Array(N).fill(-1)
+    const inq = new Array(N).fill(false)
+    const q = [SRC]
+    dist[SRC] = 0; inq[SRC] = true
+    while (q.length) {
+      const u = q.shift()
+      inq[u] = false
+      for (let e = head[u]; e !== -1; e = next[e]) {
+        if (!(cap[e] > EPS)) continue
+        const v = to[e], nd = dist[u] + cost[e]
+        if (nd < dist[v] - EPS) {
+          dist[v] = nd; pe[v] = e
+          if (!inq[v]) { inq[v] = true; q.push(v) }
+        }
+      }
+    }
+    if (!(dist[SNK] < -EPS)) break
+    let f = Infinity
+    for (let v = SNK; v !== SRC; v = to[pe[v] ^ 1]) f = Math.min(f, cap[pe[v]])
+    if (!(f > EPS)) break
+    for (let v = SNK; v !== SRC; v = to[pe[v] ^ 1]) { const e = pe[v]; cap[e] -= f; cap[e ^ 1] += f }
+  }
+
+  const plan = new Array(L).fill(0)
+  let gross = 0, todayAll = 0
+  for (const e of dayEdges) {
+    const f = e.init - cap[e.idx]
+    if (!(f > EPS)) continue
+    // 收益和 plan 只统计当前库存（供应 0）：未来到货的收入不该算进
+    // 「这批货等下去值多少」，否则日志里的分配收益会被明后天的收成撑高。
+    if (supplies[e.i].u === 0 && e.k === 0) todayAll += f
+    if (e.i !== 0) continue
+    plan[e.k] += f
+    gross += f * -cost[e.idx]
+  }
+  // 今天能卖的量：当前库存里能进今天的部分。同值槽位由未来（今天稍晚
+  // 成熟、u=0）的到货去填时，可以等价换成现在卖，所以取两者较小值。
+  return { today: Math.min(supplies[0].n, todayAll), plan, gross }
+}
+
+/**
  * 跨期最优分配：决定「今天卖多少、未来哪天卖多少」。
  *
- * 以前是二元判断——全卖今天，或者全等峰值日。但作物每天有
- * 150 件全价 / 250 件 85% / 其余 70% 的阶梯，今天的全价额度不用掉
- * 明天也不会累积，等于白扔。真正的做法是把「未来 N 天 × 三档阶梯」
- * 展开成一堆容量桶，按单价从高到低填库存——线性问题下这是精确最优。
+ * 以前是二元判断——全卖今天，或者全等峰值日。但作物每个自然日有
+ * 150 件全价 / 250 件 85% / 其余 70% 的阶梯，额度不用掉也不会累积。
+ *
+ * 把「未来 N 个岛日 × 三档阶梯」展开成容量桶之后：
+ *   - 没有到货约束时，按单价降序填库存就是精确最优（线性问题）；
+ *   - 带上未来到货（arrivals）后不再是纯线性，早到的货能填早档、
+ *     晚到的不能，必须用 assignCrops 的费用流解。
  *
  * 未来天的单价先打 (1−markdown) 折扣，今天不打：未来的高价是预测，
- * 拿到手才算数。这和旧版「现价 ≥ 峰值 × (1−6%) 就卖」是同一个保守口径，
- * 只是从二元判断升级成了逐件分配。
+ * 拿到手才算数。
  *
  * 自身砸价（卖得多会压低下一岛日价格）暂不建模：我们单品的量通常
  * 只有几十件，marketDepth 是 800~6000，影响在 1% 以内。
  */
-export function allocateSale(R, id, qty, fc, { isCrop = false, soldToday = 0, qAvg = 1, markdown = 0 } = {}) {
+export function allocateSale(R, id, qty, fc, { isCrop = false, soldToday = 0, qAvg = 1, markdown = 0, arrivals = [] } = {}) {
   if (!(qty > 0) || !fc?.length) return { today: 0, plan: [], netOptimal: 0 }
-  const buckets = []
-  for (let k = 0; k < fc.length; k++) {
-    const p = Number(fc[k].price?.[id]) || 0
-    if (p <= 0) continue
-    // 未来天的预测价打折，今天用真实报价
-    const disc = k === 0 ? 1 : Math.max(0, 1 - markdown)
-    if (!isCrop) {
-      buckets.push({ k, cap: Infinity, unit: p * qAvg * disc })
-      continue
+  if (!isCrop) {
+    // 非作物没有阶梯，到货之间也不抢容量：每件选它能卖到的最高价那天
+    const slots = []
+    for (let k = 0; k < fc.length; k++) {
+      const p = Number(fc[k].price?.[id]) || 0
+      if (p <= 0) continue
+      slots.push({ k, unit: p * qAvg * (k === 0 ? 1 : Math.max(0, 1 - markdown)) })
     }
-    const tiers = R.CROP_TIERS || [[Infinity, 1]]
-    let from = k === 0 ? Math.max(0, soldToday) : 0
-    for (const [upTo, pct] of tiers) {
-      if (upTo === Infinity) {
-        buckets.push({ k, cap: Infinity, unit: p * pct * qAvg * disc })
-        break
-      }
-      const cap = Math.max(0, upTo - from)
-      if (cap > 0) buckets.push({ k, cap, unit: p * pct * qAvg * disc })
-      from = Math.max(from, upTo)
-    }
+    slots.sort((a, b) => b.unit - a.unit)
+    const plan = new Array(fc.length).fill(0)
+    if (slots.length) plan[slots[0].k] = qty
+    return { today: plan[0] || 0, plan, netOptimal: qty * (slots[0]?.unit || 0) }
   }
-  buckets.sort((a, b) => b.unit - a.unit)
-  let left = qty
-  const plan = new Array(fc.length).fill(0)
-  let gross = 0
-  for (const b of buckets) {
-    if (left <= 0) break
-    const take = Math.min(left, b.cap)
-    if (!(take > 0)) continue
-    plan[b.k] += take
-    gross += take * b.unit
-    left -= take
+  const supplies = [{ u: 0, n: qty, m: qAvg }]
+  // 同一岛日的到货合并成一组（否则 24 块地 × 4 茬会有近百个供应节点）
+  const byK = new Map()
+  for (const a of arrivals) {
+    if (!(a.n > 0) || !(a.k >= 0)) continue
+    const g = byK.get(a.k) || { u: a.k, n: 0, q: 0 }
+    g.n += a.n
+    g.q += a.n * (a.qAvg ?? 1)
+    byK.set(a.k, g)
   }
-  return { today: plan[0] || 0, plan, netOptimal: gross }
+  for (const g of byK.values()) supplies.push({ u: g.u, n: g.n, m: g.q / g.n })
+  const r = assignCrops(R, id, fc, supplies, { soldToday, markdown })
+  return { today: r.today, plan: r.plan, netOptimal: r.gross }
 }
 
 /**
@@ -267,6 +439,9 @@ export function sellPlan(R, now, world, cfg = {}) {
   const fc = forecastPrices(R, now, world.prices, { days, external })
   const cur = inferSupply(R, world.prices, fc[0].day)
   const rows = []
+  // 未来到货只算一次（每块地要跑 cropStage，别在物品循环里重复算）
+  let arrivalsAll = null
+  const arrivalsOf = (id) => (arrivalsAll ||= cropArrivals(R, world.state, now, fc, { sellShare: cfg.futureSellShare ?? 0.7 }))[id] || []
 
   for (const id of Object.keys(R.BASE_PRICE)) {
     const base = R.BASE_PRICE[id] || 0
@@ -288,8 +463,9 @@ export function sellPlan(R, now, world, cfg = {}) {
     const nowQuote = netSaleQuote(R, wallet, paid, grossNow)
 
     // 逐件最优：今天卖多少 / 未来哪天卖多少（阶梯 × 预测价，未来打折）
+    const arrivals = isCrop ? arrivalsOf(id) : []
     const alloc = allocateSale(R, id, qty, fc, {
-      isCrop, soldToday, qAvg: qSum / qty, markdown,
+      isCrop, soldToday, qAvg: qSum / qty, markdown, arrivals,
     })
     // 终端清算：把这批货压到 horizon 末尾几天按真实阶梯卖掉，
     // 给「一直等」一个可执行的下界（峰值是全卖单日的虚高口径）。
@@ -330,6 +506,9 @@ export function sellPlan(R, now, world, cfg = {}) {
       todayQty: alloc.today,
       allocPlan: alloc.plan,
       allocNet: allocQuote.net,
+      // 未来到货（已计入档期）：卖货日志里要能看出「为什么今天该卖」
+      soonQty: arrivals.reduce((a, x) => a + x.n, 0),
+      soonIn: arrivals.length ? Math.min(...arrivals.map((x) => x.k)) : null,
       sellNow: alloc.today > 0,
       isCrop, soldToday, tierRatio: ratio,
     })

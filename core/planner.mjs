@@ -1459,9 +1459,14 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const waiting = plan.rows.filter((r) => !r.sellNow && r.gain > 0).slice(0, 3)
     for (const r of waiting) {
       const extra = (r.allocNet || 0) - r.netNow
+      // 有未来到货就标出来：这是「为什么不能再等」的直接理由——
+      // 明后天成熟的货会占掉同一天的全价/85% 额度。
+      const soon = r.soonQty > 0
+        ? `；未来 ${r.soonIn} 个岛日内还有 ${Math.round(r.soonQty)} 件成熟（已占档期）`
+        : ''
       summary.push(`  · ${r.name}×${r.qty} 暂不卖：最优岛日 +${r.peakIn}，` +
         `逐件分配税后约 ${fmt(r.allocNet)} D` +
-        `（比现在 ${extra >= 0 ? '+' : ''}${fmt(extra)}；期末清算兜底 ${fmt(r.netIfWait)}）`)
+        `（比现在 ${extra >= 0 ? '+' : ''}${fmt(extra)}；期末清算兜底 ${fmt(r.netIfWait)}${soon}）`)
     }
   }
 

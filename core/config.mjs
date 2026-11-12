@@ -160,6 +160,9 @@ export const DEFAULTS = {
     respectTiers: true,
     // 同种作物库存超过这个数时，允许把第二档（85%）也卖掉清库存（旧版 sell.tier2Above）
     tier2Above: 450,
+    // 未来到货里按这个比例算「会拿去卖」：剩下的当口粮和加工原料。
+    // 只影响「今天卖多少」的紧迫度，不会真的提前卖未来的作物。
+    futureSellShare: 0.7,
     maxSellPerRound: 40,         // 单轮最多卖几格
   },
 

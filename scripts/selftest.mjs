@@ -73,6 +73,48 @@ console.log('\n[4] 市场预测')
   const fcHigh = [{ price: { [cropId]: 200 } }, { price: { [cropId]: 100 } }]
   const aHigh = M.allocateSale(R, cropId, 600, fcHigh, { isCrop: true, soldToday: 0, markdown: 0.06 })
   ok('跨期：今天高就今天全卖', aHigh.today === 600, `today=${aHigh.today}`)
+
+  // 未来到货：明后天成熟的货会占掉后面的档期，今天的货就得先填今天的全价。
+  {
+    const at0 = now, at1 = now + 3600
+    ok('测试时间跨自然日检查', R.worldDay(at0) === R.worldDay(at1), `${R.worldDay(at0)} / ${R.worldDay(at1)}`)
+    const fc2 = [
+      { at: at0, end: at1, price: { [cropId]: 100 } },
+      { at: at1, end: at1 + 3600, price: { [cropId]: 110 } },
+    ]
+    const noArr = M.allocateSale(R, cropId, 200, fc2, { isCrop: true, soldToday: 0, markdown: 0.06 })
+    ok('同一自然日：价格低的先不卖', noArr.today === 0, `today=${noArr.today}`)
+
+    // 换成另一个自然日：明天有一份新的 150 全价额度。
+    const at2 = now + 4 * 3600
+    ok('测试时间确实跨天', R.worldDay(at0) !== R.worldDay(at2), `${R.worldDay(at0)} / ${R.worldDay(at2)}`)
+    const fc2b = [
+      { at: at0, end: at1, price: { [cropId]: 100 } },
+      { at: at2, end: at2 + 3600, price: { [cropId]: 110 } },
+    ]
+    const noArr2 = M.allocateSale(R, cropId, 200, fc2b, { isCrop: true, soldToday: 0, markdown: 0.06 })
+    ok('无到货：今天只填全价额度', noArr2.today === 50, `today=${noArr2.today}`)
+    const withArr = M.allocateSale(R, cropId, 200, fc2b, {
+      isCrop: true, soldToday: 0, markdown: 0.06,
+      arrivals: [{ k: 1, n: 200, qAvg: 1 }],
+    })
+    ok('有到货：明天名额被新货占，今天卖满 150', withArr.today === 150, `today=${withArr.today}`)
+  }
+
+  // 阶梯容量按自然日共享：同一自然日的两个岛日不能各拿一份 150 全价。
+  // 今天 130、下一个岛日 120×0.94=112.8，600 件应该今天全部按今天的价出，
+  // 旧模型只算「今天卖 150、明天再 150 全价」，会少卖 450 件。
+  {
+    const at0 = now, at1 = now + 3600
+    const fc3 = [
+      { at: at0, end: at1, price: { [cropId]: 130 } },
+      { at: at1, end: at1 + 3600, price: { [cropId]: 120 } },
+    ]
+    const a3 = M.allocateSale(R, cropId, 600, fc3, { isCrop: true, soldToday: 0, markdown: 0.06 })
+    const expect = 150 * 130 + 250 * 130 * 0.85 + 200 * 130 * 0.7
+    ok('同一自然日的阶梯共享', a3.today === 600, `today=${a3.today}`)
+    ok('同一自然日的分配收益', Math.abs(a3.netOptimal - expect) < 1, `gross=${Math.round(a3.netOptimal)} 期望 ${expect}`)
+  }
   // 终端清算：600 件作物压到末尾，只能按 150 全价 + 250 件 85% + 其余 70%
   const liq = M.liquidationValue(R, cropId, 600, fcHigh, { isCrop: true, keepDays: 2 })
   const expectLiq = 150 * 200 + 250 * 200 * 0.85 + 200 * 200 * 0.7
