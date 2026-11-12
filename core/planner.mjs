@@ -347,6 +347,16 @@ export function planRound(world, cfg, log = () => {}) {
   let coins = world.coins
   // 被服务端拒绝过的动作类型：本轮不再尝试，避免像旧版那样刷 20 多次无效请求
   const blocked = new Set()
+  /**
+   * 这个失败是不是「本轮再试也没用」。
+   *
+   * 关键区分：额度用完 / 季节不对 / 已满 —— 封禁整类，别再刷请求。
+   * 但「体力不足」绝对不能封禁：吃口粮、喝咖啡、或者后面体力回复之后
+   * 同一类动作还能成功。以前把「不足」也算进去，导致体力 0 时收割失败一次，
+   * 整轮的 harvest 全被封死——地里庄稼熟着收不了，正是被偷的直接原因。
+   */
+  const isPermanentFail = (msg) =>
+    /额度|已经钓了|已经挖了|忙不过来|用完|不是这个季节|已经最大|今天帮过|已经帮/.test(msg)
   const push = (a) => {
     if (actions.length >= MAX) return false
     const key = a.a + (a.a === 'plant' ? ':' + a.c : '')
@@ -354,9 +364,8 @@ export function planRound(world, cfg, log = () => {}) {
     const r = R.applyActions(s, [a], { t, day: R.worldDay(t), prices, coins, rand: () => 0.5 })
     const o = r.out[0]
     if (!o?.ok) {
-      // 额度类/季节类失败，整类都别再试了
       const msg = o?.msg || ''
-      if (/额度|已经钓了|已经挖了|忙不过来|用完|不是这个季节|满了|已经最大|不足/.test(msg)) {
+      if (isPermanentFail(msg)) {
         blocked.add(key); blocked.add(a.a)
       }
       return false
@@ -416,18 +425,55 @@ export function planRound(world, cfg, log = () => {}) {
   const weather = R.weatherOf(R.isleDay(t))
   let harvested = 0, collected = 0, trapped = 0
   const stolenParcels = []
+
+  /**
+   * 确保体力够做下一件事：不够就先吃口粮（挑最便宜的），再不行喝咖啡。
+   *
+   * 旧版每个农务动作前都会调 energize(cost, FARM)，重写时漏了。
+   * 后果很严重：体力 0 时地熟了收不了，watchOnce 每 20 秒报一次
+   * 「2 块地成熟了」→ 醒来 → 还是收不了 → 再睡，整夜死循环，
+   * 而地里庄稼就那么熟着被偷。
+   *
+   * 农务（收/种/浇）的价值远高于口粮成本（晚收会被偷），所以这里
+   * 不看「每点体力收益」，只要有口粮就吃。
+   */
+  const ensureEnergy = (cost) => {
+    if (!(cost > 0)) return true
+    let guard = 0
+    while (s.en < cost && guard++ < 30) {
+      // 口粮优先；体力已满时 foodChoices 返回空，此时只能等自然回复
+      const food = foodChoices(R, s, prices)[0]
+      if (food && s.en < R.energyMax(s)) {
+        if (!push({ a: 'eat', id: food.id, q: food.q })) break
+        continue
+      }
+      // 咖啡可以突破上限，但每天只有 3 次，且要留足现金
+      const coffeeLeft = (R.WORLD.daily.coffee || 0) - (s.cnt?.coffee || 0)
+      if (coffeeLeft > 0 && cfg.energy?.coffee !== false && coins - R.WORLD.coffee.price >= Math.min(cfg.invest?.reserveCoins || 0, 50000)) {
+        if (!push({ a: 'coffee' })) break
+        continue
+      }
+      break
+    }
+    return s.en >= cost
+  }
+
   for (let i = 0; i < s.plotN; i++) {
     const p = s.plots[i]
     if (!p) continue
     const auto = R.sprinkled(s, i) || weather === 1
     const st = R.cropStage(p, t, auto)
     if (st.stage === 3) {
-      if (push({ a: 'harvest', i })) {
+      // 熟了必须先补体力再收：收不了的话下一轮巡检又会报「地熟了」，
+      // 醒来还是收不了，整夜空转，作物就那么在树上被偷。
+      if (ensureEnergy(R.WORLD.cost.harvest || 1) && push({ a: 'harvest', i })) {
         harvested++
         // p.sv 是小偷记录：收获前被偷过，这块地这次只收得到 1 个
         if (p.sv?.length) stolenParcels.push(p.c)
       }
-    } else if (st.stage === -1) push({ a: 'clear', i })
+    } else if (st.stage === -1) {
+      if (ensureEnergy(R.WORLD.cost.clear || 1)) push({ a: 'clear', i })
+    }
   }
   if (stolenParcels.length) {
     const names = [...new Set(stolenParcels)].map((id) => R.ITEM_NAME?.[id] || id).join('、')
@@ -436,6 +482,7 @@ export function planRound(world, cfg, log = () => {}) {
   }
   for (let i = 0; i < s.barn.length; i++) {
     const st = R.animalReady(s.barn[i], t)
+    // 收产物不花体力（规则里没有 cost.collect），直接收
     if (st.ready) { if (push({ a: 'collect', i })) collected++ }
   }
   for (let i = 0; i < s.traps.length; i++) {
@@ -584,18 +631,39 @@ export function planRound(world, cfg, log = () => {}) {
     const reserve = Math.max(0, cfg.energy?.minEnergyToLeave ?? 0)
 
     // --- 收获体力预留 ---
-    // 没洒水器时手动浇水也要体力，但那是可选的（不浇只是少收），只预留收获。
-    // 只算「口粮不够覆盖」的部分：库存口粮足够时，收获时可以现场吃，不用预留。
+    //
+    // 这是「防偷」的核心，不能只留眼前几分钟就熟的。
+    // 以前只算 2400 秒内要熟的，结果体力全花在钓鱼上，
+    // 之后陆续成熟的地一块块熟着没体力收——必被偷。
+    //
+    // 正确做法：预留「本轮巡视结束后、到下次有体力干活之前」这个窗口内
+    // 所有会成熟的地。窗口取 keepWindowSec（默认 30 分钟，覆盖 maxSleep + 余量）。
+    // 浇水和种植的体力也要算上（种下去就要浇水，否则品质下降）。
+    const keepWindow = cfg.farm?.keepWindowSec ?? (cfg.wake?.idleSleepCap ?? 1800) + 600
     const ripeSoon = []
+    let matureCount = 0
     for (let i = 0; i < s.plotN; i++) {
       const p = s.plots[i]
       if (!p) continue
       const auto = R.sprinkled(s, i) || weather === 1
       const st = R.cropStage(p, t, auto)
-      if (st.stage >= 0 && st.stage < 3 && st.left < (cfg.farm?.ripeKeepSec ?? 2400)) ripeSoon.push(i)
+      // 已经熟的（stage 3）这一轮就会被收掉，由 ensureEnergy 处理，不用预留
+      if (st.stage === 3) { matureCount++; continue }
+      if (st.stage >= 0 && st.left < keepWindow) ripeSoon.push(i)
     }
-    const foodEnergy = foodChoices(R, s, prices).reduce((a, f) => a + f.restore * f.n, 0)
-    const keep = Math.max(0, ripeSoon.length * (W.cost.harvest || 1) - Math.floor(foodEnergy / 2))
+    // 每块要熟的地预留 1 点收割体力。
+    //
+    // 这里**不**用「库存口粮」来打折。以前写的是
+    //   keep = needForRipe - floor(foodEnergy / 2)
+    // 实测被算成 0：刚收完 3 块地，库存折合 78 点体力，减半后 39 远大于
+    // 要预留的 3 点，keep 直接归零。于是 100 点体力全砸进钓鱼，
+    // 剩 3 块 48 秒后熟，一块都没体力收。
+    // 口粮当保险可以，当账面上的「已覆盖」不行——它随时可能被卖掉、
+    // 被加工吃掉，或者在别的动作里消耗掉。
+    //
+    // 上限取体力上限的一半：地再多也不能把体力全锁死，否则钓/挖/炸没法做。
+    const needForRipe = ripeSoon.length * (W.cost.harvest || 1)
+    const keep = Math.min(needForRipe, Math.floor(R.energyMax(s) / 2))
 
     // --- 钓鱼时段窗口 ---
     // 岛上的「小时」是现实 10 分钟一格，鱼分时段出没。当前时段收益远低于今天最好的时段时，
@@ -604,11 +672,20 @@ export function planRound(world, cfg, log = () => {}) {
     // 比较各时段的相对好坏时用「同一个价格基准」（现价），只看鱼种分布的差异。
     // 用 expPrices 会把「不同岛日价格不同」也算进去，导致同一批鱼换个时段就跨过阈值。
     const fishNowEV = cfg.work.fish ? fishEV(R, s, t, prices, false) : 0
+    // 基准取「本岛日剩下的时段」里最好的，不是未来 24 小时。
+    // 用全天做基准的话，一旦最好的时段已经过去，这天就再也不钓了
+    // （实测出现过比值 86% 一直等、整个岛日一竿没下的情况）。
+    // 旧版也是用「本岛日剩余时段」算的 fishBest。
     let fishBestEV = fishNowEV
     {
-      for (let h = 1; h <= 24; h++) {
-        // 用「往后挪 h 个岛上小时」的虚拟时刻探一遍鱼池
-        const probe = t + h * (R.ISLE_SPAN / 24)
+      // 只探「本岛日边界之前」的时段：跨过边界就是另一个岛日，
+      // 天气可能变、季节可能变、鱼价也可能被重置，拿它当基准会得出
+      // 「当前时段永远不如未来某刻」的结论，于是一竿不下。
+      const hourSpan = R.ISLE_SPAN / 24
+      const maxSteps = Math.max(0, Math.floor((boundaryIn - 1) / hourSpan))
+      for (let h = 1; h <= Math.min(23, maxSteps); h++) {
+        const probe = t + h * hourSpan
+        if (R.isleIndex(probe) !== R.isleIndex(t)) break      // 保险：绝不跨岛日
         const ev = fishEV(R, s, probe, prices, false)
         if (ev > fishBestEV) fishBestEV = ev
       }
@@ -648,15 +725,28 @@ export function planRound(world, cfg, log = () => {}) {
       // 收益必须高于口粮成本，否则不值得做
       if (job.v <= eatCost * (cfg.work.minValueRatio ?? 1.2)) break
 
-      if (s.en < job.cost + keep) {
-        // 体力不够干这活。挖矿/炸矿没有时段限制，可以等自然回复——只要换岛日前
-        // 回复得够，白白等回来比花口粮买体力划算得多。钓鱼不行：鱼有时段，过了就没了。
+      // 可用体力 = 现有体力 − 农场预留。keep 里的那部分不能动，
+      // 它要留给 keepWindow 内成熟的地收割。这是防偷的硬底线。
+      const usable = s.en - keep
+      if (usable < job.cost) {
+        // 可用的不够干这活。挖矿/炸矿没有时段限制，可以等自然回复——
+        // 只要换岛日前回复得够，白白等回来比花口粮买体力划算得多。
+        // 钓鱼不行：鱼有时段，过了就没了。
         if (job.lazy && regenBudget >= job.cost) break
-        // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来
+        // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
+        // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
         const food = foodChoices(R, s, prices)[0]
-        if (!food || food.costPerEnergy >= job.v * (cfg.work.minValueRatio ?? 1.2)) break
-        // 收获预留还没满足时，别把口粮吃成「超出预留也照吃」
-        if (ripeSoon.length && s.en + food.restore > keep + job.cost) break
+        if (!food) break
+        if (food.costPerEnergy >= job.v * (cfg.work.minValueRatio ?? 1.2)) break
+        // 吃完还是不够干这件活 → 别浪费口粮（体力还是动不了）
+        if (s.en + food.restore - keep < job.cost) break
+        // 关键：口粮不能用来「扩大工作量」。
+        // 只允许补到刚好够干这一次活，多余的体力一律不许溢出——
+        // 否则会变成「吃口粮 → 多干几件 → 再吃 → 再干」，
+        // 把预留给收割的体力一点点蚕食光（实测 100 体力钓到 34 竿、体力归零，
+        // 结果 30 分钟内要熟的 6 块地一块都收不了，全被偷）。
+        // 已经有 keep 保护时，一口都不吃。
+        if (keep > 0) break
         if (!push({ a: 'eat', id: food.id, q: food.q })) break
         continue
       }
@@ -942,13 +1032,28 @@ export function nextWake(world, cfg, memo = {}) {
 
   const weather = R.weatherOf(R.isleDay(t))
   // 作物成熟
+  //
+  // 已经熟的（stage 3）只有在「体力收得动」时才值得立刻醒。
+  // 体力 0 又没口粮时 push(1) 会让主循环每几秒醒一次，
+  // 醒来还是收不了，整夜空转（截图里那种刷屏日志）。
+  // 这种时候交给体力回复候选去安排唤醒。
+  let hasRipe = false
   for (let i = 0; i < s.plotN; i++) {
     const p = s.plots[i]
     if (!p) continue
     const auto = R.sprinkled(s, i) || weather === 1
     const st = R.cropStage(p, t, auto)
-    if (st.stage === 3) push(1)
+    if (st.stage === 3) hasRipe = true
     else if (st.stage >= 0) push(st.left)
+  }
+  if (hasRipe) {
+    const canHarvest = s.en >= (R.WORLD.cost.harvest || 1)
+    // 口粮能补上也算「收得动」
+    let canEat = false
+    if (!canHarvest) {
+      try { canEat = cfg.energy?.eat !== false && foodChoices(R, s, prices).length > 0 } catch {}
+    }
+    if (canHarvest || canEat) push(1)
   }
   // 浇水阶段
   if (cfg.farm?.water && weather !== 1) {

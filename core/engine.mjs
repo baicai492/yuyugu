@@ -3,7 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
-import { planRound, nextWake, decisionSnapshot, nextRipe } from './planner.mjs'
+import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
@@ -465,7 +465,13 @@ export class Engine {
     const weather = R.weatherOf(R.isleDay(t))
     const prev = this.watchSnap || {}
 
-    // 1. 作物成熟了
+    // 1. 作物成熟了 —— 且我们**真的收得动**才醒
+    //
+    // 以前只要看到 stage=3 就报「N 块地成熟了」，不管体力够不够。
+    // 体力 0 时每轮巡检都报一次、醒一次、又收不了，整夜空转
+    // （截图里 3 秒一条「提前醒来：2 块地成熟了」就是这么来的）。
+    // 体力不够时不算「有事可做」——等体力自然回复或主循环吃口粮，
+    // 那时才值得醒。
     let ripe = 0
     for (let i = 0; i < s.plotN; i++) {
       const p = s.plots[i]
@@ -473,7 +479,16 @@ export class Engine {
       const st = R.cropStage(p, t, R.sprinkled(s, i) || weather === 1)
       if (st.stage === 3) ripe++
     }
-    if (ripe > 0) return `${ripe} 块地成熟了`
+    if (ripe > 0) {
+      const canHarvest = s.en >= (R.WORLD.cost.harvest || 1)
+      // 体力不够时看看能不能吃口粮补上（主循环里有 ensureEnergy 会做这件事）
+      let canEat = false
+      if (!canHarvest) {
+        try { canEat = foodChoices(R, s, w.prices).length > 0 && this.cfg.energy?.eat !== false } catch {}
+      }
+      if (canHarvest || canEat) return `${ripe} 块地成熟了`
+      // 两者都不行：醒着也收不了，不算「有事可做」，继续睡
+    }
 
     // 2. 动物能收了 / 饿了
     let animal = 0
