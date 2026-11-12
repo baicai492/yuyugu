@@ -1180,12 +1180,14 @@ export function planRound(world, cfg, log = () => {}) {
     const sells = []
     for (const r of plan.rows) {
       if (!r.sellNow) continue
-      if (r.gain > 0 && r.gain / Math.max(1, r.netNow) > (cfg.sell.minGainPct || 5) / 100) continue // 等等更赚
-      let n = r.qty
+      // 跨期分配已经算好「今天卖几件」：今天全价额度、未来峰值、6% 折让
+      // 都在 allocateSale 里逐件权衡过了，这里不再做二元判断。
+      let n = Math.min(r.qty, r.todayQty ?? 0)
+      if (n <= 0) continue
       if (cfg.sell.respectTiers && r.isCrop) {
-        // 只卖今天还能全价的部分；但库存积压太多（超过 tier2Above）时，
-        // 允许把第二档（85%）也卖掉——否则每天产量远大于全价额度，
-        // 库存永远清不掉，实际收入反而更少（旧版 tier2Above 逻辑）。
+        // allocateSale 已按今天的剩余阶梯算过上限，这里只是兜底：
+        // 库存积压太多（超过 tier2Above）时允许连第二档（85%）一起清，
+        // 否则每天产量远大于全价额度，库存永远清不掉。
         const full = R.cropFullLeft(s, r.id)
         const sold = s.cnt?.['sc_' + r.id] || 0
         const tier2 = Math.max(full, (R.CROP_TIERS?.[1]?.[0] ?? 450) - sold)

@@ -231,7 +231,7 @@ function renderMarket() {
       `<td class="${r.curPct >= 0 ? 'up' : 'down'}">${pct(r.curPct)}</td>` +
       `<td class="${r.peakPct >= 0 ? 'up' : 'down'}">${pct(r.peakPct)}</td>` +
       `<td>+${r.peakIn}</td><td>${fmt(r.line)}</td>` +
-      `<td><span class="tag ${r.sellNow ? 'now' : 'wait'}">${r.sellNow ? '现在卖' : '等峰值'}</span></td>`
+      `<td><span class="tag ${r.sellNow ? 'now' : 'wait'}">${r.sellNow ? `今日卖 ${r.todayQty}` : '等峰值'}</span></td>`
     return tr
   }))
 }

@@ -127,6 +127,60 @@ export function netSaleQuote(R, wallet, paid, gross) {
 }
 
 /**
+ * 跨期最优分配：决定「今天卖多少、未来哪天卖多少」。
+ *
+ * 以前是二元判断——全卖今天，或者全等峰值日。但作物每天有
+ * 150 件全价 / 250 件 85% / 其余 70% 的阶梯，今天的全价额度不用掉
+ * 明天也不会累积，等于白扔。真正的做法是把「未来 N 天 × 三档阶梯」
+ * 展开成一堆容量桶，按单价从高到低填库存——线性问题下这是精确最优。
+ *
+ * 未来天的单价先打 (1−markdown) 折扣，今天不打：未来的高价是预测，
+ * 拿到手才算数。这和旧版「现价 ≥ 峰值 × (1−6%) 就卖」是同一个保守口径，
+ * 只是从二元判断升级成了逐件分配。
+ *
+ * 自身砸价（卖得多会压低下一岛日价格）暂不建模：我们单品的量通常
+ * 只有几十件，marketDepth 是 800~6000，影响在 1% 以内。
+ */
+export function allocateSale(R, id, qty, fc, { isCrop = false, soldToday = 0, qAvg = 1, markdown = 0 } = {}) {
+  if (!(qty > 0) || !fc?.length) return { today: 0, plan: [], netOptimal: 0 }
+  const buckets = []
+  for (let k = 0; k < fc.length; k++) {
+    const p = Number(fc[k].price?.[id]) || 0
+    if (p <= 0) continue
+    // 未来天的预测价打折，今天用真实报价
+    const disc = k === 0 ? 1 : Math.max(0, 1 - markdown)
+    if (!isCrop) {
+      buckets.push({ k, cap: Infinity, unit: p * qAvg * disc })
+      continue
+    }
+    const tiers = R.CROP_TIERS || [[Infinity, 1]]
+    let from = k === 0 ? Math.max(0, soldToday) : 0
+    for (const [upTo, pct] of tiers) {
+      if (upTo === Infinity) {
+        buckets.push({ k, cap: Infinity, unit: p * pct * qAvg * disc })
+        break
+      }
+      const cap = Math.max(0, upTo - from)
+      if (cap > 0) buckets.push({ k, cap, unit: p * pct * qAvg * disc })
+      from = Math.max(from, upTo)
+    }
+  }
+  buckets.sort((a, b) => b.unit - a.unit)
+  let left = qty
+  const plan = new Array(fc.length).fill(0)
+  let gross = 0
+  for (const b of buckets) {
+    if (left <= 0) break
+    const take = Math.min(left, b.cap)
+    if (!(take > 0)) continue
+    plan[b.k] += take
+    gross += take * b.unit
+    left -= take
+  }
+  return { today: plan[0] || 0, plan, netOptimal: gross }
+}
+
+/**
  * 择时卖出总表。返回每件货的现价/峰值/建议。
  * world 需要 { coins, state, prices }
  */
@@ -145,8 +199,12 @@ export function sellPlan(R, now, world, cfg = {}) {
     const p0 = Number(world.prices?.[id]) || 0
     if (!base || !p0) continue
     const vault = world.state?.b12?.vault?.[id]
-    let qty = 0
-    for (let q = 0; q < 3; q++) qty += Math.max(0, (world.state?.inv?.[id]?.[q] || 0) - (vault?.[q] || 0))
+    let qty = 0, qSum = 0
+    for (let q = 0; q < 3; q++) {
+      const n = Math.max(0, (world.state?.inv?.[id]?.[q] || 0) - (vault?.[q] || 0))
+      qty += n
+      qSum += n * (R.QUALITY?.[q] ?? 1)
+    }
     if (qty <= 0) continue
 
     const isCrop = !!R.CROPS?.some((c) => c.id === id)
@@ -154,6 +212,11 @@ export function sellPlan(R, now, world, cfg = {}) {
     const ratio = isCrop ? cropTierRatio(R, soldToday, qty) : 1
     const grossNow = Math.round(p0 * ratio * qty)
     const nowQuote = netSaleQuote(R, wallet, paid, grossNow)
+
+    // 逐件最优：今天卖多少 / 未来哪天卖多少（阶梯 × 预测价，未来打折）
+    const alloc = allocateSale(R, id, qty, fc, {
+      isCrop, soldToday, qAvg: qSum / qty, markdown,
+    })
 
     let best = { k: 0, price: p0, net: nowQuote.net, gross: grossNow }
     for (let k = 1; k < fc.length; k++) {
@@ -174,7 +237,10 @@ export function sellPlan(R, now, world, cfg = {}) {
       peakDay: fc[best.k].day,
       netNow: nowQuote.net, netAtPeak: best.net, gain: best.net - nowQuote.net,
       line: Math.round(best.price * (1 - markdown)),
-      sellNow: p0 >= Math.round(best.price * (1 - markdown)),
+      todayQty: alloc.today,
+      allocPlan: alloc.plan,
+      allocNet: alloc.netOptimal,
+      sellNow: alloc.today > 0,
       isCrop, soldToday, tierRatio: ratio,
     })
   }

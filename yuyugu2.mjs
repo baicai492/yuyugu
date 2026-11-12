@@ -103,7 +103,7 @@ async function main() {
         pct(r.curPct).padStart(8) + pct(r.peakPct).padStart(8) + String('+' + r.peakIn).padStart(7) +
         Math.round(r.netNow).toLocaleString('en-US').padStart(12) +
         Math.round(r.netAtPeak).toLocaleString('en-US').padStart(12) +
-        '  ' + (r.sellNow ? '现在卖' : '等峰值'),
+        '  ' + (r.sellNow ? `今日卖 ${r.todayQty}/${r.qty}` : '等峰值'),
       )
     }
     return
@@ -150,7 +150,7 @@ async function main() {
       else if (c === 'status') console.log(JSON.stringify(engine.statusSnapshot().world, null, 2))
       else if (c === 'market') {
         const s = engine.marketSnapshot()
-        console.table(s.rows.slice(0, 15).map((r) => ({ 货物: r.name, 数量: r.qty, 现价百分比: (r.curPct * 100).toFixed(0) + '%', 峰值百分比: (r.peakPct * 100).toFixed(0) + '%', 几天后: r.peakIn, 建议: r.sellNow ? '卖' : '等' })))
+        console.table(s.rows.slice(0, 15).map((r) => ({ 货物: r.name, 数量: r.qty, 现价百分比: (r.curPct * 100).toFixed(0) + '%', 峰值百分比: (r.peakPct * 100).toFixed(0) + '%', 几天后: r.peakIn, 今日卖: r.todayQty, 建议: r.sellNow ? '卖' : '等' })))
       }
       else if (c === 'save') { saveConfig(cfg); engine.log('配置已保存') }
       else if (c === 'quit' || c === 'exit') { engine.stop(); setTimeout(() => process.exit(0), 300) }
