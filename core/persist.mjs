@@ -10,7 +10,7 @@
 //     steam: { ... },                     // 其他需要跨重启的临时状态
 //     stats: { totalRuns, totalEarn, firstRunAt }
 //   }
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const FILE = 'state.json'
@@ -33,8 +33,15 @@ export function loadState(dir) {
 
 export function saveState(dir, state) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const file = resolve(dir, FILE)
+  const tmp = file + '.tmp'
   try {
-    writeFileSync(resolve(dir, FILE), JSON.stringify(state, null, 2), 'utf8')
+    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
+    // 原子替换。以前直接写目标文件：进程正好在 writeFileSync 中途被 kill
+    // （我们重启时就是这么干的），state.json 会变成半个 JSON，
+    // 下次启动 loadState 解析失败 → 偷菜调度表、全站销量学习值、
+    // 今日记账基准全部清零，而且没有任何报错。
+    renameSync(tmp, file)
   } catch {}
 }
 
