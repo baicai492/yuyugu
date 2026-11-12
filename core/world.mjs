@@ -79,7 +79,10 @@ export class World {
       all.spend += j.spend || 0
       all.earn += j.earn || 0
       all.xp += j.xp || 0
-      all.tax += j.tax || 0
+      // 税只在单条动作里（out[i].tax = gross − earn），响应体顶层根本没有 tax 字段。
+      // 以前写的是 all.tax += j.tax || 0 —— 永远是 undefined → 0，
+      // 于是「今日卖货税」一直显示 0（实测卖 1,197 D 扣 36 D 税，GUI 记成 0）。
+      all.tax += out.reduce((a, o) => a + (o?.tax || 0), 0)
       this.lastOut = out
       if (!silent) this.logActions(batch, out)
     }
