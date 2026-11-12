@@ -7,6 +7,7 @@
 // 构造两个只差一个变量的世界，比较产出的动作集合。
 import { loadRulesCached } from '../core/rules.mjs'
 import { planRound, fishEV } from '../core/planner.mjs'
+import { loadConfig } from '../core/config.mjs'
 
 const R = await loadRulesCached()
 let pass = 0, fail = 0
@@ -47,45 +48,68 @@ const cfgBase = {
   sell: { enabled: false },
   vault: { enabled: false },
   cargo: { enabled: false },
-  work: { fish: true, mine: true, bomb: true, bait: true, minValueRatio: 0.9 },
+  // 钓鱼窗口参数取真实配置：测试里的阈值如果和线上不一致，
+  // 「低谷不钓」这条断言就会在改配置后悄悄失效。
+  work: {
+    fish: true, mine: true, bomb: true, bait: true, minValueRatio: 0.9,
+    windowRatio: loadConfig().work.windowRatio,
+    deadlineSec: loadConfig().work.deadlineSec,
+  },
   energy: { minEnergyToLeave: 0 },
 }
 
 const acts = (plan) => plan.actions.map((a) => a.a)
 
 // ---------- 1. fishOK：钓鱼低谷期不钓 ----------
-// 找到「鱼池最差」和「鱼池最好」的岛小时，分别构造世界，看 fish 动作有没有出现。
-// 注意：长夜（现实 22:00–08:00）里 fishOK 恒为 false，所以候选时刻要避开长夜。
+//
+// 判定基准不是「全天最好的时段」，而是「本岛日**剩余**时段里最好的」——
+// 用全天做基准的话，一旦最好的时段已经过去，这天就再也不钓了。
+// 所以这里也必须按同样的口径找时刻，否则会挑出一个「当前低谷、但后面
+// 也没有更好时段」的时刻，那本来就该钓，测出来的却是失败。
 {
-  const curH = R.isleHour(now)
-  // 找一个非长夜的基准时刻（现实白天），把岛小时对齐到它
-  let baseT = now
-  for (let k = 0; k < 24 * 3600; k += 600) {
-    if (!R.b12IsLongNight(now + k)) { baseT = now + k; break }
-  }
-  const baseH = R.isleHour(baseT)
-  let bestH = baseH, bestEV = -1, worstH = baseH, worstEV = Infinity
-  for (let h = 0; h < 24; h++) {
-    const probe = baseT + (((h - baseH) + 24) % 24) * (R.ISLE_SPAN / 24)
-    if (R.b12IsLongNight(probe)) continue
-    const ev = fishEV(R, mkWorld({ t: probe }).state, probe, prices, false)
-    if (ev > bestEV) { bestEV = ev; bestH = h }
-    if (ev < worstEV) { worstEV = ev; worstH = h }
-  }
-  const at = (h) => baseT + (((h - baseH) + 24) % 24) * (R.ISLE_SPAN / 24)
-
   // 关掉挖矿/炸矿，确保唯一候选就是钓鱼
   const wOnly = { ...cfgBase, work: { ...cfgBase.work, mine: false, bomb: false } }
-  const planWorst = planRound(mkWorld({ t: at(worstH), en: 10 }), wOnly)
-  const planBest = planRound(mkWorld({ t: at(bestH), en: 10 }), wOnly)
+  const ratioTh = wOnly.work.windowRatio ?? 0.97
 
-  console.log(`\n[1] 钓鱼时段窗口（最好 ${bestH} 点 EV=${bestEV.toFixed(0)}，最差 ${worstH} 点 EV=${worstEV.toFixed(0)}）`)
-  ok(acts(planBest).includes('fish'), '最佳时段会钓', `动作=${acts(planBest).join(',') || '无'}`)
-  const ratio = worstEV / bestEV
-  if (ratio < 0.97) {
-    ok(!acts(planWorst).includes('fish'), `低谷时段不钓（比值 ${(ratio * 100).toFixed(1)}% < 97%）`, `动作=${acts(planWorst).join(',') || '无'}`)
+  /** 按 planRound 的口径算「当前 EV / 本岛日剩余最佳 EV」 */
+  const ratioAt = (t) => {
+    const ev = fishEV(R, mkWorld({ t }).state, t, prices, false)
+    let best = ev
+    const boundaryIn = R.b12NextIsleBoundary(t) - t
+    const hourSpan = R.ISLE_SPAN / 24
+    const maxSteps = Math.max(0, Math.floor((boundaryIn - 1) / hourSpan))
+    for (let h = 1; h <= Math.min(23, maxSteps); h++) {
+      const probe = t + h * hourSpan
+      if (R.isleIndex(probe) !== R.isleIndex(t)) break
+      best = Math.max(best, fishEV(R, mkWorld({ t: probe }).state, probe, prices, false))
+    }
+    return best > 0 ? ev / best : 1
+  }
+
+  // 扫本岛日里的 24 个岛小时（岛小时 = 现实 10 分钟），找最低/最高的比值。
+  // 跳过长夜：那里 fishOK 恒为 false，不是窗口判决的结果。
+  const boundaryIn = R.b12NextIsleBoundary(now) - now
+  const span = R.ISLE_SPAN / 24
+  const start = now - (24 - Math.ceil(boundaryIn / span)) * span
+  let lowH = -1, lowR = Infinity, highH = -1, highR = -1, lowT = 0, highT = 0
+  for (let h = 0; h < 24; h++) {
+    const t = Math.round(start + h * span)
+    if (t < now - span * 2) continue          // 只往前看，别用已经过去的时刻
+    if (t > R.b12NextIsleBoundary(now)) continue
+    if (R.b12IsLongNight(t)) continue
+    const r = ratioAt(t)
+    if (r < lowR) { lowR = r; lowH = h; lowT = t }
+    if (r > highR) { highR = r; highH = h; highT = t }
+  }
+
+  console.log(`\n[1] 钓鱼时段窗口（阈值 ${(ratioTh * 100).toFixed(0)}%，最低比值 ${(lowR * 100).toFixed(1)}% @${lowH} 点，最高 ${(highR * 100).toFixed(1)}% @${highH} 点）`)
+  const planHigh = planRound(mkWorld({ t: highT, en: 10 }), wOnly)
+  ok(acts(planHigh).includes('fish'), '比值最高的时段会钓', `动作=${acts(planHigh).join(',') || '无'}`)
+  if (lowR < ratioTh) {
+    const planLow = planRound(mkWorld({ t: lowT, en: 10 }), wOnly)
+    ok(!acts(planLow).includes('fish'), `比值低于阈值的时段不钓（${(lowR * 100).toFixed(1)}% < ${(ratioTh * 100).toFixed(0)}%）`, `动作=${acts(planLow).join(',') || '无'}`)
   } else {
-    console.log(`  · 低谷期比值 ${(ratio * 100).toFixed(1)}% 未低于 97%，该时段本就该钓，跳过断言`)
+    console.log(`  · 本岛日剩余时段里没有低于阈值的（最低 ${(lowR * 100).toFixed(1)}%），本来就该钓，跳过断言`)
     pass++
   }
 }

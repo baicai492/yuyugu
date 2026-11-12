@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id)
 const fmt = (n) => Math.round(Number(n) || 0).toLocaleString('en-US')
 const wan = (n) => (Math.abs(n) >= 10000 ? (n / 10000).toFixed(1) + ' 万' : fmt(n))
 const pct = (x) => (x >= 0 ? '+' : '') + (x * 100).toFixed(0) + '%'
+// 带正负号的万位缩写（旧版 signed + wan 的组合），用于「现金 +120.3 万」这类短标注
+const signedWan = (n) => (n === 0 ? '0' : (n > 0 ? '+' : '−') + wan(Math.abs(n)))
 
 let port = 8787
 let alive = false
@@ -118,10 +120,29 @@ function renderOverview() {
   const net = status.ledger?.dayNet ?? 0
   $('dayNet').textContent = (net >= 0 ? '+' : '') + fmt(net)
   $('dayNet').className = net >= 0 ? 'up' : 'down'
-  $('dayNetSub').textContent = `D币 ${fmt(status.ledger.startCoins)} → ${fmt(w.coins)}`
+  // 旧版把当日净增拆成「现金变动 / 库存变动」，只给一个合计数看不出钱压在哪：
+  // 现金涨了但库存也涨，说明货还没卖出去，不是策略失灵。
+  const led = status.ledger || {}
+  const dCash = (w.coins || 0) - (led.startCoins || 0)
+  const dStock = (w.stock || 0) - (led.startStock || 0)
+  $('dayNetSub').textContent =
+    `现金 ${signedWan(dCash)} · 库存 ${signedWan(dStock)}` +
+    `（起 ${fmt(led.startCoins)} → ${fmt(w.coins)}）`
   $('coins').textContent = fmt(w.coins)
   $('stock').textContent = '库存 ' + fmt(w.stock)
   $('isleTime').textContent = `第 ${w.isleNo} 天 · ${w.season}·${w.weather} · ${String(w.hour).padStart(2, '0')}:00${w.longNight ? ' · 长夜' : ''}`
+  // 防偷：下一块地什么时候熟、上次被偷是多久前
+  $('ripeAt').textContent = w.nextRipeAt
+    ? new Date(w.nextRipeAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    : '没有在长的作物'
+  if (w.stolenAgo >= 0) {
+    const m = Math.round(w.stolenAgo / 60)
+    $('stolenAt').textContent = m < 60 ? `${m} 分钟前` : `${(m / 60).toFixed(1)} 小时前`
+    $('stolenAt').className = 'down'
+  } else {
+    $('stolenAt').textContent = '这次运行没有发现'
+    $('stolenAt').className = 'muted'
+  }
   // 咖啡可以让体力超过上限，超上限时标注一下，避免看着像 bug
   $('energy').textContent = w.energy > w.energyMax
     ? `${Math.floor(w.energy)} / ${w.energyMax}（超上限）`
@@ -142,6 +163,22 @@ function renderOverview() {
   $('earn').textContent = '+' + fmt(status.ledger.earn)
   $('spend').textContent = '−' + fmt(status.ledger.spend)
   $('tax').textContent = fmt(status.ledger.tax)
+  // 现金盈亏 = 收入 − 支出；差额（余额税、罚款、手动买卖等）单独列一行，
+  // 否则「收入 − 支出」和实际余额对不上时看不出原因。
+  const cashFlow = (status.ledger.earn || 0) - (status.ledger.spend || 0)
+  const other = dCash - cashFlow
+  $('cashNet').textContent = signedWan(dCash)
+  $('cashNet').className = dCash >= 0 ? 'up' : 'down'
+  $('stockNet').textContent = signedWan(dStock)
+  $('stockNet').className = dStock >= 0 ? 'up' : 'down'
+  const otherRow = $('otherRow')
+  if (Math.abs(other) > 100) {
+    otherRow.hidden = false
+    $('other').textContent = signedWan(other)
+    $('other').className = other >= 0 ? 'up' : 'down'
+  } else {
+    otherRow.hidden = true
+  }
 
   const st = status.state
   const bits = []

@@ -61,14 +61,22 @@
       <div class="card-row"><span>工具</span><b id="tools">—</b></div>
     </div>
     <div class="card">
+      <small>防偷</small>
+      <div class="card-row"><span>下一块地成熟（成熟即收）</span><b id="ripeAt">—</b></div>
+      <div class="card-row"><span>最近一次发现被偷</span><b id="stolenAt">—</b></div>
+    </div>
+    <div class="card">
       <small>本岛日额度</small>
       <div class="quotas" id="quotas"></div>
     </div>
     <div class="card">
       <small>今日收支</small>
-      <div class="card-row"><span>收入</span><b class="up" id="earn">—</b></div>
-      <div class="card-row"><span>支出</span><b class="down" id="spend">—</b></div>
-      <div class="card-row"><span>卖货税</span><b id="tax">—</b></div>
+      <div class="card-row"><span>收入（已扣税）</span><b class="up" id="earn">—</b></div>
+      <div class="card-row"><span>支出（种子、进货、投资等）</span><b class="down" id="spend">—</b></div>
+      <div class="card-row"><span>其中卖货税</span><b id="tax">—</b></div>
+      <div class="card-row" id="otherRow" hidden><span>其他变动（余额税、罚款、手动操作等）</span><b id="other">—</b></div>
+      <div class="card-row"><span><b>现金盈亏</b></span><b id="cashNet">—</b></div>
+      <div class="card-row"><span>库存变动</span><b id="stockNet">—</b></div>
     </div>
     <div class="actions">
       <button id="btnStart">启动</button>

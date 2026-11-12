@@ -38,6 +38,41 @@ export function foodChoices(R, s, prices) {
   return out
 }
 
+/**
+ * 每点体力拿去钓鱼/挖矿/炸矿能赚多少（D/点）。
+ *
+ * 这是「种地」决策里最容易被忽略的一项：一块地每岛日要吃 30 多点体力
+ * （种植 2 + 收获 1×次数 + 浇水若干），这些体力本来可以拿去做别的。
+ * 以前 makeCropPlanner 把体力按「口粮采购价」（小麦 ~143 D/点）折钱，
+ * 严重低估：线上实测钓鱼每点体力 3,400+ D，是口粮价的 24 倍。
+ * 按 143 算，玉米每块地每岛日「净赚 8.8 万」；按钓鱼机会成本算，
+ * 实际是「净亏 1.7 万」——24 块地全种满，体力被农务吃干，
+ * 钓鱼额度一整天 0/80，而钓鱼才是收益最高的事。
+ *
+ * 只在还有额度时才算：额度刷完的活不能算机会成本，否则会得出
+ * 「今天什么都别干」的结论。
+ */
+export function workValuePerEnergy(R, s, t, prices, cfg) {
+  const W = R.WORLD
+  const iq = s.iq?.d === R.isleIndex(t) ? s.iq : {}
+  const left = (k, max) => Math.max(0, (max || 0) - (iq[k] || 0))
+  const useBait = cfg.work?.bait && (s.inv?.bait?.[0] || 0) > 0
+  let best = 0
+  if (cfg.work?.fish && left('fish', W.daily.fish) > 0) {
+    const ev = fishEV(R, s, t, prices, useBait)
+    if (ev > 0) best = Math.max(best, ev / (W.cost.fish || 1))
+  }
+  if (cfg.work?.mine && left('mine', W.daily.mine) >= 3) {
+    const ev = mineEV(R, s, prices, false) / (1.25 + 0.05 * (s.tools?.pick || 0))
+    if (ev > 0) best = Math.max(best, ev / (W.cost.mine || 1))
+  }
+  if (cfg.work?.bomb && left('bomb', W.daily.bomb) > 0 && (s.inv?.bomb?.[0] || 0) > 0) {
+    const ev = mineEV(R, s, prices, true)
+    if (ev > 0) best = Math.max(best, ev / (W.cost.bomb || 1))
+  }
+  return best
+}
+
 /** 钓鱼的期望收益（每点体力） */
 export function fishEV(R, s, t, prices, useBait) {
   const pool = R.fishPool(s, t)
@@ -547,7 +582,12 @@ export function planRound(world, cfg, log = () => {}) {
   if (cfg.farm?.enabled) {
     const season = R.seasonOf(R.isleDay(t))
     const foodCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
-    const planner = makeCropPlanner(R, s, t, prices, cfg, weather, foodCost)
+    // 这里传的是**体力的机会成本**，不是口粮采购价：
+    // 一块地每岛日吃掉 30 多点体力，这些体力本可以拿去钓鱼（3,400+ D/点）。
+    // 用口粮价（~143）折钱会让所有作物都显得稳赚，24 块地全种满，
+    // 钓鱼反而一竿下不去。详见 workValuePerEnergy 的注释。
+    const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, prices, cfg))
+    const planner = makeCropPlanner(R, s, t, prices, cfg, weather, soilCost)
 
     // 已经在长的作物先记账：它们同样占用今天的阶梯价名额和加工坊容量，
     // 不记的话新种的会以为自己还能按全价/加工价卖。
@@ -591,6 +631,12 @@ export function planRound(world, cfg, log = () => {}) {
         summary.push(`补种 ${planted} 块（${parts}${foodCount ? `，其中口粮 ${Math.min(foodCount, planted)} 块` : ''}）`)
       }
       if (skippedOffline) summary.push(`  离线避让：${skippedOffline} 块先空着（种什么都赶在离线时段成熟）`)
+      // 主动留空的地要说清原因，否则日志里「24 块只种 4 块」看起来像 bug
+      const heldEmpty = empty.length - planted - skippedOffline
+      if (heldEmpty > 0 && !prefer) {
+        summary.push(`  留空 ${heldEmpty} 块：一块地每岛日要吃 30 多点体力，` +
+          `这些体力拿去钓/挖/炸能赚 ${fmt(soilCost)} D/点，种地回不了本`)
+      }
     }
   }
 
@@ -674,14 +720,22 @@ export function planRound(world, cfg, log = () => {}) {
 
     // --- 收获体力预留 ---
     //
-    // 这是「防偷」的核心，不能只留眼前几分钟就熟的。
-    // 以前只算 2400 秒内要熟的，结果体力全花在钓鱼上，
-    // 之后陆续成熟的地一块块熟着没体力收——必被偷。
+    // 这是「防偷」的核心，但预留的窗口不能取太长。
     //
-    // 正确做法：预留「本轮巡视结束后、到下次有体力干活之前」这个窗口内
-    // 所有会成熟的地。窗口取 keepWindowSec（默认 30 分钟，覆盖 maxSleep + 余量）。
-    // 浇水和种植的体力也要算上（种下去就要浇水，否则品质下降）。
-    const keepWindow = cfg.farm?.keepWindowSec ?? (cfg.wake?.idleSleepCap ?? 1800) + 600
+    // 旧口径是「keepWindow（40 分钟）内所有要熟的地」，注释里写的是
+    // 「体力全花在钓鱼上，之后陆续成熟的地一块块熟着没体力收——必被偷」。
+    // 那个 bug 的真实原因是 **keep 被口粮冲抵成了 0**，不是窗口取小了，
+    // 所以口径改成 40 分钟后问题并没解决，反而引入了新的死锁：
+    // 线上 24 块番茄错峰成熟，40 分钟内总有 24 块要熟 → keep=24，
+    // 而吃一个口粮只回 12 点，`en + 12 − 24 < 4` 永远不成立，
+    // 第 8 段一次也走不到钓鱼——实测一整天钓鱼额度 0/80。
+    //
+    // 正确的窗口是「这一竿花掉的体力要多久才能靠自然回复补回来」：
+    // 花 4 点要回 720 秒，只需要预留这 720 秒内会熟的地。
+    // 再往后的靠自然回复 + ensureEnergy 现场吃口粮来兜，不需要提前锁体力。
+    const regen = W.regen || 180
+    const workCost = Math.max(W.cost.fish || 0, W.cost.mine || 0, W.cost.bomb || 0)
+    const keepWindow = Math.max(workCost, 1) * regen
     const ripeSoon = []
     let matureCount = 0
     for (let i = 0; i < s.plotN; i++) {
@@ -740,7 +794,7 @@ export function planRound(world, cfg, log = () => {}) {
     // --- 跨期体力预算 ---
     // 换岛日边界前，体力每 regen 秒回 1 点。这部分「白来的」体力用来挖矿/炸矿时
     // 不该吃口粮（吃口粮是有成本的）。先按回复量算出能白嫖几竿。
-    const regen = W.regen || 180
+    // regen 在上面算收获预留窗口时已经取过了，这里复用。
     let regenBudget = Math.max(0, Math.floor(Math.max(0, boundaryIn - 600) / regen))
 
     // 循环条件不能只看「体力够不够一件活」：体力见底时还要能靠吃口粮补上来。
@@ -784,19 +838,27 @@ export function planRound(world, cfg, log = () => {}) {
         if (job.lazy && regenBudget >= job.cost && usable >= 0) break
         // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
         // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
-        const food = foodChoices(R, s, prices)[0]
-        if (!food) break
-        if (food.costPerEnergy >= job.v * (cfg.work.minValueRatio ?? 1.2)) break
-        // 吃完还是不够干这件活 → 别浪费口粮（体力还是动不了）。
         //
-        // 这一行就是「口粮不能用来扩大工作量」的完整约束：
-        // 吃下去之后必须同时满足 keep（收割预留）和 job.cost（这次活），
-        // 否则不吃。以前这里还多写了一句 `if (keep > 0) break`，
-        // 结果只要有一块地即将成熟就一口都不吃——体力 0 时既干不了活、
-        // 也不会靠口粮恢复，只能干等 180 秒回 1 点，
-        // 实测 6 分钟里只种了 1 块地。那行的本意已经被这行覆盖了。
-        if (s.en + food.restore - keep < job.cost) break
-        if (!push({ a: 'eat', id: food.id, q: food.q })) break
+        // 一个口粮往往不够：线上小麦回 6 点、番茄回 12 点，而 keep 可能是 12。
+        // 以前这里只试第一个口粮就下结论（`en + restore - keep < cost` → break），
+        // 体力 5 + 6 − 12 = −1 < 4，直接放弃，连吃都不吃。
+        // 结果就是「体力常年 1~5、钓鱼额度一整天 0/80」——不是没口粮，
+        // 是永远迈不过第一口的门槛。这里改成能连着吃到够为止。
+        const maxV = job.v * (cfg.work.minValueRatio ?? 1.2)
+        let need = keep + job.cost - s.en
+        let ate = 0
+        while (need > 0 && ate++ < 20) {
+          const food = foodChoices(R, s, prices)[0]
+          if (!food) break
+          if (food.costPerEnergy >= maxV) break
+          // 体力满了之后再吃也是浪费（咖啡例外，它能超上限，但也受 daily 限制）
+          const room = R.energyMax(s) - s.en
+          if (room <= 0) break
+          if (!push({ a: 'eat', id: food.id, q: food.q })) break
+          need -= Math.min(food.restore, room)
+        }
+        // 吃不够就说明口粮/上限都到顶了，这轮干不了，别再空转
+        if (s.en - keep < job.cost) break
         continue
       }
       if (!push(job.a)) break
