@@ -1398,8 +1398,10 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     const adultDays = (R.B12_ADULT_DAYS?.[a.id] ?? 24) / ISLE_PER_DAY
     const growDays = (R.B12_GROW_DAYS?.[a.id] ?? 2) / ISLE_PER_DAY
     const daily = (1440 / a.every) * lr(a.product) * 1.2 - (R.SHOP.feed?.price ?? 300)
-    // 退休时只能卖回本钱的 40%（站点规则 sellAnimal: price × 0.4）
-    const life = (daily * adultDays - a.price * 0.4) / (adultDays + growDays)
+    // 退役时只能卖回本钱的 40%（站点规则 sellAnimal: price × 0.4），
+    // 所以净成本是 60% —— 旧版写的是 `- price * 0.6`，这里以前错写成 0.4，
+    // 等于把每只动物的成本算低了 20%，回本期被高估、买得过于积极。
+    const life = (daily * adultDays - a.price * 0.6) / (adultDays + growDays)
     return { a, daily, growDays, life, adultDays }
   }).sort((x, y) => y.life - x.life)[0]
 
