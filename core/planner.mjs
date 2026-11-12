@@ -744,21 +744,28 @@ export function planRound(world, cfg, log = () => {}) {
         // 可用的不够干这活。挖矿/炸矿没有时段限制，可以等自然回复——
         // 只要换岛日前回复得够，白白等回来比花口粮买体力划算得多。
         // 钓鱼不行：鱼有时段，过了就没了。
-        if (job.lazy && regenBudget >= job.cost) break
+        //
+        // 但有个死锁要避免：当体力连 keep 都填不满（usable < 0）时，
+        // 「等自然回复」永远启动不了——每 180 秒回 1 点，而这时
+        // keepWindow 里的地又熟了，keep 重新算还是那么高。
+        // 实测线上就是这样：体力 0、keep 10、regenBudget 50，
+        // 于是每轮都 break 等回复，6 分钟只种了 1 块地。
+        // 这种情况说明回复速度已经跟不上成熟速度，必须吃口粮。
+        if (job.lazy && regenBudget >= job.cost && usable >= 0) break
         // 不能等（快到边界 / 是钓鱼）→ 吃口粮补上来。
         // 但要算清楚：吃口粮补出来的体力必须先填满 keep，剩下的才轮到干活。
         const food = foodChoices(R, s, prices)[0]
         if (!food) break
         if (food.costPerEnergy >= job.v * (cfg.work.minValueRatio ?? 1.2)) break
-        // 吃完还是不够干这件活 → 别浪费口粮（体力还是动不了）
+        // 吃完还是不够干这件活 → 别浪费口粮（体力还是动不了）。
+        //
+        // 这一行就是「口粮不能用来扩大工作量」的完整约束：
+        // 吃下去之后必须同时满足 keep（收割预留）和 job.cost（这次活），
+        // 否则不吃。以前这里还多写了一句 `if (keep > 0) break`，
+        // 结果只要有一块地即将成熟就一口都不吃——体力 0 时既干不了活、
+        // 也不会靠口粮恢复，只能干等 180 秒回 1 点，
+        // 实测 6 分钟里只种了 1 块地。那行的本意已经被这行覆盖了。
         if (s.en + food.restore - keep < job.cost) break
-        // 关键：口粮不能用来「扩大工作量」。
-        // 只允许补到刚好够干这一次活，多余的体力一律不许溢出——
-        // 否则会变成「吃口粮 → 多干几件 → 再吃 → 再干」，
-        // 把预留给收割的体力一点点蚕食光（实测 100 体力钓到 34 竿、体力归零，
-        // 结果 30 分钟内要熟的 6 块地一块都收不了，全被偷）。
-        // 已经有 keep 保护时，一口都不吃。
-        if (keep > 0) break
         if (!push({ a: 'eat', id: food.id, q: food.q })) break
         continue
       }
