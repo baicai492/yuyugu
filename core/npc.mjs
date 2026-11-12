@@ -70,8 +70,19 @@ export async function playGomoku(world, cfg, log = () => {}) {
       const j = await world.act([{ a: 'npc', g: 'gomoku', k: 'end', mv }], { silent: true })
       end = j.out?.[0]
     } catch (e) { log('五子棋结算失败：' + e.message); break }
+    if (!end?.ok) {
+      log('五子棋结算失败：' + (end?.msg || '未知'))
+      break
+    }
+    // 平局不消耗计奖次数（站点规则）。旧版按服务端的 cnt.npc 判断，天然正确；
+    // 新版用本地 games 计数，以前把平局也 ++，等于平几局就少打几局。
+    if (end.res === 'draw') {
+      fails++
+      log('五子棋平局，本局不计次数')
+      continue
+    }
     games++
-    if (end?.ok && end.res === 'win') {
+    if (end.res === 'win') {
       wins++
       coins += end.earn || 0
       for (const g of end.got || []) {
@@ -79,9 +90,6 @@ export async function playGomoku(world, cfg, log = () => {}) {
         items[name] = (items[name] || 0) + g.n
       }
       if (end.jackpot) log('🎉 五子棋头奖！+' + Math.round(end.earn).toLocaleString('en-US'))
-    } else if (!end?.ok) {
-      log('五子棋结算失败：' + (end?.msg || '未知'))
-      break
     }
   }
 
