@@ -674,8 +674,9 @@ export function planRound(world, cfg, log = () => {}) {
     // 一块地每岛日吃掉 30 多点体力，这些体力本可以拿去钓鱼（3,400+ D/点）。
     // 用口粮价（~143）折钱会让所有作物都显得稳赚，24 块地全种满，
     // 钓鱼反而一竿下不去。详见 workValuePerEnergy 的注释。
-    const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, prices, cfg))
-    const planner = makeCropPlanner(R, s, t, prices, cfg, weather, soilCost)
+    // 产出估值用「未来几天均价」（作物会囤到峰值卖），口粮成本仍用当前价（马上要吃）。
+    const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, expPrices, cfg))
+    const planner = makeCropPlanner(R, s, t, expPrices, cfg, weather, soilCost)
 
     // --- 口粮地该留几块：旧版是**算**出来的，不是拍脑袋定死的 ---
     //
@@ -1249,6 +1250,10 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
   const longRunFactor = cfg.price?.longRun ?? 1.3
   const taxRate = coins >= R.B12_TAX.high ? 0.03 : coins >= R.B12_TAX.free ? 0.01 : 0
   const lr = (id) => (R.BASE_PRICE[id] || prices[id] || 0) * longRunFactor * (1 - taxRate)
+  // 长期资产（工具、地块、动物）按「长期均价」估值，不看当天行情：
+  // 拿今天的暴涨价去算回本期，会把明明要三年回本的工具当成三天回本（旧版 mk.longRun）。
+  const lrPrices = {}
+  for (const id of Object.keys(R.BASE_PRICE || {})) lrPrices[id] = lr(id)
 
   const add = (name, action, cost, dailyGain, delayDays = 0, extra) => {
     if (cost == null || !(dailyGain > 0)) return
@@ -1267,8 +1272,8 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     // 比「当作全价卖」的粗估更接近实收（旧版 investOptions 用的就是 planner.best()）。
     try {
       const foodCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
-      const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, prices, cfg))
-      const cp = makeCropPlanner(R, s, t, prices, cfg, weather, soilCost)
+      const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, lrPrices, cfg))
+      const cp = makeCropPlanner(R, s, t, lrPrices, cfg, weather, soilCost)
       // 先把已经在长的作物记进去，新地才是「第 N+1 块」的真实边际
       for (let i = 0; i < s.plotN; i++) {
         const p = s.plots[i]
@@ -1294,7 +1299,7 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
         for (let h = 0; h < 24; h++) {
           const probe = t + se * 12 * ISLE_PER_DAY * R.ISLE_SPAN + h * (R.ISLE_SPAN / 24)
           // 开不开饵料都试一遍，取更大的那个
-          const ev = Math.max(fishEV(R, s2, probe, prices, false), fishEV(R, s2, probe, prices, true))
+          const ev = Math.max(fishEV(R, s2, probe, lrPrices, false), fishEV(R, s2, probe, lrPrices, true))
           if (ev > best) best = ev
         }
         sum += best
@@ -1317,8 +1322,8 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     // 挖矿一次的期望受 PICK_FLOOR 影响，所以每升一级都会更深一层。
     const dayOre = (pick) => {
       const s2 = { ...s, tools: { ...s.tools, pick } }
-      const per = mineEV(R, s2, prices, false, t)
-      const bomb = cfg.work?.bomb ? mineEV(R, s2, prices, true, t) : 0
+      const per = mineEV(R, s2, lrPrices, false, t)
+      const bomb = cfg.work?.bomb ? mineEV(R, s2, lrPrices, true, t) : 0
       return per * R.WORLD.daily.mine + (bomb > 0 ? bomb * R.WORLD.daily.bomb : 0)
     }
     if (pickPrice != null) add(`镐子 Lv${s.tools.pick + 1}`, { a: 'upgrade', k: 'pick' }, pickPrice, (dayOre(s.tools.pick + 1) - dayOre(s.tools.pick)) * ISLE_PER_DAY)
@@ -1355,7 +1360,7 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     const adultDays = (R.B12_ADULT_DAYS?.[a.id] ?? 24) / ISLE_PER_DAY
     const growDays = (R.B12_GROW_DAYS?.[a.id] ?? 2) / ISLE_PER_DAY
     const daily = (1440 / a.every) * lr(a.product) * 1.2 - (R.SHOP.feed?.price ?? 300)
-    // 退休时能卖掉一部分本钱（约 60%）
+    // 退休时只能卖回本钱的 40%（站点规则 sellAnimal: price × 0.4）
     const life = (daily * adultDays - a.price * 0.4) / (adultDays + growDays)
     return { a, daily, growDays, life, adultDays }
   }).sort((x, y) => y.life - x.life)[0]
