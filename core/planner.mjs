@@ -761,7 +761,18 @@ export function planRound(world, cfg, log = () => {}) {
           if (!alt || alt.crop.id === pick.crop.id) { skippedOffline++; return }
           pick = alt
         }
-        // 种植要 2 点体力，不够就是失败——这跟「判断不划算主动留空」是两回事
+        // 种植要 2 点体力，不够就是失败——这跟「判断不划算主动留空」是两回事。
+        //
+        // 空地必须尽快补种（榜一 v1.2.0 的「harvest-replant continuity」）：
+        // 一块地空着，这一茬就少收；而我们以前只在**收割**前补体力（ensureEnergy），
+        // 种植这一段是饿着的——体力被收割吃干后，补种就一直失败，
+        // 线上日志里反复出现「还有 N 块空地：体力不够种，下轮再来」，
+        // 下一轮又会先被收割占掉体力，于是空地一拖就是几个岛日。
+        //
+        // 只有 pick 已经判定为「有正收益」（或口粮地）时才走到这里，
+        // 所以吃口粮换取这 2 点体力是算得过来的。
+        const plantCost = R.WORLD.cost.plant || 2
+        if (s.en < plantCost && !ensureEnergy(plantCost)) { failedPlant++; return }
         if (!push({ a: 'plant', i, c: pick.crop.id })) { failedPlant++; return }
         planted++
         plantedNames[pick.crop.name] = (plantedNames[pick.crop.name] || 0) + 1
