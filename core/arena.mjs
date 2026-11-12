@@ -192,7 +192,9 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
   // 打对手，直到拿满当天掉落场次
   const drops = gear.daily?.drops ?? 30
   const today = gear.daily?.battles ?? 0
-  const need = Math.max(0, (a.battles ?? 30) - today)
+  // 分成几批打（旧版 perVisit）：一次打 30 场要 4 分钟，期间不能巡检/偷菜。
+  const left = Math.max(0, (a.battles ?? 30) - today)
+  const need = a.perVisit > 0 ? Math.min(left, a.perVisit) : left
   // 场次打满时以前是整段静默跳过，日志里连「今天打过擂台」都看不到，
   // 分不清是额度用完还是功能没跑。状态变化时说明一次。
   if (need <= 0 && world.arenaIdleReason !== today) {

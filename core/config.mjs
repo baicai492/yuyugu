@@ -43,6 +43,9 @@ export const DEFAULTS = {
     idleSleepCap: 1800,
   },
 
+  // 长期资产（动物、工具）估值：基础价 × 这个系数（旧版 price.longRun）
+  price: { longRun: 1.3 },
+
   // 投资
   invest: {
     enabled: true,
@@ -117,7 +120,7 @@ export const DEFAULTS = {
   },
 
   // 加工
-  craft: { enabled: true, minMargin: 0.05, maxPerRound: 20 },
+  craft: { enabled: true, minMargin: 0.05, maxPerRound: 20, hoardMax: 240 },
 
   // 卖货（核心）
   sell: {
@@ -161,6 +164,9 @@ export const DEFAULTS = {
   arena: {
     enabled: true,
     battles: 30,                 // 每天打多少场（前 30 场有掉落）
+    // 每次巡视最多打几场（旧版 perVisit）。一场要 8.5 秒，打满 30 场会阻塞
+    // 4 分钟——期间偷菜的解禁时刻全错过。分成几轮打，总量不变。
+    perVisit: 5,
     openChests: true,            // 自动开宝箱（每 3 场 1 个，每天 5 个）
     autoEquip: true,
     autoPoints: true,
@@ -234,7 +240,7 @@ export const DEFAULTS = {
     combat: 'guard2',            // 贝壳护具：守家生命 +8%
     protect: 1800,               // 保护期（秒）
     // 离线时段开着时只买「一格一只」的动物，减少没人收时的畜产损失（旧版）
-    safeAnimals: false,
+    safeAnimals: true,
   },
 
   // 离线时段（交给管家）

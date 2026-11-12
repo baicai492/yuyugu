@@ -95,6 +95,10 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
         helped++
         coins += res.coins || 0
         if (res.energy != null) world.state.en = Math.max(0, (world.state.en || 0) - res.energy)
+        // 每家一行明细（旧版格式）：干了什么、拿多少、亲密度、花多少体力
+        const did = Object.entries(res.done || {}).map(([k, n]) => `${k}×${n}`).join(' ') || '帮了一把'
+        log(`  帮 ${res.owner || o.name} 干活：${did}，+${Math.round(res.coins || 0).toLocaleString('en-US')} D` +
+          `${res.aff != null ? `，亲密度 ${res.aff}` : ''}${res.energy != null ? `，体力 -${res.energy}` : ''}`)
       } catch (e) {
         // 今天帮过 / 已达上限 → 记为已处理，别再试
         if (e.status === 409 || /今天帮过|已经帮|上限|额度/.test(e.message)) memoHelp.add(o.id)

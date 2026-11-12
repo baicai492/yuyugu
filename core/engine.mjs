@@ -2,6 +2,7 @@
 // 职责：拉状态 → 规划 → 提交 → 擂台/社交/小游戏 → 算下次唤醒 → 记账 → 上报。
 import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { ROOT } from './rules.mjs'
 import { checkRulesUpdate, rulesVersion } from './rules.mjs'
 import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices, energyActions } from './planner.mjs'
@@ -260,6 +261,16 @@ export class Engine {
     this.busy = true
     this.setStep('读取世界状态')
     await w.refresh()
+    // 新人礼：账号还没有 gift 状态时领一次（旧版 page.mjs 在 world() 里做）。
+    // 领完要重新拉世界状态，否则这一轮的动作都是基于「没领礼」的旧快照。
+    if (!cfg.dry && !w.state.gift && !this.memo.welcomeTried) {
+      this.memo.welcomeTried = true
+      try {
+        await w.client.post('/api/pet/world/welcome', { operation: randomUUID() })
+        this.log('领取新人礼')
+        await w.refresh()
+      } catch { /* 领不了就算了，不影响托管 */ }
+    }
     this.ensureLedger()
     await this.recoverBookFromServer()
 
@@ -599,6 +610,7 @@ export class Engine {
   async run() {
     this.running = true
     this.halted = false
+    let failures = 0
     this.log(`托管启动${this.cfg.dry ? '（演练模式，不提交）' : ''}`)
     while (this.running && !this.halted) {
       try {
@@ -608,12 +620,18 @@ export class Engine {
           continue
         }
         const { sleep } = await this.tick()
+        failures = 0
         await this.idleWait(sleep)
       } catch (e) {
         this.busy = false
-        this.status = { ...this.status, state: 'error', lastError: e.message }
-        this.log('巡视出错：' + e.message, 'err')
-        await new Promise((r) => setTimeout(r, 15000))
+        // 失败退避（旧版 page.mjs 的做法）：连续失败越久等越久，
+        // 登录失效直接等 5 分钟——每 15 秒无意义重试只会刷屏。
+        const auth = e?.name === 'AuthError' || /登录|401/.test(e?.message || '')
+        failures++
+        const wait = auth ? 300 : Math.min(600, 30 * failures)
+        this.status = { ...this.status, state: auth ? 'auth' : 'error', lastError: e.message }
+        this.log(`巡视出错（第 ${failures} 次，${wait} 秒后重试）：${e.message}`, 'err')
+        await new Promise((r) => setTimeout(r, wait * 1000))
       }
     }
     this.status = { ...this.status, state: 'stopped', step: '' }
