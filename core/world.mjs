@@ -62,7 +62,7 @@ export class World {
     return { state: s, out: r.out, spend: r.spend, earn: r.earn, xp: r.xp, tax: r.tax || 0 }
   }
 
-  /** 提交动作（自动分批、自动处理 409） */
+  /** 提交动作（自动分批；409 冲突抛给调用方，由引擎用响应里的新快照重新规划） */
   async act(actions, { silent = false } = {}) {
     const R = this.R
     if (!actions.length) return { out: [], spend: 0, earn: 0 }

@@ -60,6 +60,12 @@ export class Engine {
     if (st.arenaSpendDay) this.memo.arenaSpendDay = st.arenaSpendDay
     if (st.arenaCostDay) this.memo.arenaCostDay = st.arenaCostDay
     if (st.arenaCost != null) this.memo.arenaCost = st.arenaCost
+    // 全站销量学习值：卖货/囤货/投资的「峰值」都要用它折算供需。
+    // 不持久化的话每次重启都会退化成「假设没人卖」——峰值被高估，
+    // 货就全部压着不卖（线上重启后 20 种货全部 sellNow=false 就是这个原因）。
+    if (st.externalSold && typeof st.externalSold === 'object') this.externalSoldRatio = st.externalSold
+    // 打输过的岛：一小时之内不再去，重启后也该继续记着
+    if (st.stealLoseAt && typeof st.stealLoseAt === 'object') this.memo.stealLoseAt = st.stealLoseAt
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -107,6 +113,10 @@ export class Engine {
         arenaSpendDay: this.memo.arenaSpendDay || '',
         arenaCostDay: this.memo.arenaCostDay || '',
         arenaCost: this.memo.arenaCost || 0,
+        // 全站销量学习值：重启后立刻能继续按真实供需估峰值，不会退化成「没人卖」
+        externalSold: this.externalSoldRatio || {},
+        // 打输过的岛（id → 时刻），一小时内不再去
+        stealLoseAt: this.memo.stealLoseAt || {},
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -255,6 +265,10 @@ export class Engine {
     const w = this.world
     const R = w.R
     const cfg = this.cfg
+    // 全站销量学习值挂在 engine 上（savePersist 从这里落盘），world 只是借用
+    if (!w.externalSoldRatio || !Object.keys(w.externalSoldRatio).length) {
+      w.externalSoldRatio = this.externalSoldRatio || {}
+    }
 
     // 关键：一轮可能要跑好几分钟（擂台 30 场就要 4 分钟）。
     // 必须一进来就把状态切成「工作中」，否则 GUI 整轮都显示上一轮留下的「已暂停」。
@@ -302,6 +316,7 @@ export class Engine {
         if (sold > 0) mine[id] = sold / Math.max(1, r.depth)
       }
       w.externalSoldRatio = M.learnExternal(w.externalSoldRatio, obs, mine)
+      this.externalSoldRatio = w.externalSoldRatio   // savePersist 从这里落盘
       w.lastSupply = obs
     } catch {}
 
@@ -361,6 +376,15 @@ export class Engine {
         if (plan.summary.length) this.log(`第 ${rounds} 轮：${plan.summary.join('；')}`)
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
       } catch (e) {
+        // 409：小岛状态在别处变了（网页端手动操作、站内管家抢先提交、另一个标签页）。
+        // 旧版 core.mjs 的做法是「用响应里的新快照重新规划，continue」；
+        // 新版以前把它当普通错误，整轮巡视中断并退避 30 秒——一次冲突就白等半分钟，
+        // 而冲突在开着站内管家时很常见。服务端 409 的响应体里带着最新世界快照。
+        if (e?.name === 'ConflictError') {
+          if (e.data && e.data.state) w.accept(e.data)
+          this.log('小岛状态在别处变了，按最新状态重新规划')
+          continue
+        }
         this.log('提交失败：' + e.message, 'err')
         break
       }
