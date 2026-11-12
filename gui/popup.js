@@ -17,6 +17,7 @@ const balanceTax = (coins) => {
 
 let port = 8787
 let alive = false
+let restarting = false      // 正在重启的 1~2 秒空窗：期间的网络错误不写状态栏
 let status = null
 let market = null
 let xian = null
@@ -79,7 +80,9 @@ async function loadStatus() {
     renderOverview()
     $('ver').textContent = 'v' + (j.version || 1)
   } catch (e) {
-    $('statusline').textContent = '读取状态失败：' + e.message
+    // 重启空窗、进程刚退出都会走到这里。进行中的重启不算故障；
+    // 其它情况才报，并且下一次读取成功时由 renderOverview 覆盖掉。
+    if (!restarting) $('statusline').textContent = '读取状态失败：' + e.message
   }
 }
 
@@ -695,25 +698,30 @@ function bind() {
     btn.disabled = true
     $('statusline').textContent = '正在重启主程序…'
     // 旧进程退出到新进程监听之间有几百毫秒到两秒的空窗。
-    // 期间 1.5 秒一次的自动刷新会去请求 /api/status，连接被拒的
-    // TypeError: Failed to fetch 会把状态栏盖成「读取状态失败」，
-    // 看着像重启失败。先把 alive 置 false，自动刷新就不再发请求；
-    // 下面的 ping 循环成功后会由 connect() 重新置回 true。
+    // 这期间任何请求都会连接被拒（TypeError: Failed to fetch）：
+    //   · alive = false        → 自动刷新不再发起新请求
+    //   · restarting = true    → 点击前就已经在飞的请求失败后不写状态栏
+    // 两者缺一不可，否则状态栏会被「读取状态失败」盖掉，看着像重启失败。
     alive = false
-    try { await cmd('restart') } catch { /* 旧进程可能来不及回包就退出了，忽略 */ }
-    logSince = 0; logLines = []
-    let up = false
-    for (let i = 0; i < 40; i++) {          // 最多等 20 秒
-      await new Promise((r) => setTimeout(r, 500))
-      try { await api('/api/ping'); up = true; break } catch {}
+    restarting = true
+    try {
+      try { await cmd('restart') } catch { /* 旧进程可能来不及回包就退出了，忽略 */ }
+      logSince = 0; logLines = []
+      let up = false
+      for (let i = 0; i < 40; i++) {          // 最多等 20 秒
+        await new Promise((r) => setTimeout(r, 500))
+        try { await api('/api/ping'); up = true; break } catch {}
+      }
+      if (up) {
+        await connect()
+        $('statusline').textContent = '已重启，加载的是最新代码'
+      } else {
+        $('statusline').textContent = '重启后 20 秒内没连上，请看 logs/host-*.log'
+      }
+    } finally {
+      restarting = false
+      btn.disabled = false
     }
-    if (up) {
-      await connect()
-      $('statusline').textContent = '已重启，加载的是最新代码'
-    } else {
-      $('statusline').textContent = '重启后 20 秒内没连上，请看 logs/host-*.log'
-    }
-    btn.disabled = false
   }
 
   $('mRefresh').onclick = refreshMarket
