@@ -827,10 +827,23 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     }
   }
 
-  // ---------- 7. 加工 ----------
+  // ---------- 7. 加工：候选交给体力背包 ----------
+  //
+  // 加工同样是「花体力换毛利」，必须和钓鱼/挖矿/炸矿竞争同一份体力。
+  // 以前是先无条件加工、再把剩下的体力交给背包——毛利低的配方会白白抢走
+  // 钓鱼的体力。现在这里只算「当前库存能支撑几件」并登记成背包候选，
+  // 由第 8 段的 DP 按单位体力收益统一挑选。
+  //
+  // 配方链（金锭 → 钻石王冠）在这里递归展开成「基础材料需求 + 工序数」，
+  // 和榜一的做法一致。不展开的话第一轮永远看不到王冠：它的原料金锭库存是 0，
+  // 会被低毛利配方先把加工额度吃满，王冠得等下一轮才做得出来。
+  // 一件王冠算 2 点体力、2 件加工额度（先做金锭再做王冠）；
+  // 库存里已有的中间品会先被用掉，那批只算 1 点体力、1 件额度。
+  let craftUnits = []
   if (cfg.craft?.enabled) {
-    const left = R.WORLD.daily.craft - ((s.iq?.d === R.isleIndex(t) ? s.iq.craft : 0) || 0)
-    let made = 0
+    const W = R.WORLD
+    const left = W.daily.craft - ((s.iq?.d === R.isleIndex(t) ? s.iq.craft : 0) || 0)
+    const maxRound = Math.min(Math.max(0, left), cfg.craft.maxPerRound || 20)
     const haveQ = (id, q) => R.b12Available(s, id, q)
     // 只用普通(0)和银星(1)做原料，金星(2)留着直接卖。
     // 旧版就是这么做的，重写 v2 时漏了：金星单价 ×1.5，
@@ -855,64 +868,96 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const freeQ = (id, q) => Math.max(0, haveQ(id, q) - (foodReserve[id]?.[q] || 0))
     const have = (id) => freeQ(id, 0) + freeQ(id, 1)
     // 原料按现价算（今天就要消耗掉），产品按未来均价算（做好要囤到峰值才卖）
-    const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
-      const cost = Object.entries(r.in).reduce((a, [id, n]) => a + (prices[id] || 0) * n, 0)
-      const salePrice = expPrices[r.id] || prices[r.id] || r.price
-      return { r, margin: salePrice - cost }
-    }).filter((x) => x.margin > 0).sort((a, b) => b.margin - a.margin)
-    // 加工也要体力（cost.craft，通常 1 点）。体力见底时它是和收割抢资源的那一方：
-    // 实测 24 块番茄全是熟/将熟，体力 0，程序每轮把刚回的那 1 点拿去加工，
-    // 地里 7 块熟的反而一直收不了。加工产物本来就「暂不卖」，不差这几分钟；
-    // 但熟地晚收一分钟就多一分钟被偷的风险。
-    let ripeCount = 0
-    for (let i = 0; i < s.plotN; i++) {
-      const p = s.plots[i]
-      if (!p) continue
-      if (R.cropStage(p, t, R.sprinkled(s, i) || weather === 1).stage === 3) ripeCount++
-    }
-    const craftKeep = ripeCount * (R.WORLD.cost.harvest || 1)
-    const craftBudget = Math.max(0, Math.floor(s.en) - craftKeep)
-    // 配方链（金锭 → 钻石王冠）要同轮打通。
-    //
-    // 以前这里只跑一遍 ranked：王冠的毛利最高，但它的原料金锭还没做出来，
-    // have('ingot') 是 0，于是 n=0 跳过；同一轮做完金锭就结束了，
-    // 王冠必须等下一轮——而 nextWake 可能几分钟后才醒。
-    // 现在按最多 3 层反复跑，push 会实时更新预演状态，做完金锭后
-    // 第二轮就能看到它并用掉。现有配方链最深 2 层，3 层留余量。
-    for (let pass = 0; pass < 3; pass++) {
-      if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
-      const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
-        const cost = Object.entries(r.in).reduce((a, [id, n]) => a + (prices[id] || 0) * n, 0)
-        const salePrice = expPrices[r.id] || prices[r.id] || r.price
-        return { r, margin: salePrice - cost }
-      }).filter((x) => x.margin > 0).sort((a, b) => b.margin - a.margin)
-      let progressed = false
-      for (const { r } of ranked) {
-        if (made >= Math.min(left, cfg.craft.maxPerRound || 20)) break
-        const n = Math.min(
-          left - made,
-          craftBudget - made,
-          ...Object.entries(r.in).map(([id, k]) => Math.floor(have(id) / k)),
-        )
-        if (n <= 0) continue
-        if (push({ a: 'craft', id: r.id, n })) {
-          made += n
-          progressed = true
-          const cost = Object.entries(r.in).reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
-          const sale = (expPrices[r.id] || prices[r.id] || r.price) * n
-          summary.push(`加工 ${r.name}×${n}（成本 ${fmt(cost * n)} → 预期 ${fmt(sale)}，毛利 ${fmt(sale - cost * n)}）`)
+    const recipeById = new Map(R.RECIPES.map((r) => [r.id, r]))
+    // expand：把配方展开成每件成品的「基础材料需求 + 工序数 + 工序顺序」。
+    // 工序顺序是基础 → 成品，提交时照这个顺序做。
+    const expand = (r, depth = 0) => {
+      let cost = 0
+      let steps = 1
+      const need = {}
+      const plan = []
+      for (const [id, k] of Object.entries(r.in)) {
+        const sub = depth < 3 ? recipeById.get(id) : null
+        if (sub) {
+          const b = expand(sub, depth + 1)
+          cost += b.cost * k
+          steps += b.steps * k
+          for (const [bid, bk] of Object.entries(b.need)) need[bid] = (need[bid] || 0) + bk * k
+          for (const st of b.plan) plan.push({ id: st.id, n: st.n * k })
+        } else {
+          cost += (prices[id] || 0) * k
+          need[id] = (need[id] || 0) + k
         }
       }
-      if (!progressed) break
+      plan.push({ id: r.id, n: 1 })
+      return { cost, steps, need, plan }
+    }
+    // 按「每点体力的毛利」排序：配方链要花多道工序，只比绝对毛利会高估它。
+    const ranked = R.RECIPES.filter((r) => r.price).map((r) => {
+      const b = expand(r)
+      const salePrice = expPrices[r.id] || prices[r.id] || r.price
+      return { r, margin: salePrice - b.cost, steps: b.steps, need: b.need, plan: b.plan }
+    }).filter((x) => x.margin > 0).sort((a, b) => b.margin / b.steps - a.margin / a.steps)
+    // 虚拟扣库存：同一批材料不能同时算给两个配方。
+    const virt = {}
+    const haveV = (id) => Math.max(0, have(id) - (virt[id] || 0))
+    // 中间品（金锭这类本身也是加工品的东西）：库存够就直接用，不必再造。
+    const craftable = new Set(R.RECIPES.map((r) => r.id))
+    const addUnit = (r, gain, cost, plan, variant) => craftUnits.push({
+      key: 'craft:' + r.id + ':' + variant,
+      craftId: r.id,
+      variant,
+      name: r.name,
+      cost,
+      gain,
+      plan,
+      act: { a: 'craft', id: r.id, n: 1 },
+    })
+    // quota 按「件数」计（站点额度就是这么扣的）：王冠一件要占 2 件额度。
+    let quota = 0
+    for (const e of ranked) {
+      if (quota >= maxRound) break
+      const capByQuota = Math.floor((maxRound - quota) / e.steps)
+      const subs = Object.entries(e.r.in).filter(([id]) => craftable.has(id))
+      // 批次 A：库存里已有的中间品直接用（1 点体力、1 件额度）。
+      let nStock = 0
+      if (subs.length) {
+        const capByStock = Math.min(...subs.map(([id, k]) => Math.floor(haveV(id) / k)))
+        const raws = Object.entries(e.r.in).filter(([id]) => !craftable.has(id))
+        const capByRaw = raws.length
+          ? Math.min(...raws.map(([id, k]) => Math.floor(haveV(id) / k)))
+          : capByQuota
+        nStock = Math.max(0, Math.min(capByQuota, capByStock, capByRaw))
+      }
+      if (nStock > 0) {
+        const costNow = Object.entries(e.r.in)
+          .reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
+        const marginNow = (expPrices[e.r.id] || prices[e.r.id] || e.r.price) - costNow
+        // 中间品按市场价计机会成本后仍不赚钱 → 这批不做，额度让给下面自造的那批。
+        if (marginNow > 0) {
+          for (const [id, k] of Object.entries(e.r.in)) virt[id] = (virt[id] || 0) + k * nStock
+          quota += nStock
+          for (let i = 0; i < nStock; i++) addUnit(e.r, marginNow, W.cost.craft || 1, [{ id: e.r.id, n: 1 }], 'stock')
+        } else nStock = 0
+      }
+      // 批次 B：余下的自己造中间品（工序数与基础材料都按全链算）。
+      const capByMat = Math.min(
+        ...Object.entries(e.need).map(([id, k]) => Math.floor(haveV(id) / k)),
+      )
+      const n = Math.max(0, Math.min(capByQuota - nStock, capByMat))
+      if (n <= 0) continue
+      for (const [id, k] of Object.entries(e.need)) virt[id] = (virt[id] || 0) + k * n
+      quota += n * e.steps
+      for (let i = 0; i < n; i++) addUnit(e.r, e.margin, (W.cost.craft || 1) * e.steps, e.plan, 'chain')
     }
   }
 
-  // ---------- 8. 花体力做最高收益的事（钓/挖/炸） ----------
+  // ---------- 8. 花体力做最高收益的事（钓/挖/炸/加工） ----------
   //
   // 三处「往后看一眼」的判断：
   //   keep   —— 马上要熟的地，先把收获体力留出来，别全花在钓鱼上
   //   fishOK —— 钓鱼有时段，低谷期不钓，等最佳时段
-  //   背包   —— 钓鱼/挖矿/炸矿的单位收益不同、额度与现金约束不同，
+  //   背包   —— 钓鱼/挖矿/炸矿/加工的单位收益不同、额度与现金约束不同，
   //             用有界背包一次求出最优组合（见 core/stamina-dp.mjs），
   //             再和口粮成本曲线比一次，决定吃多少口粮。
   if (cfg.work) {
@@ -1054,7 +1099,8 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 少挖一次换成钓鱼。榜一把所有「体力换钱」的活展开成单位物品做背包：
     //   · 钓鱼：分「库存鱼饵」「无鱼饵」两档收益（带饵贵鱼权重 ×2、脱钩率 −8 个点）；
     //   · 挖矿：额度封顶；
-    //   · 炸矿：额度、炸弹库存、矿层封顶。
+    //   · 炸矿：额度、炸弹库存、矿层封顶；
+    //   · 加工：按配方毛利，受加工额度与原料库存封顶（候选由第 7 段生成）。
     // 求出「可用体力 e 以内的最大收益」之后，再和口粮成本曲线比一次，
     // 决定要不要吃口粮、补到几点。
     const iqUsed = (k) => ((s.iq?.d === R.isleIndex(t) ? s.iq[k] : 0) || 0)
@@ -1077,7 +1123,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 需要这条下限——否则矿价低谷时会用免费体力去做几乎不赚钱的活。
     const minV = eatCost * (cfg.work.minValueRatio ?? 1.2)
 
-    const units = []
+    const units = [...craftUnits]
     if (fishLeft > 0) {
       // 带饵只在「真能提高期望收益」时才用：库存饵是免费的，但 fishEV 里
       // 仍按 400 D/个扣成本，所以低价鱼池时带饵反而更差，这时不用饵。
@@ -1163,12 +1209,29 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 选 e 时同时检查动作槽位：DP 的一件活 = 一条动作，吃一份口粮也是
     // 一条动作。旧贪心先按 40 条上限停手，DP 不知道这个上限，会算出
     // 「吃 12 份、钓 26 竿」这种被截断的方案，反而比吃 9 份钓 29 竿差。
+    // DP 里的一件活 = 一条动作；但同一配方的加工可以合并成一条
+    //（服务端 n ≤ 20）。槽位估算必须按合并后的条数算，
+    // 否则 20 件加工会被当成 20 条动作，白白放弃本来放得下的组合。
+    const actCountOf = (sel) => {
+      const byCraft = new Map()
+      let n = 0
+      for (const u of sel) {
+        if (u.craftId) {
+          const k = u.craftId + ':' + u.variant
+          const g = byCraft.get(k) || { n: 0, steps: u.plan?.length || 1 }
+          g.n++
+          byCraft.set(k, g)
+        } else n++
+      }
+      for (const g of byCraft.values()) n += Math.ceil(g.n / 20) * g.steps
+      return n
+    }
     const slotLeft = Math.max(0, MAX - actions.length)
     // 先用「不吃口粮」的体力找可行的最大组合（同样受槽位限制）。
     let bestE = 0
     let bestNet = 0
     for (let e = Math.min(availEn, dp.E); e >= 0; e--) {
-      if (dp.reconstructAt(e).length > slotLeft) continue
+      if (actCountOf(dp.reconstructAt(e)) > slotLeft) continue
       bestE = e
       bestNet = dp.bestAtMost[e]
       break
@@ -1181,7 +1244,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
         if (d < 0 || d > maxEat) continue
         const fc = costAt[d]
         if (!Number.isFinite(fc)) continue
-        if (dp.reconstructAt(e).length + cntAt[d] > slotLeft) continue
+        if (actCountOf(dp.reconstructAt(e)) + cntAt[d] > slotLeft) continue
         const net = dp.bestAtMost[e] - fc
         if (net > bestNet + 1e-6) {
           bestNet = net
@@ -1194,12 +1257,45 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // src 已按每点成本排好序，指针只往前走，和 costAt 的估算口径一致。
     // 单件失败（缺炸弹/矿层不够）只丢这一件，不像旧版把整类活一起否掉。
     let srcIdx = 0
-    for (const it of dp.reconstructAt(bestE)) {
-      while (s.en < it.cost && srcIdx < src.length) {
+    const ensureEn = (need) => {
+      while (s.en < need && srcIdx < src.length) {
         if (!push({ ...src[srcIdx].act })) break
         srcIdx++
       }
-      if (s.en < it.cost) break
+      return s.en >= need
+    }
+    const chosen = dp.reconstructAt(bestE)
+    for (let i = 0; i < chosen.length; i++) {
+      const it = chosen[i]
+      if (it.craftId) {
+        // 同一配方的加工合并成一条动作（服务端单条最多 20 件）。
+        // 配方链按 plan 的工序顺序执行：先做中间品，再做成品。
+        let j = i
+        while (j < chosen.length && chosen[j].craftId === it.craftId && chosen[j].variant === it.variant) j++
+        const k = j - i
+        const unitCost = R.WORLD.cost.craft || 1
+        const steps = new Map()
+        for (const st of it.plan) steps.set(st.id, 0)
+        for (let x = 0; x < k; x++) for (const st of it.plan) steps.set(st.id, steps.get(st.id) + st.n)
+        let stalled = false
+        let done = 0
+        for (const [id, total] of steps) {
+          let rest = total
+          while (rest > 0) {
+            if (!ensureEn(unitCost)) { stalled = true; break }
+            const batch = Math.min(20, Math.floor(s.en / unitCost), rest)
+            if (batch <= 0 || !push({ a: 'craft', id, n: batch })) { stalled = true; break }
+            rest -= batch
+            if (id === it.craftId) done += batch
+          }
+          if (stalled) break
+        }
+        if (done > 0) summary.push(`加工 ${it.name}×${done}（毛利 ${fmt(it.gain * done)}）`)
+        i = j - 1
+        if (stalled) break
+        continue
+      }
+      if (!ensureEn(it.cost)) break
       if (!push({ ...it.act })) break
     }
   }
