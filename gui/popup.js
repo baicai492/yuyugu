@@ -171,8 +171,8 @@ function renderOverview() {
     return el
   }))
 
-  $('earn').textContent = '+' + fmt(status.ledger.earn)
-  $('spend').textContent = '−' + fmt(status.ledger.spend)
+  $('earn').textContent = status.ledger.earn ? '+' + fmt(status.ledger.earn) : '0'
+  $('spend').textContent = status.ledger.spend ? '−' + fmt(status.ledger.spend) : '0'
   $('tax').textContent = fmt(status.ledger.tax)
   // 现金盈亏 = 收入 − 支出；差额（余额税、罚款、手动买卖等）单独列一行，
   // 否则「收入 − 支出」和实际余额对不上时看不出原因。
