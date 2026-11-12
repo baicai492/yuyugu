@@ -270,6 +270,8 @@ export function sellPlan(R, now, world, cfg = {}) {
       isCrop, qAvg: qSum / qty, keepDays: cfg.terminalDays ?? 4,
     })
     const liqQuote = netSaleQuote(R, wallet, paid, Math.round(liq.gross))
+    // 逐件最优分配的总收入（税后）。和 netNow 口径一致，才能直接比较。
+    const allocQuote = netSaleQuote(R, wallet, paid, Math.round(alloc.netOptimal))
 
     let best = { k: 0, price: p0, net: nowQuote.net, gross: grossNow }
     for (let k = 1; k < fc.length; k++) {
@@ -294,7 +296,7 @@ export function sellPlan(R, now, world, cfg = {}) {
       line: Math.round(best.price * (1 - markdown)),
       todayQty: alloc.today,
       allocPlan: alloc.plan,
-      allocNet: alloc.netOptimal,
+      allocNet: allocQuote.net,
       sellNow: alloc.today > 0,
       isCrop, soldToday, tierRatio: ratio,
     })
