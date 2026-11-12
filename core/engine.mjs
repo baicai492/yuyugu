@@ -11,7 +11,7 @@ import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
-import { shouldSnipe, noteSnipeResult } from './steal-schedule.mjs'
+import { shouldSnipe, noteSnipeResult, waveLeadSec } from './steal-schedule.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -809,7 +809,10 @@ export class Engine {
         need: stealE, maxPerE: this.cfg.social.steal.maxEnergyCost ?? 600, cfg: this.cfg, coins: w.coins,
       })
       if (canSteal) {
-        const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
+        // 提前量按这一波的岛数算：醒来后要串行访问每家 ~1.5 秒，
+        // 固定 8 秒在 4~5 家同波时根本访问不完。
+        const leadSec = this.cfg.social.steal.prepLeadSec ||
+          waveLeadSec(this.memo.stealSchedule || {}, t)
         const nx = shouldSnipe(this.memo, this.memo.stealSchedule || {}, t, { leadSec })
         if (nx) {
           this.memo.stealWakeAt = t

@@ -4,7 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { updateIsleSchedule, nextUnlock, nextWave, waveLeadSec, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -415,26 +415,29 @@ export async function stealIsle(world, id) {
  * 榜一 snipe-scheduler 提前用 T_prep 算好准备时间，醒来直接对目标发包；
  * 我们至少做到：掐点这一轮只访问调度表里到点的那几家。
  */
-function nearestUnlockTargets(schedule, watch, now, leadSec, limit = 3) {
-  const rows = []
-  for (const [id, rec] of Object.entries(schedule || {})) {
-    for (const u of rec?.upcoming || []) {
-      // 太早的不算（还没到准备窗口），太晚的不算（已经放弃）
-      if (u.unlockAt < now - WAKE_GRACE_SEC) continue
-      if (u.unlockAt > now + leadSec + 5) continue
-      rows.push({ id: Number(id), at: u.unlockAt })
+/**
+ * 取「当前这一波」里要访问的岛。
+ *
+ * 以前只取最早的 3 家，同波的其他岛要等下一轮——偷菜的窗口只有几十秒，
+ * 等下一轮基本就是别人的了。现在按 nextWave 把 ±2 秒内解禁的条目聚成
+ * 一波，整波一起访问；上限 5 家（再多访问也赶不上窗口，还会把请求间隔拖长）。
+ *
+ * 注意：这里只决定「访问谁」，具体偷哪些由 targetsFromIsle 按货值/守家胜率
+ * 重新算，所以多访问一家的代价只是一次 visit（不花体力）。
+ */
+function waveTargets(schedule, watch, now, leadSec, limit = 5) {
+  const wave = nextWave(schedule, now, { leadSec, waveSpanSec: 2 })
+  if (!wave) return []
+  return wave.isles.slice(0, limit).map(({ targetId, entries }) => {
+    const w = watch?.[targetId] || {}
+    return {
+      targetId,
+      name: w.name || `岛 ${targetId}`,
+      level: w.level || 1,
+      at: entries[0].at,
+      items: entries.map((e) => e.item).filter(Boolean),
     }
-  }
-  rows.sort((a, b) => a.at - b.at)
-  const seen = new Set(), out = []
-  for (const r of rows) {
-    if (seen.has(r.id)) continue
-    seen.add(r.id)
-    const w = watch?.[r.id] || {}
-    out.push({ targetId: r.id, name: w.name || `岛 ${r.id}`, level: w.level || 1, at: r.at })
-    if (out.length >= limit) break
-  }
-  return out
+  })
 }
 
 export async function stealRound(world, cfg, log = () => {}, memo = {}) {
@@ -443,7 +446,10 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const R = world.R
   const lastScan = memo.stealScanAt || 0
   const every = st.scanEvery ?? 1800
-  const leadSec = st.prepLeadSec ?? 8
+  // 提前量 T_prep：配置显式指定就照用，否则按「这一波有几家」算——
+  // 醒来后要串行访问每一家（约 1.5 秒/家），访问完最后一家刚好越过解禁点。
+  // 固定 8 秒时，一波 4~5 家根本访问不完，第一家还没提交就过窗口了。
+  const leadSec = st.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, world.now)
 
   // 先把「已经处理过 / 已经失效」的解禁记录清掉，再判断要不要绕过扫描间隔。
   //
@@ -530,9 +536,9 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     // 于是「醒来 → refreshWatchList 拉 40~50 页目录 → watchRound 访问
     // 12 家（每家 sleep 900ms）→ 才开始偷」，几十秒过去了，
     // 解禁的货早被别人抢光。线上 2026-11-12 记下 250 处待解禁、偷到 0 件。
-    const cands = nearestUnlockTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 3)
+    const cands = waveTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 5)
     if (cands.length) {
-      log(`偷菜：${snipeReady ? '解禁时刻到了' : '有已解禁未处理的目标'}，直接抢 ${cands.length} 家（不扫目录）`)
+      log(`偷菜：${snipeReady ? '解禁时刻到了' : '有已解禁未处理的目标'}，直接抢这一波 ${cands.length} 家（不扫目录）`)
       const out = []
       for (const c of cands) {
         let info
@@ -547,13 +553,27 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
         if (!targets.length) continue
         out.push({
           id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard,
+          at: c.at,
           targets, value,
           detect: R.b12Detection(info.state || {}, world.state, world.now, 0),
           fineMax: rules.fineMax || 5000,
           energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
         })
       }
-      if (out.length) return await stealFromTargets(world, cfg, log, memo, out)
+      if (out.length) {
+        // 访问完全部岛时可能还没到解禁时刻：T_prep 是按访问耗时反推的，
+        // 但 http 间隔和网络抖动都会带来偏差。早提交会被服务端判
+        // steal=false 直接拒掉，所以宁可在这里等到点，也不发无效请求。
+        const waveAt = Math.min(...out.map((o) => o.at).filter((x) => Number.isFinite(x)))
+        const waitMs = Number.isFinite(waveAt)
+          ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+          : 0
+        if (waitMs > 0) {
+          log(`偷菜：访问完 ${out.length} 家，距解禁还有 ${(waitMs / 1000).toFixed(1)} 秒，等到点再动手`)
+          await sleep(Math.min(waitMs, 15000))
+        }
+        return await stealFromTargets(world, cfg, log, memo, out)
+      }
       // 到点了但货已经没了（被抢 / 被偷满）。把这些过时记录清掉，
       // 否则下一轮还是 overdue，主循环会被它反复催醒。
       for (const c of cands) {

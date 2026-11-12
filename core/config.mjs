@@ -211,7 +211,10 @@ export const DEFAULTS = {
       dirPages: 60,
       checkEvery: 1800,          // 某座岛多久没看过就值得再看一眼（秒）；对齐旧版 recheck
       watchEvery: 120,           // 巡逻一批的最短间隔（秒）；53 座岛约 7 分钟轮完一圈
-      prepLeadSec: 8,            // 解禁时刻提前几秒醒来准备（旧版 prep+lead）
+      // 解禁时刻提前几秒醒来准备（旧版 prep+lead）。
+      // 0 = 自动：按这一波有几家岛算（每家访问约 1.5 秒 + 4 秒余量）。
+      // 固定值只有在想强制覆盖时才设。
+      prepLeadSec: 0,
       minEV: 3000,               // 期望收益低于这个就不去偷（旧版 steal.minEV）
       useCloak: true,            // 买轻步斗篷（被发现率 −10 个百分点）
       useSack: true,             // 买折叠菜篮（每处多拿 1 个）

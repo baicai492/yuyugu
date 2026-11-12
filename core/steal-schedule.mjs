@@ -214,6 +214,79 @@ export function noteSnipeResult(memo, got) {
 }
 
 /**
+ * 把「同一瞬间解禁」的条目聚成一波。
+ *
+ * 一次巡逻看到的多块地，成熟时刻只差几秒；服务端按「成熟 + 保护期」
+ * 算出的解禁时刻也就差几秒。以前 nextUnlock 只返回最早的那一条，
+ * 同波的另外几家要等下一轮——而偷菜的窗口只有几十秒，下一轮基本
+ * 就轮到别人了。
+ *
+ * @returns {{ at, targets, isles, wakeIn } | null}
+ *   targets  波内所有条目 [{ targetId, kind, i, item, at, exact }]
+ *   isles    按岛聚合 [{ targetId, entries }]，按最早解禁排序
+ */
+export function nextWave(schedule, now, { leadSec = 0, waveSpanSec = 2, graceSec = WAKE_GRACE_SEC } = {}) {
+  let base = Infinity
+  for (const rec of Object.values(schedule || {})) {
+    for (const u of rec?.upcoming || []) {
+      if (u.unlockAt < now - graceSec) continue
+      if (u.unlockAt < base) base = u.unlockAt
+    }
+  }
+  if (!Number.isFinite(base)) return null
+
+  const targets = []
+  for (const [id, rec] of Object.entries(schedule || {})) {
+    for (const u of rec?.upcoming || []) {
+      // base 已经是最早的那条，比它早的只可能是刚刚过期、被上面跳过的记录
+      if (u.unlockAt < base || u.unlockAt > base + waveSpanSec) continue
+      targets.push({
+        targetId: Number(id), kind: u.kind, i: u.i, item: u.item || '',
+        at: u.unlockAt, exact: !!u.exact,
+      })
+    }
+  }
+  const byIsle = new Map()
+  for (const t of targets) {
+    if (!byIsle.has(t.targetId)) byIsle.set(t.targetId, [])
+    byIsle.get(t.targetId).push(t)
+  }
+  const isles = [...byIsle.entries()]
+    .map(([targetId, entries]) => ({ targetId, entries }))
+    .sort((a, b) => a.entries[0].at - b.entries[0].at)
+  return {
+    at: base,
+    targets,
+    isles,
+    wakeIn: Math.max(1, base - now - leadSec),
+  }
+}
+
+/**
+ * 提前量 T_prep：解禁前多少秒该醒。
+ *
+ * 醒来后要先串行访问波内每一家（visitInfo，约 1.5 秒/家）拿最新的
+ * steal 标记，访问完最后一家才能开始提交。所以提前量 ≈ 访问耗时
+ * 加一次请求间隔的余量：
+ *   · 太早——白等，还可能在等待期间被别人抢走
+ *   · 太晚——访问完就已经过了窗口
+ *
+ * 上限 30 秒：一波再大也只能先到先得，跑不完的部分留给下一轮
+ * （醒来后按价值排序，高价值的先跑）。
+ */
+export function prepLeadSec(nIsles, { visitSec = 1.5, slackSec = 4, maxSec = 30 } = {}) {
+  const n = Math.max(1, Number(nIsles) || 1)
+  return Math.min(maxSec, Math.max(2, Math.ceil(n * visitSec + slackSec)))
+}
+
+/** 当前这一波该提前几秒醒；没有待解禁记录时返回 fallback */
+export function waveLeadSec(schedule, now, { fallback = 8, ...opts } = {}) {
+  const wave = nextWave(schedule, now, { ...opts, leadSec: 0 })
+  if (!wave) return fallback
+  return prepLeadSec(wave.isles.length, opts)
+}
+
+/**
  * 汇总调度表，给 GUI / 日志用。
  */
 export function scheduleSummary(schedule, now) {

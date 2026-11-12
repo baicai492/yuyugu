@@ -8,7 +8,7 @@
 //   4. 投资只看回本周期
 import * as M from './market.mjs'
 import { planVault } from './warehouse.mjs'
-import { nextUnlock, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { nextUnlock, waveLeadSec, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 
 const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -1704,7 +1704,11 @@ export function nextWake(world, cfg, memo = {}) {
       // 偷到过 60 秒一次，连续白醒翻倍到 15 分钟（见 steal-schedule.mjs）。
       const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
       const wakeReady = t - (memo.stealWakeAt || 0) >= gap
-      const nx = wakeReady ? nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 }) : null
+      const nx = wakeReady
+        ? nextUnlock(memo.stealSchedule || {}, t, {
+          leadSec: cfg.social.steal.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, t),
+        })
+        : null
       if (nx) {
         // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
         push(Math.min(left > 0 ? left : 5, nx.wakeIn))

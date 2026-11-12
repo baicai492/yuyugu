@@ -10,6 +10,7 @@
 //   3. 不能睡过换岛日边界
 import { loadRulesCached } from '../core/rules.mjs'
 import { nextWake } from '../core/planner.mjs'
+import { nextWave, waveLeadSec, prepLeadSec } from '../core/steal-schedule.mjs'
 import { loadConfig } from '../core/config.mjs'
 
 const R = await loadRulesCached()
@@ -179,6 +180,40 @@ console.log('\n[8] 有地块即将成熟 → 不能睡到 idleSleepCap 把成熟
   ok(nap <= Math.ceil(st.left) + 5,
     '醒在成熟时刻（不能睡过它）', `nap=${nap} left=${Math.round(st.left)}`)
   ok(nap < cap, '不会睡满 idleSleepCap', `nap=${nap} cap=${cap}`)
+}
+
+console.log('\n[9] 偷菜整波：同时解禁的岛要一波跑完，T_prep 按波大小算')
+{
+  const t0 = now
+  // 三座岛：13 号、27 号同一秒解禁，41 号晚 5 秒（不算同一波）
+  const schedule = {
+    13: { upcoming: [{ kind: 'plot', i: 0, unlockAt: t0 + 10, item: 'turnip', exact: true }] },
+    27: { upcoming: [
+      { kind: 'plot', i: 1, unlockAt: t0 + 10, item: 'corn', exact: true },
+      { kind: 'pen', i: 2, unlockAt: t0 + 11, item: 'egg', exact: true },
+    ] },
+    41: { upcoming: [{ kind: 'plot', i: 0, unlockAt: t0 + 15, item: 'wheat', exact: true }] },
+  }
+  const wave = nextWave(schedule, t0, { waveSpanSec: 2 })
+  ok(wave && wave.targets.length === 3, '同一波聚了 3 个条目', `targets=${wave?.targets.length}`)
+  ok(wave && wave.isles.length === 2, '聚成 2 座岛（27 号两块地并成一家）', `isles=${wave?.isles.length}`)
+  ok(wave && wave.at === t0 + 10, '波基准是最早的解禁时刻', `at=+${wave?.at - t0}`)
+  ok(wave && !wave.isles.some((x) => x.targetId === 41), '晚 5 秒的那家不在这一波')
+
+  // T_prep：每家访问 1.5 秒 + 4 秒余量
+  ok(prepLeadSec(1) === 6, '1 家岛提前 6 秒（1.5+4 向上取整）', `got=${prepLeadSec(1)}`)
+  ok(prepLeadSec(4) === 10, '4 家岛提前 10 秒', `got=${prepLeadSec(4)}`)
+  ok(prepLeadSec(99) === 30, '再大的波也封顶 30 秒', `got=${prepLeadSec(99)}`)
+  ok(waveLeadSec(schedule, t0) === prepLeadSec(2), 'waveLeadSec 按这一波的岛数算', `got=${waveLeadSec(schedule, t0)}`)
+
+  // 已经过点 31 秒的记录不再当唤醒理由（WAKE_GRACE_SEC=30）
+  const stale = { 9: { upcoming: [{ kind: 'plot', i: 0, unlockAt: t0 - 31, item: 'turnip' }] } }
+  ok(nextWave(stale, t0) === null, '过点 31 秒的记录不再聚波')
+
+  // 过点 10 秒仍在宽限内 → 还是要跑（overdue 快速路径靠它）
+  const late = { 9: { upcoming: [{ kind: 'plot', i: 0, unlockAt: t0 - 10, item: 'turnip' }] } }
+  const wl = nextWave(late, t0)
+  ok(wl && wl.isles.length === 1 && wl.wakeIn === 1, '过点 10 秒仍在宽限内，wakeIn 夹到 1 秒', `wakeIn=${wl?.wakeIn}`)
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
