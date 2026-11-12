@@ -147,7 +147,12 @@ export const DEFAULTS = {
 
   // 串门
   social: {
-    help: { enabled: true, perDay: 10, minEnergy: 20 },  // 帮忙：200 D + 2 经验/次
+    // 帮忙：200 D + 2 经验/次，每家只要 1 点体力。
+    // minEnergy 以前是 20，但线上体力长期在 5~15 徘徊（24 块地不停地熟、
+    // keep 又一直预留收割体力），结果帮忙在 5/10 家就停住了，
+    // 连续 29 次静默跳过——日志里连一句都没有。
+    // 帮忙是全游戏性价比最高的事（1 体力换 200 D），门槛低到 5 点即可。
+    help: { enabled: true, perDay: 10, minEnergy: 5 },
     steal: {
       enabled: false,            // 偷菜默认关（风险高，需要擂台等级支撑）
       minValue: 3000,            // 一批货的市价低于这个不去

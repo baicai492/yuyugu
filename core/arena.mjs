@@ -99,6 +99,14 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle } = {}) 
   const drops = gear.daily?.drops ?? 30
   const today = gear.daily?.battles ?? 0
   const need = Math.max(0, (a.battles ?? 30) - today)
+  // 场次打满时以前是整段静默跳过，日志里连「今天打过擂台」都看不到，
+  // 分不清是额度用完还是功能没跑。状态变化时说明一次。
+  if (need <= 0 && world.arenaIdleReason !== today) {
+    world.arenaIdleReason = today
+    log(`擂台：今日场次已满（${today}/${a.battles ?? 30}），只做换装/开箱/加点`)
+  } else if (need > 0) {
+    world.arenaIdleReason = 0
+  }
   if (need > 0) {
     let opponents = []
     // 站点 a4a62d77 起支持 minLevel/maxLevel 筛选。先只取比我低 5 级以内的，

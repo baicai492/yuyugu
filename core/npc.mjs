@@ -18,7 +18,20 @@ export async function playGomoku(world, cfg, log = () => {}) {
   const dailyLeft = Math.max(0, R.NPC.daily - used)
   const level = cfg.npc?.gomokuLevel || 3
   const maxGames = Math.min(cfg.npc?.gomokuMaxGames ?? 10, paidLeft, dailyLeft)
-  if (maxGames <= 0) return { games: 0, wins: 0, coins: 0, items: {} }
+  if (maxGames <= 0) {
+    // 打满了就直接返回，但要留一行说明——否则日志里完全没有五子棋的痕迹，
+    // 分不清是「额度用完了」还是「功能挂了/配置关了」。
+    // 只在状态变化时打一次，避免每轮刷屏。
+    const why = paidLeft <= 0
+      ? `今日计奖局数已满（${paid}/${R.GOMOKU_PAID}），等明天重置`
+      : `今日 52弟 次数已满（${used}/${R.NPC.daily}）`
+    if (world.gomokuIdleReason !== why) {
+      world.gomokuIdleReason = why
+      log(`五子棋：${why}`)
+    }
+    return { games: 0, wins: 0, coins: 0, items: {} }
+  }
+  world.gomokuIdleReason = ''
 
   let games = 0, wins = 0, coins = 0
   const items = {}

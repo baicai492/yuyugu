@@ -68,7 +68,15 @@ console.log(`\n[1] 全部做完 → 长睡（cap=${cap}）`)
   const plots = Array(6).fill(null).map(() => ({ c: growing.id, t: now, w: 3, g: 0, y: 0, sv: [] }))
   const w = mkWorld({ plots })
   const nap = nextWake(w, workOnly, allDone)
-  ok(nap === cap, `额度全空 + 地都在长 → ${cap} 秒`, `got=${nap}`)
+  // 换岛日边界如果比 cap 更近，睡到边界是对的（见用例 2）。
+  // 这里只在边界确实更远时才要求睡满 cap，否则这条测试会随时辰飘。
+  const dayLeft = R.b12NextIsleBoundary(now) - now
+  if (dayLeft > cap + 10) {
+    ok(nap === cap, `额度全空 + 地都在长 → ${cap} 秒`, `got=${nap}`)
+  } else {
+    ok(nap <= Math.ceil(dayLeft) + 5,
+      `边界（${Math.round(dayLeft)} 秒）比 cap 近 → 睡到边界`, `got=${nap}`)
+  }
   ok(nap > (workOnly.loop?.maxSleep ?? 120), '不会退回到 maxSleep 的短间隔', `maxSleep=${workOnly.loop?.maxSleep}`)
 }
 

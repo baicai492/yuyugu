@@ -83,3 +83,33 @@ export function configureClock(clockStart) {
   if (R.b12ClockStart() === clockStart) return
   R.b12ConfigureClock(clockStart)
 }
+
+/**
+ * 运行时检查站点规则是否换了版本，变了就重新下载并热替换。
+ *
+ * 之前 `loadRules` 只在进程启动时调一次，站点夜里更新规则后，
+ * 运行中的进程会一直用旧规则算到下次重启为止——而中间可能隔好几天。
+ * 后果不是报错，而是「悄悄用错的公式做决策」：
+ * 季节判错、价格算错、五子棋 AI 版本对不上，全都不报错，只是收益变低。
+ * （今天排查时也踩过类似的坑：本地 cropStage 判番茄枯萎、服务端却允许收获。）
+ *
+ * 返回 { changed, from, to } 或 null（没变化/取不到版本号）。
+ * 任何异常都吞掉：规则检查失败不该影响正常托管。
+ */
+export async function checkRulesUpdate({ baseUrl, cookie } = {}) {
+  try {
+    const before = currentVer
+    const v = await fetchVersion(baseUrl, cookie || '')
+    if (!v || v === before) return null
+    // 新模块实例的 b12ClockEpoch 是 0，热替换后必须立刻补喂 clockStart，
+    // 否则 isleIndex/seasonOf 会全部算错（本地以为秋天、服务端还是夏天）。
+    const epoch = R?.b12ClockStart?.() || 0
+    await loadRules({ baseUrl, ver: v, cookie, force: true })
+    if (epoch && R?.b12ConfigureClock) {
+      try { R.b12ConfigureClock(epoch) } catch {}
+    }
+    return { changed: currentVer !== before, from: before, to: currentVer }
+  } catch {
+    return null
+  }
+}

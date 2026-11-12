@@ -52,7 +52,20 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
   let helped = 0, coins = 0
   const perDay = g.perDay ?? 10
   if ((memo.helpCount || 0) >= perDay) return { helped: 0, coins: 0 }
-  if (world.state.en < (g.minEnergy ?? 20)) return { helped: 0, coins: 0 }
+  // 体力不够就先攒。但**必须说一声**：以前这里直接 return，
+  // 日志里完全看不出帮忙停摆的原因，只能看到偷菜那一行，
+  // 让人以为帮忙根本没被调用（实测今天停在 5/10 家，29 次静默跳过）。
+  const needE = g.minEnergy ?? 20
+  if (world.state.en < needE) {
+    const last = memo.helpWaitLogged
+    // 只在体力档次变化时打一次，别每轮刷屏
+    if (last !== `${memo.helpCount}|${Math.floor(world.state.en)}`) {
+      memo.helpWaitLogged = `${memo.helpCount}|${Math.floor(world.state.en)}`
+      log(`帮忙：等体力（当前 ${Math.floor(world.state.en)}，要 ${needE} 才动手）` +
+        `，今日 ${memo.helpCount || 0}/${perDay}`)
+    }
+    return { helped: 0, coins: 0 }
+  }
 
   let cursor = null
   let pages = 0, scanned = 0, skippedNewbie = 0, tried = 0
@@ -221,10 +234,14 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   memo.stealScanAt = world.now
   const targets = await scanStealTargets(world, cfg, log, memo)
   let stolen = 0, value = 0, tried = 0
+  // 有目标但一个都偷不了时，说明是体力不够。要说明白，
+  // 否则日志里只有「找到 N 家可偷」然后什么都没发生，看不出原因。
+  let starved = 0
   for (const tg of targets) {
     if (tried >= (st.visitsPerScan ?? 8)) break
     if (tg.value < (st.minValue ?? 3000)) continue
-    if (world.state.en < Math.min(tg.energy, st.maxEnergy ?? 15)) break
+    const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
+    if (world.state.en < needE) { starved++; continue }
     tried++
     try {
       const r = await stealIsle(world, tg.id)
@@ -279,5 +296,12 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   }
   if (stolen) log(`本轮偷菜小结：${stolen} 处，${Math.round(value).toLocaleString('en-US')} D（去了 ${tried} 家）`)
   else if (tried) log(`本轮偷菜：去了 ${tried} 家，没有收获`)
+  else if (starved) {
+    const costs = targets
+      .filter((t) => t.value >= (st.minValue ?? 3000))
+      .map((t) => Math.min(t.energy, st.maxEnergy ?? 15))
+    const cheapest = costs.length ? Math.min(...costs) : (st.maxEnergy ?? 15)
+    log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点）`)
+  }
   return { stolen, value }
 }

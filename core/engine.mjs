@@ -3,6 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
+import { checkRulesUpdate, rulesVersion } from './rules.mjs'
 import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
@@ -200,6 +201,19 @@ export class Engine {
     this.setStep('读取世界状态')
     await w.refresh()
     this.ensureLedger()
+
+    // 站点规则热重载：每小时查一次版本号，变了就重新下载并补喂 clockStart。
+    // 以前只在进程启动时加载一次，站点改规则后要等到下次重启才能用上新公式，
+    // 中间会一直「悄悄用错的规则做决策」，不报错、只是收益变低。
+    try {
+      const lastChk = this.memo.rulesCheckedAt || 0
+      if (w.now - lastChk > 3600) {
+        this.memo.rulesCheckedAt = w.now
+        const u = await checkRulesUpdate({ baseUrl: this.cfg.baseUrl })
+        if (u?.changed) this.log(`站点规则已更新：${u.from} → ${u.to}，已热替换（时钟已重新校准）`)
+      }
+    } catch (e) { /* 规则检查失败不影响托管 */ }
+
     // 本轮巡视的起点，收尾时对比「这次巡视赚了多少」（和旧版一样的口径）
     const startCoins = w.coins
     const startStock = w.stockValue()
@@ -366,6 +380,12 @@ export class Engine {
       this.log(`本轮没有做成任何动作但唤醒间隔只有 ${sleep} 秒，退避到 ${cool} 秒`, 'warn')
       sleep = cool
     }
+    // 把「为什么睡这么久」讲清楚。以前只有一行「岛日…体力…」，
+    // 完全看不出下一轮打算做什么、什么在等、为什么不做钓鱼/偷菜/帮忙。
+    // 这段每天只多几十行，但能省掉大量「看起来在空转」的误会。
+    if (!cfg.dry) {
+      try { this.log(this.describeNext(sleep)) } catch {}
+    }
     this.status = {
       state: 'waiting',
       step: '',
@@ -377,6 +397,93 @@ export class Engine {
     }
     this.busy = false
     return { sleep, plan }
+  }
+
+  /**
+   * 「下次安排」：把这一轮到下一轮之间在等什么、为什么这么等讲清楚。
+   *
+   * 起因：日志里只有「岛日…体力…库存」和「每点体力收益」两行，
+   * 看不出偷菜/帮忙/五子棋/擂台到底跑没跑、为什么没跑。
+   * 线上排查时就吃过这个亏——帮忙停在 5/10 家、连续 29 次静默跳过，
+   * 日志里一个字都没有，只能翻代码才知道是体力没到 minEnergy。
+   */
+  describeNext(sleep) {
+    const w = this.world
+    if (!w?.ready) return '下次巡视：' + Math.round(sleep) + ' 秒后'
+    const R = w.R
+    const s = w.state
+    const t = w.now
+    const cfg = this.cfg
+    const bits = []
+
+    // 1) 农场：熟了几块、多久后要熟
+    let ripe = 0, nextRipeSec = Infinity
+    for (let i = 0; i < s.plotN; i++) {
+      const p = s.plots[i]
+      if (!p) continue
+      const st = R.cropStage(p, t, R.sprinkled(s, i) || R.weatherOf(R.isleDay(t)) === 1)
+      if (st.stage === 3) ripe++
+      else if (st.stage >= 0) nextRipeSec = Math.min(nextRipeSec, st.left)
+    }
+    const empty = (s.plots || []).filter((p) => !p).length
+    if (ripe) bits.push(`${ripe} 块待收`)
+    if (empty) bits.push(`${empty} 块空地`)
+    if (nextRipeSec < Infinity) bits.push(`${Math.round(nextRipeSec)} 秒后熟一块`)
+
+    // 2) 各类日常额度：谁还没做完、卡在哪
+    const q = (k) => Math.max(0, (R.WORLD?.daily?.[k] || 0) - ((s.iq?.d === R.isleIndex(t) ? s.iq?.[k] : 0) || 0))
+    const work = []
+    if (cfg.work?.fish && q('fish') > 0) work.push(`钓鱼剩 ${q('fish')}`)
+    if (cfg.work?.mine && q('mine') > 0) work.push(`挖矿剩 ${q('mine')}`)
+    if (cfg.work?.bomb && q('bomb') > 0) work.push(`炸矿剩 ${q('bomb')}`)
+    if (work.length) bits.push(work.join('/') + `｜体力 ${Math.floor(s.en)}`)
+
+    // 3) 帮忙
+    if (cfg.social?.help?.enabled) {
+      const done = this.memo.helpDay === R.worldDay(t) ? (this.memo.helpCount || 0) : 0
+      const per = cfg.social.help.perDay ?? 10
+      const needE = cfg.social.help.minEnergy ?? 5
+      if (done < per) {
+        bits.push(s.en >= needE
+          ? `帮忙 ${done}/${per} 待做`
+          : `帮忙 ${done}/${per}（等体力 ${needE}）`)
+      } else bits.push(`帮忙 ${done}/${per} 已完成`)
+    }
+
+    // 4) 偷菜
+    if (cfg.social?.steal?.enabled) {
+      const every = cfg.social.steal.scanEvery ?? 1800
+      const left = Math.max(0, every - (t - (this.memo.stealScanAt || 0)))
+      const sched = this.memo.stealSchedule || {}
+      const ups = Object.values(sched).flatMap((r) => r.upcoming || []).filter((u) => u.unlockAt > t)
+      if (ups.length) {
+        const nx = Math.min(...ups.map((u) => u.unlockAt))
+        bits.push(`偷菜 ${ups.length} 处等解禁（最近 ${Math.round(nx - t)} 秒）`)
+      } else if (left > 0) {
+        bits.push(`偷菜 ${Math.round(left)} 秒后重扫`)
+      }
+    }
+
+    // 5) 五子棋 / 擂台：说清楚是「今日已满」还是「还能打」
+    if (cfg.npc?.enabled && cfg.npc?.gomoku) {
+      const paid = s.cnt?.gomokuPaid || 0
+      const paidLeft = Math.max(0, (R.GOMOKU_PAID || 0) - paid)
+      bits.push(paidLeft > 0 ? `五子棋剩 ${paidLeft} 局` : `五子棋已满 ${paid}`)
+    }
+    if (cfg.arena?.enabled) {
+      const today = this.memo.arenaDay === R.worldDay(t) ? (this.memo.arenaToday || 0) : 0
+      const maxB = this.memo.arenaMax || cfg.arena.battles || 30
+      bits.push(today >= maxB ? `擂台已满 ${today}/${maxB}` : `擂台 ${today}/${maxB}`)
+    }
+
+    // 6) 为什么现在不做体力活
+    const why = []
+    if (s.en < 4) why.push(`体力 ${Math.floor(s.en)} 太低`)
+    if (!cfg.work?.fish) why.push('钓鱼关着')
+    if (R.b12IsLongNight(t)) why.push('长夜')
+    if (why.length && !work.length) bits.push(`无事可做：${why.join('、')}`)
+
+    return `下次巡视 ${Math.round(sleep)} 秒后｜` + (bits.length ? bits.join('｜') : '没有待办')
   }
 
   /** 每轮记一行资产到 ledger.csv（每小时最多一次） */
