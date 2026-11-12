@@ -330,6 +330,8 @@ export class Engine {
           this.memo.arenaDay = ar.day
           this.memo.arenaToday = ar.today ?? 0
           this.memo.arenaMax = ar.maxBattles ?? 30
+          // 偷菜算守家战胜率要用（旧版每 10 分钟拉一次我的等级）
+          if (ar.level) this.memo.arenaLevel = ar.level
         }
       } catch (e) { this.log('擂台出错：' + e.message, 'err') }
     }

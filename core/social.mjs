@@ -184,6 +184,9 @@ export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
       out.push({
         id: o.id, name: o.name, level: o.level || 1, guard: !!info.owner?.guard,
         targets, value,
+        // 被发现概率：守家道具 +%，我们的轻步斗篷 −%。旧版 inspect() 用它算 EV。
+        detect: R.b12Detection(info.state || {}, world.state, t, 0),
+        fineMax: rules.fineMax || 5000,
         energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
       })
     }
@@ -337,6 +340,8 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
       out.push({
         id: o.id, name: o.name, level: o.level || 1, guard: !!info.owner?.guard,
         targets, value,
+        detect: R.b12Detection(info.state || {}, world.state, now, 0),
+        fineMax: rules.fineMax || 5000,
         energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
       })
     }
@@ -487,6 +492,30 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   return await stealFromTargets(world, cfg, log, memo, targets)
 }
 
+/**
+ * 一次偷菜的期望收益（移植自旧版 extension/lib/social.mjs 的 inspect().ev）。
+ *
+ *   ev = (1−被发现) × 货值
+ *      + 被发现 × (胜率 × (货值 + 每处多拿 1 个) − 败率 × 罚款)
+ *      − 体力 × 机会成本
+ *
+ * 只看货值会系统性地高估：邻居里一半以上的岛有守家鱼，等级比我们高时
+ * 胜率只有 30~50%，输一次按货值 1.2 倍赔（上限 5,000 D）。
+ * 一批 5,000 D 的货，期望可能只有 1,000 出头——扣掉体力成本就是亏的。
+ */
+function stealEV(tg, myLevel, energyValue) {
+  const spots = Math.max(1, tg.targets?.length || 1)
+  const V = tg.value || 0
+  const detect = Number.isFinite(tg.detect) ? tg.detect : 0.55
+  const pWin = tg.guard
+    ? Math.max(0.03, Math.min(0.95, 0.5 + ((myLevel || 1) - (tg.level || 1)) * 0.15))
+    : 1
+  const bonus = V / spots                     // 打赢：每处多拿 1 个
+  const fine = Math.min(tg.fineMax || 5000, V * 1.2)
+  const energy = Math.min(tg.energy || 5, 15)
+  return (1 - detect) * V + detect * (pWin * (V + bonus) - (1 - pWin) * fine) - energy * energyValue
+}
+
 /** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
 async function stealFromTargets(world, cfg, log, memo, targets) {
   const st = cfg.social?.steal
@@ -495,22 +524,31 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
   // 有目标但一个都偷不了时，说明是体力不够。要说明白，
   // 否则日志里只有「找到 N 家可偷」然后什么都没发生，看不出原因。
   let starved = 0
+  // 我的等级：决定守家战的胜率（旧版 myWhale 缓存 10 分钟）。
+  // arenaDaily 每轮都会跑，等级写在 memo.arenaLevel 里；没有就当 1 级（保守）。
+  const myLevel = memo.arenaLevel || 1
+  const energyValue = st.energyValue ?? 300
   // 真要去偷之前把道具补齐：轻步斗篷（被发现率 −10 个百分点）、
   // 折叠菜篮（每处多拿 1 个）。旧版有这一步，新版漏了。
   // 体力不够但能靠口粮补上的也算「值得」——偷菜本身会现场补体力。
   const canPay = (needE) => world.state.en >= needE || !!energyActions(R, world.state, world.prices, {
     need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
   })
-  const worth = targets.some((t) => t.value >= (st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
+  const worth = targets.some((t) => stealEV(t, myLevel, energyValue) >= (st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
   if (worth) await ensureThiefItems(world, cfg, log)
+  let skippedEV = 0
   for (const tg of targets) {
     if (tried >= (st.visitsPerScan ?? 8)) break
     const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
-    // 值不值得：货值要扣掉体力的机会成本（旧版 inspect() 里的 energyValue）。
-    // 体力拿去钓鱼能换 1,600+ D/点、挖矿 800+，偷一批只值几千 D 却要 10 点体力
-    // 的目标是净亏——这类目标占了邻居目录的大多数，以前不看成本全去试。
-    const netValue = tg.value - needE * (st.energyValue ?? 300)
-    if (tg.value < (st.minValue ?? 3000) || netValue <= 0) continue
+    // 打输过的岛一小时不去（旧版：v.check = max(v.check, now+3600)）。
+    // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
+    const loseAt = memo.stealLoseAt?.[tg.id] || 0
+    if (world.now - loseAt < 3600) continue
+    // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
+    // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
+    // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
+    const ev = stealEV(tg, myLevel, energyValue)
+    if (ev < (st.minValue ?? 3000)) { skippedEV++; continue }
     // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
     // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，
     // 而补体力只要几十上百 D。上限 steal.maxEnergyCost 防止口粮太贵时倒亏。
@@ -556,8 +594,12 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
         }
       } else if (res.outcome === 'lose') {
         const spots = res.spots || 1
+        // 打不过的岛一小时不再去（旧版：v.check = max(v.check, now + 3600)）。
+        // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
+        ;(memo.stealLoseAt ||= {})[tg.id] = world.now
         log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
-          (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）'))
+          (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）') +
+          '，这座岛一小时内不再去')
       } else {
         log(`偷 ${tg.name}（Lv${tg.level}）打平：${res.spots || 1} 处，谁也没占便宜`)
       }
@@ -588,6 +630,8 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
     const cheapest = costs.length ? Math.min(...costs) : (st.maxEnergy ?? 15)
     log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点，` +
       `口粮补不上或每点超过 ${st.maxEnergyCost ?? 600} D）`)
+  } else if (skippedEV) {
+    log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${st.minValue ?? 3000} D），不去`)
   }
   return { stolen, value }
 }
