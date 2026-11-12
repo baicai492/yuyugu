@@ -1092,7 +1092,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const fishOK =
       (fishNowEV >= fishBestEV * windowRatio || boundaryIn < deadlineSec || !canFinishQuota)
 
-    // --- 体力分配：有界背包（移植自榜一 solveBucketStaminaKnapsack） ---
+    // --- 体力分配：有界背包 + 跨时段 Bellman（移植自榜一） ---
     //
     // 旧版是贪心：按 D/体力 排序、能付就做、够不着就退而求其次。边界上会选错——
     // 体力 5 点时先做 3 点的挖矿，4 点的钓鱼就永远差 1 点，而正确解可能是
@@ -1101,8 +1101,11 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     //   · 挖矿：额度封顶；
     //   · 炸矿：额度、炸弹库存、矿层封顶；
     //   · 加工：按配方毛利，受加工额度与原料库存封顶（候选由第 7 段生成）。
-    // 求出「可用体力 e 以内的最大收益」之后，再和口粮成本曲线比一次，
-    // 决定要不要吃口粮、补到几点。
+    //
+    // 背包之上还有一层 Bellman（榜一的 evalWholeIsleObjective）：体力不是
+    // 「这一轮的钱」，而是「到岛日边界前能花掉多少 + 剩下的会带到下一岛日」。
+    // 现有体力能做的活本轮就做（免费资源，不做会在上限里溢出）；额外吃口粮
+    // 补出来的部分，则按整岛日额度 + 未来自然回复 + 下一岛日工价一起定价。
     const iqUsed = (k) => ((s.iq?.d === R.isleIndex(t) ? s.iq[k] : 0) || 0)
     const fishLeft = cfg.work.fish && fishOK ? Math.max(0, W.daily.fish - iqUsed('fish')) : 0
     const mineLeft = cfg.work.mine ? Math.max(0, W.daily.mine - iqUsed('mine')) : 0
@@ -1200,12 +1203,10 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     }
 
     const totalWorkCost = units.reduce((a, u) => a + u.cost, 0)
+    const cashCap = Math.max(0, coins - Math.min(cfg.invest?.reserveCoins || 0, 50000))
     const availEn = Math.max(0, enNow - keep)
     const enCap = Math.max(0, Math.min(totalWorkCost, enNow + maxEat - keep))
-    const dp = allocateStamina(units, {
-      enCap,
-      cashCap: Math.max(0, coins - Math.min(cfg.invest?.reserveCoins || 0, 50000)),
-    })
+    const dp = allocateStamina(units, { enCap, cashCap })
     // 选 e 时同时检查动作槽位：DP 的一件活 = 一条动作，吃一份口粮也是
     // 一条动作。旧贪心先按 40 条上限停手，DP 不知道这个上限，会算出
     // 「吃 12 份、钓 26 竿」这种被截断的方案，反而比吃 9 份钓 29 竿差。
@@ -1227,29 +1228,77 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       return n
     }
     const slotLeft = Math.max(0, MAX - actions.length)
-    // 先用「不吃口粮」的体力找可行的最大组合（同样受槽位限制）。
+    // ---------- Bellman：把体力摊到整个岛日估值（移植自榜一 evalWholeIsleObjective） ----------
+    //
+    // 只按「手上的体力」求背包最大值会犯两个错：
+    //   · 现在不花，到岛日边界的自然回复会钳在体力上限里白白蒸发；
+    //   · 吃口粮补出来的体力，若超出本岛日剩余额度能消化的量，只值
+    //     「下一个岛日最好的活」，不该按今天的边际收益估价。
+    // 榜一的解法是两条背包曲线：一条按「本轮可达体力」（ksLocal），一条按
+    // 「整岛日剩余额度 × 体力成本」（ksIsle），再把两者拼起来求值：
+    //   本岛日能花的 = 本轮已花的 e + 到边界前还能回复的量（受上限钳制）；
+    //   到边界时剩下的存量 = 结束余量 + 回复（封顶上限），扣掉本岛日实际
+    //   做掉的量，剩下的才按下一岛日工价计入。
+    // 于是「现在吃口粮」只有在「未来回复做不完额度」时才划算——白来的回复
+    // 优先于花钱的口粮，这正是旧两段式 if 想表达却表达不准的东西。
+    const enMax = R.energyMax(s)
+    const coffeeCpe = (coffee.price || 15000) / Math.max(1, coffee.energy || 60)
+    // 下一个岛日的边际体力价值 = 下一岛日最好的单位收益，且不超过咖啡单价
+    //（超过就该明天直接喝咖啡，今天囤体力没有额外价值）。
+    const nextIsleValuePerEn = (() => {
+      let best = 0
+      if (fishLeft > 0) best = Math.max(best, fishValNoBait / W.cost.fish)
+      if (mineLeft > 0) best = Math.max(best, mineVal / W.cost.mine)
+      if (bombLeft > 0) best = Math.max(best, bombVal / W.cost.bomb)
+      for (const u of craftUnits) best = Math.max(best, u.gain / u.cost)
+      return Math.min(best, coffeeCpe)
+    })()
+    // 整岛日能消化的体力：本轮可用 + 可吃的 + 到边界前的自然回复。
+    const isleCapEn = Math.max(0, Math.min(totalWorkCost, enNow + maxEat + Math.max(0, regenLeft) - keep))
+    const dpIsle = isleCapEn > dp.E ? allocateStamina(units, { enCap: isleCapEn, cashCap }) : dp
+    // 本轮花 e 点、补 d 点体力之后，本岛日能兑现的总价值。
+    //
+    // 这里有两个「体力池」要分清：
+    //   · 本岛日能花的 = 已经花的 e + 到边界前能回复的量（回复受上限钳制）；
+    //   · 到边界时身上剩下的 = 本轮结束余量 + 回复（封顶上限），扣掉本岛日
+    //     实际做掉的那些，剩下的才会带到下一个岛日。
+    // 早期版本把「回复量」直接塞进 carry（cov − 额度），等于把同一批回复
+    // 既算成今天的活、又算成明天的钱——体力 0、额度只有 13 下时，程序会
+    // 推出「吃口粮划算」而去买一份根本做不了几下的口粮。改成按边界存量
+    // 算 carry 之后，回复够用的场景自然回到「等它自己回」。
+    const isleValue = (e, d) => {
+      const leftAfter = Math.max(0, enNow + Math.max(0, d) - e)
+      const futureUsable = Math.min(Math.max(0, regenLeft), Math.max(0, enMax - leftAfter))
+      const used = Math.min(dpIsle.E, e + futureUsable)
+      const stockAtBoundary = Math.min(enMax, leftAfter + Math.max(0, regenLeft))
+      const carry = Math.max(0, stockAtBoundary - used)
+      return dpIsle.bestAtMost[used] + carry * nextIsleValuePerEn
+    }
+    // 基底：体力是免费的、还会在体力上限里溢出，所以现有体力能做的活
+    // 本轮就做掉（早做早完成）。这一步不看 Bellman，和榜一的 ksLocal
+    // 一样，先把「本轮可达体力」的收益钉成基线；Bellman 只用来判断
+    // 「额外吃口粮/喝咖啡补出来的体力」值不值。
     let bestE = 0
-    let bestNet = 0
     for (let e = Math.min(availEn, dp.E); e >= 0; e--) {
       if (actCountOf(dp.reconstructAt(e)) > slotLeft) continue
       bestE = e
-      bestNet = dp.bestAtMost[e]
       break
     }
-    // 额度需要的体力超过「现有 + 本岛日自然回复」时，才值得吃口粮把活做掉；
-    // 否则等它自己回——口粮是钱，自然回复是白来的。
-    if (totalWorkCost > regenLeft + availEn) {
-      for (let e = bestE + 1; e <= dp.E; e++) {
-        const d = e + keep - enNow
-        if (d < 0 || d > maxEat) continue
-        const fc = costAt[d]
-        if (!Number.isFinite(fc)) continue
-        if (actCountOf(dp.reconstructAt(e)) + cntAt[d] > slotLeft) continue
-        const net = dp.bestAtMost[e] - fc
-        if (net > bestNet + 1e-6) {
-          bestNet = net
-          bestE = e
-        }
+    // 升级判定：baseVal 已经把「到边界前的自然回复也能做活」算进去了，
+    // 所以未来回复够用时增量约为 0，不会花钱买口粮；只有回复做不完
+    // 剩余额度（或现在做比留到明天更值）时，补体力才有正增量。
+    const baseVal = isleValue(bestE, 0)
+    let bestGain = 0
+    for (let e = bestE + 1; e <= dp.E; e++) {
+      const d = Math.max(0, e + keep - enNow)
+      if (d > maxEat) continue
+      const fc = costAt[d]
+      if (!Number.isFinite(fc)) continue
+      if (actCountOf(dp.reconstructAt(e)) + cntAt[d] > slotLeft) continue
+      const net = isleValue(e, d) - baseVal - fc
+      if (net > bestGain + 1e-6) {
+        bestGain = net
+        bestE = e
       }
     }
     // 按背包选出的组合提交，**边花边吃**：体力降到不够时就地吃一份口粮/喝咖啡。
