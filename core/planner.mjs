@@ -39,6 +39,61 @@ export function foodChoices(R, s, prices) {
 }
 
 /**
+ * 为「规划之外」的开销凑体力（移植自旧版 extension/lib/strategy.mjs 的 energyActions）。
+ *
+ * 为什么需要：钓鱼/挖矿/炸矿是「体力换钱」的连续决策，规划器会算每点体力
+ * 值不值；但偷菜、帮忙这类**带截止时间**的动作不是。偷菜要掐着保护期解禁
+ * 那一刻去，那一下体力被钓鱼花光了，这趟就白来，下一块地要再等半小时。
+ * 旧版的处理是：需要时现场吃口粮/喝咖啡补到够，只要每点体力的成本
+ * 不超过 maxPerE（偷菜默认 600 D/点）——偷一批货通常值几千 D，花几百 D
+ * 买体力去抢是稳赚的。
+ *
+ * 新版重写时整段丢了，只剩一条「体力 < 5 就跳过」的硬门槛，
+ * 于是体力常年被钓鱼吃干，偷菜的额度一整天都是 0（线上 11-12 全天只偷到 1 处）。
+ *
+ * @param need      要凑到多少体力
+ * @param maxPerE   每点体力最多花多少 D（口粮按卖价折算机会成本）
+ * @returns 要提交的吃/喝动作数组；凑不够返回 null
+ */
+export function energyActions(R, state, prices, { need, maxPerE, cfg = {}, coins = Infinity } = {}) {
+  const acts = []
+  const max = R.energyMax(state)
+  let en = state.en
+  // 口粮池：按「每点体力成本」从便宜到贵。left 记剩余可吃的份数，
+  // 因为同一份口粮吃完一口就要扣一件（foodChoices 不知道我们吃了多少）。
+  const pool = foodChoices(R, state, prices).map((f) => ({ ...f, left: f.n }))
+  let guard = 0
+  while (en < need && guard++ < 50) {
+    const room = Math.max(0, max - en)
+    let progressed = false
+    if (room > 0) {
+      for (const f of pool) {
+        if (f.left <= 0) continue
+        if (f.costPerEnergy > maxPerE) break      // 已排序，后面更贵
+        if (f.restore <= 0) continue
+        acts.push({ a: 'eat', id: f.id, q: f.q })
+        f.left--
+        en = Math.min(max, en + f.restore)
+        progressed = true
+        break
+      }
+    }
+    if (progressed) continue
+    // 体力满了但还不够 need：只有咖啡能突破上限（每天限量）
+    const coffee = R.WORLD.coffee || {}
+    const coffeeLeft = (R.WORLD.daily?.coffee || 0) - (state.cnt?.coffee || 0)
+    const perE = (coffee.price || 0) / Math.max(1, coffee.energy || 1)
+    if (coffeeLeft <= 0 || cfg.energy?.coffee === false || !(coffee.energy > 0)) break
+    if (perE > maxPerE) break
+    if (coins - (coffee.price || 0) < Math.min(cfg.invest?.reserveCoins || 0, 50000)) break
+    acts.push({ a: 'coffee' })
+    en += coffee.energy
+    coins -= coffee.price || 0
+  }
+  return en >= need ? acts : null
+}
+
+/**
  * 每点体力拿去钓鱼/挖矿/炸矿能赚多少（D/点）。
  *
  * 这是「种地」决策里最容易被忽略的一项：一块地每岛日要吃 30 多点体力
@@ -1519,35 +1574,41 @@ export function nextWake(world, cfg, memo = {}) {
 
   // 偷菜：扫描间隔到了就该去（不加这个会一直等 maxSleep，实际扫描被拖慢）
   //
-  // 体力不足 5 点时整个跳过：偷菜最便宜也要 5 点，醒来也只能看着。
-  // 更要紧的是那些「解禁时刻」记录还会被重新算一遍，
-  // 形成「醒来 → 扫一遍 → 什么都没做 → 再睡 → 再醒」的空转
-  // （线上 14:25~14:29 每 62 秒一轮）。体力回来之后这里自然会重新给候选。
-  if (cfg.social?.steal?.enabled && s.en >= 5) {
-    const last = memo.stealScanAt || 0
-    const every = cfg.social.steal.scanEvery ?? 1800
-    const left = Math.max(0, every - (t - last))
+  // 体力门槛不能只看「现在有 5 点」：体力被钓鱼/挖矿花光是常态，
+  // 而 stealRound 会现场吃口粮补上来（旧版 energyActions 的做法）。
+  // 只有「没口粮可补」时才算真没事可做。写成硬门槛 s.en >= 5 的后果是
+  // 体力常年 0~3，偷菜额度一整天都是 0（线上 11-12 全天只偷到 1 处）。
+  if (cfg.social?.steal?.enabled) {
+    const stealE = 5
+    const canSteal = s.en >= stealE || !!energyActions(R, s, prices, {
+      need: stealE, maxPerE: cfg.social.steal.maxEnergyCost ?? 600, cfg, coins,
+    })
+    if (canSteal) {
+      const last = memo.stealScanAt || 0
+      const every = cfg.social.steal.scanEvery ?? 1800
+      const left = Math.max(0, every - (t - last))
 
-    // 精确解禁调度：把「某块地/某个畜栏什么时候能偷」也算进唤醒时刻。
-    // 这是到点扫描做不到的——成熟后要过 protect(1800 秒) 才能偷，
-    // 到点扫描很容易每次都差几分钟，永远偷不到刚解禁的那批。
-    //
-    // 但要加自适应节流：巡逻一圈会记下几百条解禁时刻，平均 20 秒有一条到点，
-    // 不节流就是「1 秒后醒 → 什么都没偷到 → 再 1 秒后醒」。
-    // 偷到过 60 秒一次，连续白醒翻倍到 15 分钟（见 steal-schedule.mjs）。
-    const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
-    const wakeReady = t - (memo.stealWakeAt || 0) >= gap
-    const nx = wakeReady ? nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 }) : null
-    if (nx) {
-      // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
-      push(Math.min(left > 0 ? left : 5, nx.wakeIn))
-    } else if (left > 0) {
-      push(left)
+      // 精确解禁调度：把「某块地/某个畜栏什么时候能偷」也算进唤醒时刻。
+      // 这是到点扫描做不到的——成熟后要过 protect(1800 秒) 才能偷，
+      // 到点扫描很容易每次都差几分钟，永远偷不到刚解禁的那批。
+      //
+      // 但要加自适应节流：巡逻一圈会记下几百条解禁时刻，平均 20 秒有一条到点，
+      // 不节流就是「1 秒后醒 → 什么都没偷到 → 再 1 秒后醒」。
+      // 偷到过 60 秒一次，连续白醒翻倍到 15 分钟（见 steal-schedule.mjs）。
+      const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
+      const wakeReady = t - (memo.stealWakeAt || 0) >= gap
+      const nx = wakeReady ? nextUnlock(memo.stealSchedule || {}, t, { leadSec: cfg.social.steal.prepLeadSec ?? 8 }) : null
+      if (nx) {
+        // 解禁时刻比下次扫描更早 → 按解禁时刻醒来
+        push(Math.min(left > 0 ? left : 5, nx.wakeIn))
+      } else if (left > 0) {
+        push(left)
+      }
+      // 没有解禁记录、扫描间隔也过了（left<=0）时不推候选：
+      // 以前这里写 push(5)，含义是「扫描间隔到了就该去」，
+      // 但 stealScanAt 为 0（刚重启）时 left 是负数，于是每次推送 5 秒，
+      // 造成「5 秒醒一次」的死循环。
     }
-    // 没有解禁记录、扫描间隔也过了（left<=0）时不推候选：
-    // 以前这里写 push(5)，含义是「扫描间隔到了就该去」，
-    // 但 stealScanAt 为 0（刚重启）时 left 是负数，于是每次推送 5 秒，
-    // 造成「5 秒醒一次」的死循环。
   }
 
   // 兜底：没有更早的事件时也别睡太久

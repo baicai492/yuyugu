@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
 import { checkRulesUpdate, rulesVersion } from './rules.mjs'
-import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices } from './planner.mjs'
+import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices, energyActions } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
@@ -662,10 +662,9 @@ export class Engine {
 
     // 5. 偷菜解禁时刻到了（精确调度，比「到点扫一遍」准得多）
     //
-    // 体力不足时不算「有事可做」：偷菜最便宜要 5 点体力，体力 0 时醒来
-    // 也只能干看着，然后那些解禁记录还会被重新算一遍，形成
-    // 「醒来 → 扫一遍 → 什么都没做 → 再睡 → 再醒」的空转。
-    // 线上 14:25~14:29 就是这么每 62 秒转一轮的。
+    // 体力门槛不能写成「en >= 5 才算有事可做」：体力被钓鱼/挖矿花光是常态，
+    // 而偷菜是掐着解禁时刻的机会——只要有口粮能补上来就值得醒。
+    // 补体力本身就是主循环里会发生的事（social.stealRound 会现场吃口粮）。
     //
     // 光有体力门槛还不够：巡逻 53 座岛会记下 380 条解禁时刻，
     // 平均每 20 秒就有一条到点，于是变成每 30~60 秒醒一次、
@@ -673,13 +672,19 @@ export class Engine {
     // 而是这种「成熟 + 保护期」的目标到点时早就被别人偷满了。
     //
     // shouldSnipe 带自适应节流：偷到过就 60 秒一次，连续白醒就翻倍到 15 分钟。
-    if (this.cfg.social?.steal?.enabled && w.state.en >= 5) {
-      const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
-      const nx = shouldSnipe(this.memo, this.memo.stealSchedule || {}, t, { leadSec })
-      if (nx) {
-        this.memo.stealWakeAt = t
-        this.memo.stealWakePending = true
-        return `偷菜解禁：${nx.item || '目标'}（${nx.exact ? '时刻确定' : '估计'}）`
+    if (this.cfg.social?.steal?.enabled) {
+      const stealE = 5
+      const canSteal = w.state.en >= stealE || !!energyActions(R, w.state, w.prices, {
+        need: stealE, maxPerE: this.cfg.social.steal.maxEnergyCost ?? 600, cfg: this.cfg, coins: w.coins,
+      })
+      if (canSteal) {
+        const leadSec = this.cfg.social.steal.prepLeadSec ?? 8
+        const nx = shouldSnipe(this.memo, this.memo.stealSchedule || {}, t, { leadSec })
+        if (nx) {
+          this.memo.stealWakeAt = t
+          this.memo.stealWakePending = true
+          return `偷菜解禁：${nx.item || '目标'}（${nx.exact ? '时刻确定' : '估计'}）`
+        }
       }
     }
 

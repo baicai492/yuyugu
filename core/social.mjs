@@ -5,6 +5,7 @@
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
 import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { energyActions } from './planner.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -415,20 +416,32 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   // 下次真正扫到那座岛时 updateIsleSchedule 会重新算。
   sweepStaleUnlocks(memo.stealSchedule, world.now, leadSec)
 
-  // 体力不够偷任何一家时，连扫都别扫。
+  // 体力不够偷任何一家时，先看「能不能补上」，补不上才整轮跳过。
   //
-  // 偷菜最便宜也要 rules.energy（服务端常量 5 点）体力。体力 0 时照样去访问
-  // 8 座岛，只会得到「找到 N 家可偷但体力不够」+ 一堆新解禁记录，
-  // 然后过一会儿又被那些记录催醒——线上实测 62 秒一轮空转，持续了 4 分钟。
-  // 这一轮跳过即可，等体力回来了自然会重新扫。
+  // 偷菜最便宜也要 rules.energy（服务端常量 5 点）体力。这里的判断以前是
+  // 一条硬门槛「en < 5 就整轮跳过」——那是错的：体力被钓鱼/挖矿花光之后，
+  // 明明有口粮也照样跳过，于是一整天的偷菜额度都是 0（11-12 全天只偷到 1 处）。
+  // 旧版 extension/lib/strategy.mjs 的 energyActions 就是干这个的：
+  // 现场吃口粮把体力补到够，只要每点体力的成本不超过 steal.maxEnergyCost。
+  //
+  // 注意：这里**不**立刻补。扫描（访问岛屿）本身不花体力，先看这一轮有没有
+  // 值得偷的目标，有的话在 stealFromTargets 里按那个目标实际需要的体力补，
+  // 避免「为了扫一圈先吃掉一份口粮」。
   const minStealE = 5
+  const maxPerE = st.maxEnergyCost ?? 600
   if (world.state.en < minStealE) {
-    const key = `${world.worldDay || ''}:${Math.floor(world.state.en)}`
-    if (memo.stealLowEnergyNoted !== key) {
-      memo.stealLowEnergyNoted = key
-      log(`偷菜：体力不足（${Math.floor(world.state.en)} < ${minStealE}），这一轮跳过`)
+    const acts = energyActions(R, world.state, world.prices, {
+      need: minStealE, maxPerE, cfg, coins: world.coins,
+    })
+    if (!acts?.length) {
+      const key = `${world.worldDay || ''}:${Math.floor(world.state.en)}`
+      if (memo.stealLowEnergyNoted !== key) {
+        memo.stealLowEnergyNoted = key
+        log(`偷菜：体力不足（${Math.floor(world.state.en)} < ${minStealE}），口粮也补不上，这一轮跳过`)
+      }
+      return { stolen: 0, value: 0 }
     }
-    return { stolen: 0, value: 0 }
+    memo.stealLowEnergyNoted = ''
   }
 
   // 「解禁时刻到了」必须同时满足两件事才算数：
@@ -484,13 +497,36 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
   let starved = 0
   // 真要去偷之前把道具补齐：轻步斗篷（被发现率 −10 个百分点）、
   // 折叠菜篮（每处多拿 1 个）。旧版有这一步，新版漏了。
-  const worth = targets.some((t) => t.value >= (st.minValue ?? 3000) && world.state.en >= Math.min(t.energy, st.maxEnergy ?? 15))
+  // 体力不够但能靠口粮补上的也算「值得」——偷菜本身会现场补体力。
+  const canPay = (needE) => world.state.en >= needE || !!energyActions(R, world.state, world.prices, {
+    need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
+  })
+  const worth = targets.some((t) => t.value >= (st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
   if (worth) await ensureThiefItems(world, cfg, log)
   for (const tg of targets) {
     if (tried >= (st.visitsPerScan ?? 8)) break
-    if (tg.value < (st.minValue ?? 3000)) continue
     const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
-    if (world.state.en < needE) { starved++; continue }
+    // 值不值得：货值要扣掉体力的机会成本（旧版 inspect() 里的 energyValue）。
+    // 体力拿去钓鱼能换 1,600+ D/点、挖矿 800+，偷一批只值几千 D 却要 10 点体力
+    // 的目标是净亏——这类目标占了邻居目录的大多数，以前不看成本全去试。
+    const netValue = tg.value - needE * (st.energyValue ?? 300)
+    if (tg.value < (st.minValue ?? 3000) || netValue <= 0) continue
+    // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
+    // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，
+    // 而补体力只要几十上百 D。上限 steal.maxEnergyCost 防止口粮太贵时倒亏。
+    if (world.state.en < needE) {
+      const acts = energyActions(R, world.state, world.prices, {
+        need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
+      })
+      if (!acts?.length) { starved++; continue }
+      try {
+        const beforeE = Math.floor(world.state.en)
+        const r = await world.act(acts, { silent: true })
+        const ok = (r.out || []).filter((o) => o?.ok).length
+        if (ok) log(`  偷 ${tg.name} 体力不够（${beforeE} < ${needE}），吃口粮补到 ${Math.floor(world.state.en)}（花 ${Math.round(r.spend || 0).toLocaleString('en-US')} D）`)
+      } catch (e) { log(`  偷 ${tg.name} 补体力失败：${e.message}`) }
+      if (world.state.en < needE) { starved++; continue }
+    }
     tried++
     try {
       const r = await stealIsle(world, tg.id)
@@ -550,7 +586,8 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
       .filter((t) => t.value >= (st.minValue ?? 3000))
       .map((t) => Math.min(t.energy, st.maxEnergy ?? 15))
     const cheapest = costs.length ? Math.min(...costs) : (st.maxEnergy ?? 15)
-    log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点）`)
+    log(`偷菜：${starved} 家可偷但体力不够（当前 ${Math.floor(world.state.en)}，最便宜要 ${cheapest} 点，` +
+      `口粮补不上或每点超过 ${st.maxEnergyCost ?? 600} D）`)
   }
   return { stolen, value }
 }
