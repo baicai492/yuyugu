@@ -19,6 +19,7 @@ let port = 8787
 let alive = false
 let status = null
 let market = null
+let xian = null
 let config = null
 let logSince = 0
 let logLines = []
@@ -49,8 +50,8 @@ async function getMarket() {
   const m = Number($('mMark').value) || 0
   return api(`/api/market?days=${d}&markdown=${m}`)
 }
-async function getLogs(since) { return api(`/api/logs?since=${since}`) }
-async function getLogHistory(days) { return api(`/api/logs/history?days=${days}&max=800`) }
+async function getXian() { return api('/api/xian') }
+async function getLogs(since) { return api(`/api/logs?since=${since}`) }async function getLogHistory(days) { return api(`/api/logs/history?days=${days}&max=800`) }
 async function getLegacyLogs() { return api('/api/logs/legacy?max=800') }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
@@ -245,6 +246,102 @@ async function refreshMarket() {
     $('mForecast').textContent = '读取失败：' + e.message
   }
 }
+
+// ---------- 渲染：修仙 ----------
+// 修仙的规则常量在 Node 侧（core/xian-rules.mjs），GUI 只做展示，
+// 这里的小字典必须和那边保持一致；对不上时最坏情况是显示 id，不影响决策。
+const HERB_NAMES = { lingcao: '灵草', jingu: '金菇', linglan: '铃兰', binglian: '冰莲', chizhi: '赤芝', leizhu: '雷竹' }
+const PILL_NAMES = { huiling: '回灵丹', peiyuan: '培元丹' }
+const ROOT_NAMES = { metal: '金', wood: '木', water: '水', fire: '火', earth: '土', ice: '冰', thunder: '雷', wind: '风', lava: '熔', poison: '毒' }
+const TECH_NAMES = {
+  fire: '流火诀', water: '沧澜诀', wood: '青木诀', metal: '庚金剑诀', earth: '厚土诀', ice: '玄冰诀',
+  thunder: '紫霄雷法', wind: '御风诀', lava: '熔岩诀', poison: '万毒经',
+}
+const nm = (map, id) => map[id] || id
+const fmtSec = (s) => {
+  const n = Math.max(0, Math.round(Number(s) || 0))
+  if (n < 60) return `${n} 秒`
+  if (n < 3600) return `${Math.floor(n / 60)} 分 ${n % 60} 秒`
+  return `${Math.floor(n / 3600)} 小时 ${Math.floor((n % 3600) / 60)} 分`
+}
+const countList = (obj, map) => Object.entries(obj || {})
+  .filter(([, n]) => Number(n) > 0)
+  .map(([id, n]) => `${nm(map, id)}×${n}`)
+  .join(' ')
+
+function renderXian() {
+  const x = xian
+  const on = !!config?.xian?.enabled
+  $('xEnabled').checked = on
+  if (!x || !x.exists) {
+    $('xStatus').textContent = x?.error ? '读取失败：' + x.error : '读取中…'
+    for (const id of ['xRealm', 'xCv', 'xStone', 'xGarden', 'xEnergy', 'xCan', 'xPlots', 'xGround', 'xBag', 'xBrew', 'xMed', 'xTech', 'xWake']) $(id).textContent = '—'
+    return
+  }
+  $('xRealm').textContent = `${x.realm}${x.stage ? x.stage + ' 层' : ''}`
+  const rootTxt = (x.roots || []).map((r) => nm(ROOT_NAMES, r)).join('')
+  $('xCv').textContent = `修为 ${fmt(x.cvXp)}/${fmt(x.cvNeed)}｜${rootTxt || '无灵根'}灵根`
+  $('xStone').textContent = fmt(x.stone)
+  $('xGarden').textContent = `药园 Lv${x.gardenLv} · ${fmt(x.gardenXp)}/${fmt(x.gardenNeed)}`
+  $('xEnergy').textContent = `${x.energy}/${x.energyMax}`
+  $('xCan').textContent = `${x.can}/${x.canMax}`
+  const p = x.plots || {}
+  $('xPlots').textContent = `已开 ${p.open}/${p.total} · 空地 ${p.empty} · 成熟 ${p.mature}` +
+    (p.growing ? ` · 生长 ${p.growing}${p.dry ? `（待浇 ${p.dry}）` : ''}` : '')
+  $('xGround').textContent = countList(x.inGround, HERB_NAMES) || '—'
+  const bagBits = []
+  const bag = countList(x.bag, HERB_NAMES)
+  const seeds = countList(x.seeds, HERB_NAMES)
+  const pills = countList(x.pills, PILL_NAMES)
+  if (bag) bagBits.push(bag)
+  if (seeds) bagBits.push('种子 ' + seeds)
+  if (pills) bagBits.push(pills)
+  $('xBag').textContent = bagBits.join('｜') || '—'
+  $('xBrew').textContent = x.brew
+    ? `${nm(PILL_NAMES, x.brew.pill)} · ${fmtSec(x.brew.readyIn)}后出炉`
+    : '空闲'
+  $('xMed').textContent = x.meditate ? `已打坐 ${fmtSec(x.meditate.elapsed)} / ${fmtSec(x.meditate.cap)}` : '没在打坐'
+  const techs = (x.techs || []).map((el) => nm(TECH_NAMES, el) + (el === x.mainTech ? '（主修）' : ''))
+  $('xTech').textContent = techs.join(' · ') || '未学'
+  $('xWake').textContent = !on ? '—（未启用）' : (x.nextWakeIn < 0 ? '—' : fmtSec(x.nextWakeIn))
+
+  // 控件回填（避免用户刚点完又被轮询覆盖时跳回去）
+  if (document.activeElement !== $('xBreak') && config?.xian?.breakMode && $('xBreak').value !== config.xian.breakMode) {
+    $('xBreak').value = config.xian.breakMode
+  }
+  $('xFuse').checked = !!config?.xian?.autoFuse
+
+  if (!x.storyDone) $('xStatus').textContent = '剧情还没过完（测灵根、剧情要真人点），托管在待命'
+  else if (x.fight) $('xStatus').textContent = '网页端正在斗法，托管暂时不插手'
+  else if (!on) $('xStatus').textContent = '已关闭：不会提交任何修仙动作'
+  else $('xStatus').textContent = ''
+}
+
+async function loadXian() {
+  try {
+    const j = await getXian()
+    xian = j.xian
+    if (config?.xian && j.enabled != null) config.xian.enabled = !!j.enabled
+    renderXian()
+  } catch (e) {
+    xian = { exists: false, error: e.message }
+    renderXian()
+  }
+}
+
+async function saveXianCfg(mut) {
+  if (!config) return
+  config.xian = config.xian || {}
+  mut(config.xian)
+  try {
+    await saveCfg(config)
+    $('xStatus').textContent = '已保存'
+    await loadXian()
+  } catch (e) {
+    $('xStatus').textContent = '保存失败：' + e.message
+  }
+}
+
 
 // ---------- 渲染：设置 ----------
 // labels：字段 → 中文含义；hints：字段 → 一句话解释（鼠标悬停可见）
@@ -574,6 +671,7 @@ function bind() {
       document.querySelectorAll('nav.tabs button').forEach((x) => x.classList.toggle('on', x === b))
       document.querySelectorAll('.tab').forEach((s) => { s.hidden = s.id !== 'tab-' + b.dataset.tab })
       if (b.dataset.tab === 'market') refreshMarket()
+      if (b.dataset.tab === 'xian') loadXian()
       if (b.dataset.tab === 'settings') loadConfig().catch(() => {})
     }
   })
@@ -623,8 +721,17 @@ function bind() {
     await refreshMarket()
   }
 
-  $('cfgSave').onclick = async () => {
-    try {
+  // 修仙面板：开关和策略都直接写回配置（和「设置」页共用同一份 config）
+  $('xRefresh').onclick = () => loadXian()
+  $('xOnce').onclick = async () => {
+    try { await cmd('once'); $('xStatus').textContent = '已请求巡视'; setTimeout(loadXian, 3000) }
+    catch (e) { $('xStatus').textContent = e.message }
+  }
+  $('xEnabled').onchange = () => saveXianCfg((x) => { x.enabled = $('xEnabled').checked })
+  $('xBreak').onchange = () => saveXianCfg((x) => { x.breakMode = $('xBreak').value })
+  $('xFuse').onchange = () => saveXianCfg((x) => { x.autoFuse = $('xFuse').checked })
+
+  $('cfgSave').onclick = async () => {    try {
       await saveCfg(config)
       $('cfgStatus').textContent = '已保存'
       await loadStatus()
@@ -697,6 +804,8 @@ function startAuto() {
     if ($('logAuto').checked) await loadLogs()
     // 概览页要看到「正在做什么」和逐笔收支，1.5 秒刷一次
     if (!$('tab-overview').hidden && alive) await loadStatus()
+    // 修仙页只在切过去时刷，免得平白多打本地请求
+    if (!$('tab-xian').hidden && alive) await loadXian()
   }, 1500)
 }
 

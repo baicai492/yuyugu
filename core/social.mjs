@@ -425,19 +425,24 @@ export async function stealIsle(world, id) {
  * 注意：这里只决定「访问谁」，具体偷哪些由 targetsFromIsle 按货值/守家胜率
  * 重新算，所以多访问一家的代价只是一次 visit（不花体力）。
  */
-function waveTargets(schedule, watch, now, leadSec, limit = 5) {
+function waveTargets(schedule, watch, now, leadSec, limit = 5, prices = {}) {
   const wave = nextWave(schedule, now, { leadSec, waveSpanSec: 2 })
   if (!wave) return []
-  return wave.isles.slice(0, limit).map(({ targetId, entries }) => {
-    const w = watch?.[targetId] || {}
-    return {
-      targetId,
-      name: w.name || `岛 ${targetId}`,
-      level: w.level || 1,
-      at: entries[0].at,
-      items: entries.map((e) => e.item).filter(Boolean),
-    }
-  })
+  // 同一波里先访问最值钱的岛。
+  //
+  // 一波常常有 5~10 家同时解禁，而 limit 只允许访问 5 家、之后还要按顺序
+  // 提交偷菜请求——先访问谁直接决定抢到的是葡萄还是萝卜。以前按解禁时刻
+  // 排序（同一波内几乎相同），等于按 id 顺序。这里用 watch 表里记下的
+  // 作物/产物 id 乘当前市价做粗估（此时还没访问，拿不到精确目标数）。
+  return wave.isles
+    .map(({ targetId, entries }) => {
+      const w = watch?.[targetId] || {}
+      const items = entries.map((e) => e.item).filter(Boolean)
+      const est = items.reduce((a, id) => a + (Number(prices[id]) || 0), 0)
+      return { targetId, name: w.name || `岛 ${targetId}`, level: w.level || 1, at: entries[0].at, items, est }
+    })
+    .sort((a, b) => b.est - a.est || a.at - b.at)
+    .slice(0, limit)
 }
 
 export async function stealRound(world, cfg, log = () => {}, memo = {}) {
@@ -539,7 +544,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     // 于是「醒来 → refreshWatchList 拉 40~50 页目录 → watchRound 访问
     // 12 家（每家 sleep 900ms）→ 才开始偷」，几十秒过去了，
     // 解禁的货早被别人抢光。线上 2026-11-12 记下 250 处待解禁、偷到 0 件。
-    const cands = waveTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 5)
+    const cands = waveTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 5, world.prices)
     if (cands.length) {
       log(`偷菜：${snipeReady ? '解禁时刻到了' : '有已解禁未处理的目标'}，直接抢这一波 ${cands.length} 家（不扫目录）`)
       const out = []
@@ -635,16 +640,25 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
   // arenaDaily 每轮都会跑，等级写在 memo.arenaLevel 里；没有就当 1 级（保守）。
   const myLevel = memo.arenaLevel || 1
   const energyValue = st.energyValue ?? 300
+  // 按期望收益从高到低排。
+  //
+  // 以前是按「扫描/巡逻返回的顺序」（目录顺序）去偷，体力又受 visitsPerScan
+  // 上限约束，等于随机挑几家——同样的体力可能全花在萝卜上，而隔壁岛上
+  // 就有一片葡萄。榜一 snipe-scheduler 选目标是按 projectedScore（四结局
+  // 期望）降序，我们的 stealEV 已经是同一个模型，只是一直没拿它排序。
+  const ranked = targets
+    .map((t) => ({ t, ev: stealEV(t, myLevel, energyValue) }))
+    .sort((a, b) => b.ev - a.ev)
   // 真要去偷之前把道具补齐：轻步斗篷（被发现率 −10 个百分点）、
   // 折叠菜篮（每处多拿 1 个）。旧版有这一步，新版漏了。
   // 体力不够但能靠口粮补上的也算「值得」——偷菜本身会现场补体力。
   const canPay = (needE) => world.state.en >= needE || !!energyActions(R, world.state, world.prices, {
     need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
   })
-  const worth = targets.some((t) => stealEV(t, myLevel, energyValue) >= (st.minEV ?? st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
+  const worth = ranked.some(({ t, ev }) => ev >= (st.minEV ?? st.minValue ?? 3000) && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
   if (worth) await ensureThiefItems(world, cfg, log)
   let skippedEV = 0
-  for (const tg of targets) {
+  for (const { t: tg, ev } of ranked) {
     if (tried >= (st.visitsPerScan ?? 8)) break
     const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
     // 打输过的岛一小时不去（旧版：v.check = max(v.check, now+3600)）。
@@ -654,7 +668,7 @@ async function stealFromTargets(world, cfg, log, memo, targets) {
     // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
     // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
     // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
-    const ev = stealEV(tg, myLevel, energyValue)
+    // ev 在排序时已经算过一次，这里直接复用。
     if (ev < (st.minEV ?? st.minValue ?? 3000)) { skippedEV++; continue }
     // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
     // 偷菜是掐着解禁时刻的机会，错过这次这块地要再等半小时保护期，

@@ -36,6 +36,7 @@
   <nav class="tabs">
     <button data-tab="overview" class="on">概览</button>
     <button data-tab="market">市场预测</button>
+    <button data-tab="xian">修仙</button>
     <button data-tab="settings">设置</button>
     <button data-tab="logs">日志</button>
   </nav>
@@ -105,6 +106,70 @@
         <tbody></tbody>
       </table>
     </div>
+  </section>
+
+  <!-- 修仙 -->
+  <section id="tab-xian" class="tab" hidden>
+    <div class="card">
+      <div class="card-row">
+        <span>自动修仙</span>
+        <label class="switch" title="开启后每轮巡视自动收菜、浇水、炼丹、打坐">
+          <input type="checkbox" id="xEnabled" /><span></span>
+        </label>
+      </div>
+      <div class="note" id="xHint">
+        灵石只在修仙内部循环（买种子、学功法、融合），<b>换不成 D 币</b>，
+        开不开都不影响现金收益；开了只会额外提交动作。
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card big">
+        <small>境界</small>
+        <b id="xRealm">—</b>
+        <div class="sub" id="xCv">—</div>
+      </div>
+      <div class="card">
+        <small>灵石</small>
+        <b id="xStone">—</b>
+        <div class="sub" id="xGarden">—</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-row"><span>灵力</span><b id="xEnergy">—</b></div>
+      <div class="card-row"><span>水壶</span><b id="xCan">—</b></div>
+      <div class="card-row"><span>田亩</span><b id="xPlots">—</b></div>
+      <div class="card-row"><span>地里</span><b id="xGround">—</b></div>
+      <div class="card-row"><span>药材 / 种子 / 丹药</span><b id="xBag">—</b></div>
+      <div class="card-row"><span>丹炉</span><b id="xBrew">—</b></div>
+      <div class="card-row"><span>打坐</span><b id="xMed">—</b></div>
+      <div class="card-row"><span>功法</span><b id="xTech">—</b></div>
+      <div class="card-row"><span>下次为修仙醒来</span><b id="xWake">—</b></div>
+    </div>
+
+    <div class="card xian">
+      <small>策略</small>
+      <div class="field">
+        <label class="has-hint" title="药园 Lv5 之前，培元丹每颗 +40 药园经验，比早一天升境界更划算">突破策略</label>
+        <select id="xBreak">
+          <option value="smart">先攒丹喂药园（推荐）</option>
+          <option value="eager">到瓶颈就突破</option>
+          <option value="manual">不自动突破</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="has-hint" title="融合会减少一条基础灵根，且不可逆；失败还会掉修为">自动融合灵根</label>
+        <input type="checkbox" id="xFuse" />
+      </div>
+      <div class="note">融合不可逆（灵根 −1），默认关闭。只在修为损耗最小的窗口尝试。</div>
+    </div>
+
+    <div class="actions">
+      <button id="xRefresh">刷新</button>
+      <button id="xOnce" class="ghost" title="立刻唤醒主程序跑一轮（含修仙）">巡视一次</button>
+    </div>
+    <div class="statusline" id="xStatus"></div>
   </section>
 
   <!-- 设置 -->

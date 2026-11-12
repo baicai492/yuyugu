@@ -84,6 +84,14 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
         return send(res, 200, snap)
       }
 
+      // ---------- 修仙 ----------
+      // 灵石只在修仙内部闭环、换不成 D 币，所以单独一个面板，不和市场收益混在一起。
+      if (req.method === 'GET' && path === '/api/xian') {
+        const snap = engine.xianView()
+        if (!snap) return send(res, 503, { error: '世界状态尚未就绪' })
+        return send(res, 200, { ok: true, xian: snap, enabled: Boolean(cfg.xian?.enabled) })
+      }
+
       // ---------- 日志（本次运行） ----------
       if (req.method === 'GET' && path === '/api/logs') {
         const since = Number(url.searchParams.get('since')) || 0

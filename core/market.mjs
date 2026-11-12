@@ -40,14 +40,29 @@ export function inferSupply(R, prices, day) {
     if (!q || !p) continue
     const s = p / q
     const depth = R.marketDepth(id)
-    const tol = 0.5 / p + 0.5 / q
-    const clampedLow = s <= 0.8 + tol
-    const clampedHigh = s >= 1.06 - tol
+    // 报价是 round(q × s)，所以真实供需落在 [(p−0.5)/q, (p+0.5)/q]。
+    // 这个区间才是「我们真正知道的」，点估计只是它的中点。
+    //
+    // 钳到 [0.8, 1.06] 之后如果区间被截断，说明供需顶到了边界：
+    //   · 接地板 0.8  → 全站卖得太狠，我们只能知道「至少卖了这么多」，
+    //                    具体量反推不出来（删失下界）
+    //   · 顶天花板 1.06 → 根本没人卖，只能知道「至多卖了这么多」（删失上界）
+    // 这两种情况必须显式标出来。把「区间一端贴在边界」当成精确值，
+    // 会让后面的预测和卖货决策系统性地过度自信。
+    const rawLo = (p - 0.5) / q
+    const rawHi = (p + 0.5) / q
+    const lo = clampSupply(rawLo)
+    const hi = clampSupply(rawHi)
+    const censored = rawLo <= 0.8 ? 'floor' : (rawHi >= 1.06 ? 'ceil' : null)
+    // 兼容旧字段：以前的容差判据是 0.5/p + 0.5/q，这里用精确区间等价表达。
+    const clampedLow = rawLo <= 0.8
+    const clampedHigh = rawHi >= 1.06
+    const supply = clampSupply(s)
     rows[id] = {
-      quote: q, price: p, raw: s, supply: clampSupply(s), depth,
+      quote: q, price: p, raw: s, supply, lo, hi, censored, depth,
       clampedLow, clampedHigh,
-      soldRatio: clampedHigh ? 0 : (1.06 - clampSupply(s)) / 0.3,
-      soldSolid: (!clampedHigh && !clampedLow) ? (1.06 - clampSupply(s)) / 0.3 : null,
+      soldRatio: clampedHigh ? 0 : (1.06 - supply) / 0.3,
+      soldSolid: (!clampedHigh && !clampedLow) ? (1.06 - supply) / 0.3 : null,
     }
   }
   return { day, rows, n: Object.keys(rows).length }
@@ -88,11 +103,23 @@ export function forecastPrices(R, now, prices, { days = 8, external = {}, planne
       const q = baseQuote(R, id, d.day)
       const ext = external[id] || 0
       const sell = plannedSells[id] || 0
-      out.supply[id] = supplyAfterSelling(R, id, sell, ext)
-      out.price[id] = Math.max(1, Math.round(q * out.supply[id]))
-      // 区间：外部流量 0 ~ 2 倍波动
-      out.low[id] = Math.max(1, Math.round(q * supplyAfterSelling(R, id, sell, ext * 2 + (ext ? 0 : 0.45))))
-      out.high[id] = Math.max(1, Math.round(q * supplyAfterSelling(R, id, sell, 0)))
+      // 区间传播：未来唯一的未知量是「别人卖了多少」。
+      // 它的不确定度直接用今天反推出来的供需区间换算——
+      // 供需上限 hi 对应「卖得最少」，下限 lo 对应「卖得最多」：
+      //   soldRatio = (1.06 − supply) / 0.3
+      // 这样如果今天已经删失（顶到 0.8 或 1.06），区间会自然收敛到「明天
+      // 大概率还是这个状态」，而不是凭空给一个 ±45% 的伪区间。
+      const rec = cur.rows[id]
+      const extLo = rec ? Math.max(0, (1.06 - rec.hi) / 0.3) : ext * 0.4
+      const extHi = rec ? Math.max(extLo, (1.06 - rec.lo) / 0.3) : ext * 1.8
+      // 外部卖得越多 → 供需越低 → 价格越低（glut）；卖得越少 → tight。
+      const sBase = supplyAfterSelling(R, id, sell, ext)
+      const sGlut = supplyAfterSelling(R, id, sell, Math.max(extHi, ext))
+      const sTight = supplyAfterSelling(R, id, sell, Math.min(extLo, ext))
+      out.supply[id] = sBase
+      out.price[id] = Math.max(1, Math.round(q * sBase))
+      out.low[id] = Math.max(1, Math.round(q * Math.min(sGlut, sTight)))
+      out.high[id] = Math.max(1, Math.round(q * Math.max(sGlut, sTight)))
     }
     return out
   })
@@ -287,6 +314,12 @@ export function sellPlan(R, now, world, cfg = {}) {
       id, name: R.ITEM_NAME?.[id] || id, qty, base,
       cur: p0, curPct: p0 / base - 1,
       supply: cur.rows[id]?.supply ?? 1,
+      // 供需区间与删失标记：supply 是点估计，lo/hi 才是「真正知道的」。
+      // censored = 'floor' 表示已经卖到地板（谁都砸不动了），
+      // 'ceil' 表示没人卖（价格还能再涨的空间也说不准）。
+      supplyLo: cur.rows[id]?.lo ?? 1,
+      supplyHi: cur.rows[id]?.hi ?? 1,
+      censored: cur.rows[id]?.censored ?? null,
       soldYesterday: cur.rows[id]?.soldSolid,
       peak: best.price, peakIn: best.k, peakPct: best.price / base - 1,
       peakDay: fc[best.k].day,

@@ -1308,7 +1308,22 @@ export function planRound(world, cfg, log = () => {}) {
 export function planInvestments(R, s, prices, coins, cfg, t) {
   const W = R.WORLD
   const out = []
-  const maxPayback = cfg.invest?.maxPaybackDays || 10
+  // 回本期限不是一个固定值，而是随「闲置现金」浮动。
+  //
+  // 现金闲着本身就是亏的：余额税每天 08:00 按 0.1%–0.3% 扣，现金也不会自己生钱。
+  // 所以手头闲置越多，能接受的回本期就越长——这是「现金是手段、产能是目的」
+  // 的直接推论（榜一 model/objective.mjs 也是把现金当成 C0 项而不是目标）。
+  //
+  // 线上实测（2026-11-12）：现金 19.2M、reserve 3M，maxPaybackDays=10 时
+  // **一个候选都没有**——16.2M 一分没换成产能，同时每天白交约 3.46 万余额税。
+  // 放宽到 30 天立刻出现两条可投项：
+  //   扩畜栏 + 小猪  390,000   日收益 40,706   11.3 天回本
+  //   小屋 Lv3        600,000   日收益 34,059   17.6 天回本
+  // 两条都在 30 天内回本，而且产能是永久、可复利的。
+  const idleCoins = coins - (cfg.invest?.reserveCoins || 0)
+  const maxPayback = idleCoins >= (cfg.invest?.idleCoinsForLoose ?? 5_000_000)
+    ? (cfg.invest?.maxPaybackDaysIdle ?? 30)
+    : (cfg.invest?.maxPaybackDays || 10)
   // 长期平均的「择时卖出」系数：基础价的 1.3 倍，再扣税
   const longRunFactor = cfg.price?.longRun ?? 1.3
   const taxRate = coins >= R.B12_TAX.high ? 0.03 : coins >= R.B12_TAX.free ? 0.01 : 0

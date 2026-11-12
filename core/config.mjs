@@ -49,17 +49,22 @@ export const DEFAULTS = {
   // 投资
   invest: {
     enabled: true,
-    maxPaybackDays: 10,
+    // 回本期限随闲置现金浮动：闲置（现金 − reserve）不到 idleCoinsForLoose 时
+    // 用紧的 maxPaybackDays；超过就用宽松的 maxPaybackDaysIdle。
+    // 现金躺着要交余额税（300 万以上 0.1%，1000 万以上 0.3%），
+    // 而产能投入是永久的，所以钱越多越该放宽回本要求。
+    maxPaybackDays: 10,          // 现金不富裕时的回本上限（天）
+    idleCoinsForLoose: 5000000,  // 闲置现金超过这个数就走宽松档
+    maxPaybackDaysIdle: 30,      // 现金闲置充足时的回本上限（天）
     reserveCoins: 3000000,
     maxPlot: 24,
     maxBarn: 8,
     maxTrap: 4,
-    // 小屋只加体力上限（每级 +20）。以前默认 0，理由是「脚本从不让体力攒满，
-    // 上限提升没收益」——实测恰恰相反，体力上限就是当前的硬瓶颈：
-    // 野外 24 块地每块收割要 1 点，而体力只按 180 秒回 1 点，
-    // 一次只能收 1 块就归零（日志里连续 231 次「体力 0/100」）。
-    // 上限 100→120 相当于多攒 20 点 = 一次能多收 20 块地。
-    // Lv1 只要 10 万 D，对比每天几百万的收益，回本期是以小时计的。
+    // 小屋只加体力上限（每级 +20）。上限就是当前的硬瓶颈：
+    // 长夜 22:00—08:00 岛钟暂停，但体力仍按现实时间回复——10 小时 = 600 分钟
+    // ÷ 3 分钟/点 = 200 点，远超上限（140）。线上实测 2026-11-11 12:15
+    // 脚本启动时体力 100/100，证实夜间必定回满、超出部分直接浪费。
+    // 所以每级 +20 上限 ≈ 每天多回收 20 点体力，直到上限 200 才失效。
     maxHouse: 5,
     maxRod: 4, maxPick: 4, maxSpr: 3,
   },
@@ -121,6 +126,23 @@ export const DEFAULTS = {
 
   // 加工
   craft: { enabled: true, minMargin: 0.05, maxPerRound: 20, hoardMax: 240 },
+
+  // 大肥鱼修仙记（state.xs）
+  //
+  // 重要：灵石只在修仙内部循环（买种子、学功法、融合），**换不成 D 币**。
+  // 所以这一项对「赚 D 币」没有直接贡献，是纯养成，默认关闭。
+  // 打开后每轮巡视跑一批，炼丹 19 秒出炉这类短窗口会在同一轮里连做几批。
+  xian: {
+    enabled: false,
+    maxActions: 20,              // 单批最多几条动作（站点一批上限 20~30）
+    maxBatchesPerRound: 3,       // 单轮巡视最多连做几批
+    // 突破策略：smart = 药园没满级前先攒培元丹喂药园，满级后才按部就班突破
+    //   eager = 一到瓶颈就突破   manual = 永不自动突破
+    breakMode: 'smart',
+    // 融合灵根不可逆（根数 −1），默认关。开了才会在修为损耗最小的窗口融合。
+    autoFuse: false,
+    fuseTarget: 'auto',          // auto / ice / thunder / wind / lava / poison
+  },
 
   // 卖货（核心）
   sell: {

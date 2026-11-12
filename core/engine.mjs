@@ -12,6 +12,7 @@ import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
 import { shouldSnipe, noteSnipeResult, waveLeadSec } from './steal-schedule.mjs'
+import { xianRound, xianSnapshot } from './xian.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -477,6 +478,18 @@ export class Engine {
       } catch (e) { this.log('帮忙出错：' + e.message, 'err') }
     }
 
+    // ---------- 修仙 ----------
+    // 灵石不能换 D 币，所以这一步对现金收益零贡献；它只推进养成进度。
+    // 放在帮忙之后、偷菜之前：修仙的短窗口（炼丹 19 秒出炉、抢双倍收获）
+    // 靠 xianRound 内部的连批完成，不会拖住后面的掐点偷菜。
+    if (cfg.xian?.enabled) {
+      try {
+        this.setStep('修仙 · 药园')
+        const xr = await xianRound(w, cfg, this.log.bind(this), this.memo)
+        totalActions += xr.actions || 0
+      } catch (e) { this.log('修仙出错：' + e.message, 'err') }
+    }
+
     // ---------- 偷菜 ----------
     // 掐点那一块已经跑过就跳过：否则会紧接着再全量扫一遍目录，白花几十秒。
     if (cfg.social?.steal?.enabled && !cfg.dry && !stealSnipeDone) {
@@ -526,6 +539,17 @@ export class Engine {
     // ---------- 下次唤醒 ----------
     this.setStep('计算下次巡视时间')
     let sleep = cfg.dry ? (cfg.loop?.maxSleep || 120) : nextWake(w, cfg, this.memo)
+    // 修仙的短窗口（丹炉 19 秒后出炉、作物长一阶、灵力回够起炉）比主岛任何
+    // 事件都密，nextWake 不知道它们。这里把 memo 里的时刻并进来。
+    //
+    // 阈值 10 秒是防自旋：planXianActions 在「现在有活」时会返回 t+3，
+    // 但真有活时 xianRound 内部的连批已经做过了；剩下还返回 t+3 只可能是
+    // 服务端一直拒（规则过期/灵力不够），再 3 秒醒一次就是空转。
+    if (cfg.xian?.enabled && !cfg.dry) {
+      const at = Number(this.memo.xianWakeAt) || 0
+      const wait = at > 0 ? at - w.tickClock() : Infinity
+      if (wait >= 10 && wait < sleep) sleep = wait
+    }
     // 保险：nextWake 说「立刻有事」（<10 秒）但这一轮一个动作都没做成，
     // 说明「看起来有活其实干不了」（体力/材料/现金卡住）。
     // 这时必须退避，否则就是每几秒醒一次的刷屏循环——
@@ -904,7 +928,16 @@ export class Engine {
       },
       stats: this.stats,
       history: this.history.slice(-240),
+      // 修仙面板的数据。灵石不能换 D 币，界面上必须写清楚（见 GUI）。
+      xian: this.xianView(),
     }
+  }
+
+  /** 修仙快照（GUI 用；世界状态没就绪时返回 null） */
+  xianView() {
+    const w = this.world
+    if (!w.ready) return null
+    try { return xianSnapshot(w, this.cfg) } catch (e) { return { exists: false, error: e.message } }
   }
 
   /** 市场预测（给 GUI 的市场面板） */
