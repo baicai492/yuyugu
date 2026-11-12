@@ -4,7 +4,7 @@
 // 偷菜：每次 5 体力起（每多一处 +1，上限 15），被发现则打一场守家战，
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
-import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC } from './steal-schedule.mjs'
+import { updateIsleSchedule, nextUnlock, EXPIRED_GRACE_SEC, WAKE_GRACE_SEC } from './steal-schedule.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -209,6 +209,29 @@ export async function scanStealTargets(world, cfg, log = () => {}, memo = {}) {
 }
 
 /**
+ * 清掉已经到点、却一直没偷成的解禁记录。
+ *
+ * 判据是「解禁时刻已经过去 leadSec 秒以上」。到了这个点还没偷到，只有两种可能：
+ *   · 目标已经被偷满（stolen 到 2）或被别人抢走
+ *   · 我们体力不够 / 被守家打跑
+ * 两种情况下再留着这条记录都只会让主循环反复「到点醒来 → 扫一遍 → 什么都没做」。
+ * 下次真正扫到那座岛时，updateIsleSchedule 会按最新状态重新算出解禁时刻。
+ */
+function sweepStaleUnlocks(schedule, now, leadSec = 8) {
+  for (const [id, rec] of Object.entries(schedule || {})) {
+    const list = rec?.upcoming
+    if (!Array.isArray(list) || !list.length) continue
+    const keep = list.filter((u) => u.unlockAt > now - leadSec)
+    if (keep.length !== list.length) {
+      rec.upcoming = keep
+      if (!keep.length && !Object.keys(rec.plots || {}).length && !Object.keys(rec.pens || {}).length) {
+        delete schedule[id]
+      }
+    }
+  }
+}
+
+/**
  * 重建「值得盯」的岛列表（watchlist）。
  *
  * 为什么要这张表：服务端的「可偷」筛选只告诉我们**此刻**谁能偷。
@@ -373,16 +396,34 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const R = world.R
   const lastScan = memo.stealScanAt || 0
   const every = st.scanEvery ?? 1800
+  const leadSec = st.prepLeadSec ?? 8
 
-  // 有两种情况要绕过「扫描间隔」：
-  //   1. 调度表里某处刚好到解禁时刻（这是精确调度，不能等下一个扫描周期）
-  //   2. 调度表里记着的解禁时刻已经过去但还没去偷（刚醒过来，别再过 30 分钟）
-  const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec: st.prepLeadSec ?? 8 })
+  // 先把「已经处理过 / 已经失效」的解禁记录清掉，再判断要不要绕过扫描间隔。
+  //
+  // 这一步是这次「每 5 秒输出一次『有已解禁未处理的目标，提前扫描』」的真正解法。
+  // 线上日志（2026-11-12 14:07）是这么循环的：
+  //   1. 调度表里有 433 条记录（watchRound 巡逻时把「成熟在保护期」的地
+  //      全记成 900 秒后解禁，53 座岛 × 平均 8 块）
+  //   2. 时间到 → nextWake 给 1 秒 → 主循环立刻醒
+  //   3. stealRound 看到 overdue（过期 10 秒以上、300 秒宽限内）→ 绕过扫描间隔去扫
+  //   4. 扫描用 stealable=1 筛选，服务端返回 0 家 → 一个岛都没访问
+  //      → 那些记录一条都不会被 updateIsleSchedule 更新 → 还留在表里
+  //   5. 回到 2，无限循环
+  //
+  // 关键：一次扫描都没偷到就说明这条记录已经没用了（被偷满 / 已被别人抢走 /
+  // 守家打不过）。留着它只会让主循环反复空转。所以过期即弃，
+  // 下次真正扫到那座岛时 updateIsleSchedule 会重新算。
+  sweepStaleUnlocks(memo.stealSchedule, world.now, leadSec)
+
+  const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec })
   // 「到点了」必须是「还没过点」才算：nx.at 已经过去时（负数差值）也满足 <= 13，
   // 会让每一轮都打断扫描间隔，配合 nextWake 的 1 秒候选变成几秒一醒的空转。
-  const snipeReady = !!nx && nx.at >= world.now - (st.prepLeadSec ?? 8) && nx.at - world.now <= (st.prepLeadSec ?? 8) + 5
+  const snipeReady = !!nx && nx.at >= world.now - leadSec && nx.at - world.now <= leadSec + 5
+  // 宽限必须和 nextUnlock 的 WAKE_GRACE_SEC 一致。
+  // 用 EXPIRED_GRACE_SEC（300 秒）会变成：解禁后 300 秒内每一轮都绕过扫描间隔，
+  // 而 nextWake 只在前 30 秒里催醒——中间的 270 秒就成了「醒了就扫、扫了也没用」。
   const overdue = Object.values(memo.stealSchedule || {})
-    .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - EXPIRED_GRACE_SEC))
+    .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - WAKE_GRACE_SEC))
 
   if (world.now - lastScan < every && !snipeReady && !overdue) {
     // 还没到全量扫描的时候，但可以顺手巡逻几家 watchlist：

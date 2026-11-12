@@ -567,7 +567,13 @@ export class Engine {
     // 规则：间隔 = 等待时长的 1/10，夹在 [20, 300] 秒之间。
     const base = this.cfg.loop?.watchInterval ?? 20
     const interval = Math.max(base, Math.min(300, Math.round(sleepSec / 10))) * 1000
-    let lastCheck = 0
+    // 从「现在」开始计，不要从 0 开始。
+    //
+    // 从 0 开始等于进等待时立刻巡检一次，而此刻世界状态刚刚在后端 refresh 过
+    // （tick 收尾那次），这次巡检纯属重复请求。更要命的是它会破了退避：
+    // 线上 2026-11-12 14:07 的日志里，退避到 300 秒后 3 秒就「提前醒来：偷菜解禁」——
+    // 就是这一下立刻巡检造成的，接着又扫一遍、又什么都没有、再退避，每 3~5 秒一轮。
+    let lastCheck = Date.now()
     while (this.running && Date.now() < until) {
       const step = Math.min(2000, until - Date.now())
       await new Promise((r) => setTimeout(r, step))
