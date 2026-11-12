@@ -1,6 +1,10 @@
 // 本地 HTTP 服务：给 Chrome GUI 插件提供状态、配置、行情与指令。
 // 只监听 127.0.0.1，且要求 Origin 白名单 + 可选 token，防止被网页里的脚本乱调。
 import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
+import { openSync, writeFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { saveConfig } from './config.mjs'
 import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir } from './logfile.mjs'
 
@@ -164,6 +168,35 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             engine.log('GUI：退出程序')
             setTimeout(() => process.exit(0), 300)
             return send(res, 200, { ok: true })
+          case 'restart': {
+            // 改了代码必须重启进程才生效。这里直接「换一个自己」：
+            // 先把回包发出去，再 spawn 一个脱离的新进程，然后自己退出。
+            // 不用 Native Messaging，省掉端口时序与宿主是否安装的干扰。
+            engine.log('GUI：重启主程序（加载最新代码）')
+            send(res, 200, { ok: true, msg: '正在重启，3 秒后自动重连' })
+            const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+            const main = resolve(root, 'yuyugu2.mjs')
+            // 带上原来的启动参数，但去掉会让新进程只跑一轮就退出的 --once
+            const args = process.argv.slice(2).filter((a) => a !== '--once')
+            // 必须等回包真正写出去再退出，否则 GUI 看到的是「连接被重置」，
+            // 分不清是重启成功还是崩溃了。
+            setTimeout(() => {
+              try {
+                // 先放开端口，让新进程能立刻 bind —— 否则它会撞 EADDRINUSE
+                try { server.close() } catch {}
+                const out = openSync(resolve(root, 'logs', `host-${new Date().toISOString().slice(0, 10)}.log`), 'a')
+                const child = spawn(process.execPath, [main, ...args], {
+                  cwd: root, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+                })
+                child.unref()
+                writeFileSync(resolve(root, 'logs', 'yuyugu.pid'), String(child.pid), 'utf8')
+              } catch (e) {
+                console.error('重启失败：' + e.message)
+              }
+              process.exit(0)
+            }, 500)
+            return
+          }
           default:
             return send(res, 400, { error: '未知指令：' + cmd })
         }
@@ -188,9 +221,22 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
     }
   })
 
-  server.listen(port, '127.0.0.1', () => {
-    engine.log(`本地服务已启动：http://127.0.0.1:${port}`)
+  // listen 可能因为「上一个进程刚重启、端口还在 TIME_WAIT」而失败，
+  // 重试几次再放弃。第一次失败不打印，避免重启时日志里出现吓人的报错。
+  let tries = 0
+  const tryListen = () => {
+    server.listen(port, '127.0.0.1', () => {
+      engine.log(`本地服务已启动：http://127.0.0.1:${port}`)
+    })
+  }
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE' && tries++ < 20) {
+      setTimeout(tryListen, 300)
+      return
+    }
+    engine.log(`本地服务启动失败：${e.message}`, 'err')
   })
+  tryListen()
   return server
 }
 

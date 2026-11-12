@@ -445,6 +445,28 @@ function bind() {
   $('btnStop').onclick = async () => { try { await cmd('stop'); await loadStatus() } catch (e) { $('statusline').textContent = e.message } }
   $('btnOnce').onclick = async () => { try { await cmd('once'); setTimeout(loadStatus, 1500) } catch (e) { $('statusline').textContent = e.message } }
 
+  // 重启：主程序会 spawn 一个新进程再自杀，所以这里必然先看到连接断开，
+  // 然后轮询 ping 直到新进程起来，再重新连接。
+  $('btnRestart').onclick = async () => {
+    const btn = $('btnRestart')
+    btn.disabled = true
+    $('statusline').textContent = '正在重启主程序…'
+    try { await cmd('restart') } catch { /* 旧进程可能来不及回包就退出了，忽略 */ }
+    logSince = 0; logLines = []
+    let up = false
+    for (let i = 0; i < 40; i++) {          // 最多等 20 秒
+      await new Promise((r) => setTimeout(r, 500))
+      try { await api('/api/ping'); up = true; break } catch {}
+    }
+    if (up) {
+      await connect()
+      $('statusline').textContent = '已重启，加载的是最新代码'
+    } else {
+      $('statusline').textContent = '重启后 20 秒内没连上，请看 logs/host-*.log'
+    }
+    btn.disabled = false
+  }
+
   $('mRefresh').onclick = refreshMarket
   // 改了参数就同步写回配置——策略与面板共用一个数，不会各走各的
   $('mDays').onchange = async () => {
