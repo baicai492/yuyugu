@@ -118,11 +118,11 @@ export function workValuePerEnergy(R, s, t, prices, cfg) {
     if (ev > 0) best = Math.max(best, ev / (W.cost.fish || 1))
   }
   if (cfg.work?.mine && left('mine', W.daily.mine) >= 3) {
-    const ev = mineEV(R, s, prices, false) / (1.25 + 0.05 * (s.tools?.pick || 0))
+    const ev = mineEV(R, s, prices, false, t) / (1.25 + 0.05 * (s.tools?.pick || 0))
     if (ev > 0) best = Math.max(best, ev / (W.cost.mine || 1))
   }
   if (cfg.work?.bomb && left('bomb', W.daily.bomb) > 0 && (s.inv?.bomb?.[0] || 0) > 0) {
-    const ev = mineEV(R, s, prices, true)
+    const ev = mineEV(R, s, prices, true, t)
     if (ev > 0) best = Math.max(best, ev / (W.cost.bomb || 1))
   }
   return best
@@ -146,21 +146,23 @@ export function fishEV(R, s, t, prices, useBait) {
 }
 
 /** 挖矿的期望收益 */
-export function mineEV(R, s, prices, useBomb) {
+export function mineEV(R, s, prices, useBomb, t = Date.now() / 1000) {
   const floor = Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick])
-  const weather = R.weatherOf(R.isleDay(Date.now() / 1000 + (s.enT || 0) * 0))
+  // 风暴天（weather===3）高价矿出现概率 ×1.6（旧版 oreEV）
+  const weather = R.weatherOf(R.isleDay(t))
+  const storm = (o) => (o.price >= 12000 && weather === 3 ? 1.6 : 1)
   const pool = R.ORES.filter((o) => o.floor <= floor)
-  const w = pool.map((o) => o.w * (1 + (floor - o.floor) / 40))
+  const w = pool.map((o) => o.w * storm(o) * (1 + (floor - o.floor) / 40))
   const sum = w.reduce((a, b) => a + b, 0)
   let ev = 0
   pool.forEach((o, i) => { ev += (w[i] / sum) * (prices[o.id] || o.price) })
   if (useBomb) {
     const bombPool = R.ORES.filter((o) => o.floor <= floor)
-    const bw = bombPool.map((o) => o.w * (o.price >= 7000 ? 1.35 : 1) * (1 + (floor - o.floor) / 40))
+    const bw = bombPool.map((o) => o.w * storm(o) * (o.price >= 7000 ? 1.35 : 1) * (1 + (floor - o.floor) / 40))
     const bsum = bw.reduce((a, b) => a + b, 0)
     let bev = 0
     bombPool.forEach((o, i) => { bev += (bw[i] / bsum) * (prices[o.id] || o.price) })
-    const hits = 6 + 0.3 * 2
+    const hits = 6 + 2 * (0.3 + 0.05 * (s.tools.pick || 1))
     return bev * hits - (R.SHOP.bomb?.price || 2500)
   }
   return ev * (1.25 + 0.05 * s.tools.pick)
@@ -237,28 +239,59 @@ export function makeCropPlanner(R, s, t, prices, cfg, weather, foodCost = 300) {
   const QUALITY = R.QUALITY || [1, 1.25, 1.5]
   const modeOf = (i) => (R.sprinkled(s, i) || weather === 1 ? 'auto' : (cfg.farm?.water ? 'manual' : 'none'))
 
-  /** 一茬的产量（按品质）与耗时，折算成「每岛日」 */
+  /**
+   * 逐茬模拟这块地：什么时候熟、浇了几次水、会不会在离线时段里熟（熟了没人收，
+   * 超过保护期还会被偷——被偷过的地这次固定只收 1 个）。
+   * 返回按「每岛日」折算的产量（分品质）、种子钱和农务体力。
+   * 和旧版 cropCycle 同源：固定浇水次数是近似，逐阶段模拟才能算准
+   * 复茬作物第二茬起会不会跨季、会不会撞上离线时段。
+   */
   const cycleOf = (c, mode) => {
     const W = R.WORLD
-    const base = (c.grow || 60) * 60 * 0.8            // 基础生长（规则里岛日时钟比现实快 0.8）
     const times = c.regrow ? (c.times || 1) : 1
-    const per = (h) => (h > 0 ? c.regrow * 0.8 : c.grow) * 60 * 0.8
-    let waters = 0
-    const total = mode === 'auto' ? base * 0.6 : mode === 'manual' ? base * 0.75 : base
-    if (mode === 'auto') waters = 3
-    else if (mode === 'manual') waters = 2
-    // 浇水次数决定品质：越多金/银星比例越高
-    const y = 1.3 + 0.08 * waters
-    const gold = 0.05 + 0.1 * waters
-    const silver = 0.2 + 0.08 * waters
-    // 复茬作物是「种一次、收 times 次」，所以产量要按收获次数累加。
-    // 只算一次收获的话（同时 secs 已经累加了所有茬的间隔）会严重低估复茬作物。
-    const items = [y * (1 - gold - silver), y * silver, y * gold].map((n) => n * times)
-    let secs = total
-    for (let h = 1; h < times; h++) secs += per(h) * (mode === 'auto' ? 0.6 : mode === 'manual' ? 0.75 : 1)
-    const perDay = 86400 / Math.max(1, secs)
-    const opsE = (W.cost.plant + W.cost.harvest * times + waters * W.cost.water) * perDay
-    return { items: items.map((x) => x * perDay), seed: c.seed * times * perDay, energy: opsE }
+    const items = [0, 0, 0]
+    let time = t, n = 0, waters = 0, opsE = W.cost.plant, stolen = 0, first = 0
+    for (let h = 0; h < times; h++) {
+      const base = (h > 0 ? c.regrow * 0.8 : c.grow) * 60 * 0.8   // 岛日时钟比现实快 0.8
+      let total = base, w = 0
+      if (mode === 'auto') { total = base * 0.6; w = 3 }
+      else if (mode === 'manual') {
+        // 每个生长阶段一开始就浇一次，每次把**剩余**时间缩短 25%。
+        // 离线时段里浇不到水，所以这段时间只能按自然速度走。
+        let g = 0, cur = time
+        for (let k = 0; k < 12; k++) {
+          total = base - g
+          const el = cur - time
+          if (el >= total) break
+          const stage = Math.min(2, Math.floor((el / total) * 3)), off = offlineWindow(cfg, cur)
+          if (!off && w <= stage) { g += Math.floor((total - el) * 0.25); w++; waters++; continue }
+          const next = Math.min(stage < 2 ? time + Math.ceil((total * (stage + 1)) / 3) : Infinity, off ? off[1] : Infinity)
+          if (!(next < time + total)) break
+          cur = Math.max(next, cur + 1)
+        }
+        total = base - g
+      }
+      const ripe = time + total, off = offlineWindow(cfg, ripe + 60)
+      const at = off ? off[1] : ripe, taken = at - ripe > (cfg.defense?.protect ?? 1800)
+      const y = taken ? 1 : 1.3 + 0.08 * w
+      const gold = 0.05 + 0.1 * w, silver = 0.2 + 0.08 * w
+      items[0] += y * (1 - gold - silver); items[1] += y * silver; items[2] += y * gold
+      if (taken) stolen++
+      n++; opsE += W.cost.harvest
+      if (!h) first = at - t
+      time = at
+      // 复茬作物跨过换季就枯死，得清地重种（后面的茬次也不再产出了）
+      if (h + 1 < times && !c.seasons.includes(R.seasonOf(R.isleDay(time)))) { opsE += W.cost.clear || 0; break }
+    }
+    opsE += waters * W.cost.water
+    const secs = Math.max(1, time - t), perDay = 86400 / secs
+    return {
+      n, secs, first, stolen, waters: waters * perDay,
+      items: items.map((x) => x * perDay),
+      // 种子只买一次：复茬是收完再长，不重新播种（以前乘 times 会严重高估复茬成本）
+      seed: c.seed * perDay,
+      energy: opsE * perDay,
+    }
   }
 
   const crops = R.CROPS.filter((c) => c.seasons.includes(season)).map((c) => {
@@ -372,8 +405,8 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
 
   const perE = (v, cost) => (v > 0 ? Math.round(v / cost) : 0)
   const fish = cfg.work?.fish ? perE(fishEV(R, s, t, expPrices, useBait), R.WORLD.cost.fish) : 0
-  const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick), R.WORLD.cost.mine) : 0
-  const bomb = cfg.work?.bomb ? perE(mineEV(R, s, expPrices, true), R.WORLD.cost.bomb) : 0
+  const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick), R.WORLD.cost.mine) : 0
+  const bomb = cfg.work?.bomb ? perE(mineEV(R, s, expPrices, true, t), R.WORLD.cost.bomb) : 0
 
   // 本岛日还剩下多少额度。日志里必须写清楚——「每点体力收益 炸矿 2,952」
   // 和「这个岛日已经炸满 10 次了」是两回事，只打前者会让人以为程序一直在炸矿。
@@ -732,6 +765,9 @@ export function planRound(world, cfg, log = () => {}) {
         planted++
         plantedNames[pick.crop.name] = (plantedNames[pick.crop.name] || 0) + 1
         planner.add(pick.crop.id, mode)
+        // 手动浇水的地：种下后立刻浇一次（旧版 waterAll(i)）。
+        // 不浇的话要等下一轮巡视，白白少一次浇水——品质和成熟时间都跟着差。
+        if (mode === 'manual') push({ a: 'water', i })
       })
       if (planted) {
         const parts = Object.entries(plantedNames).map(([n, k]) => `${n}×${k}`).join('、')
@@ -969,8 +1005,12 @@ export function planRound(world, cfg, log = () => {}) {
       // 而 nextWake 又按「还有额度」每 60 秒催一次，于是整天每 60 秒醒一次、
       // 醒来什么都不干（线上 14:44~14:47 稳定复现）。
       const mineLowQuota = mineLeft > 0 && mineLeft < 3
-      const mineVal = cfg.work.mine && mineLeft > 0 ? mineEV(R, s, expPrices, false) / (1.25 + 0.05 * s.tools.pick) : -1
-      const bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, expPrices, true) : -1
+      const mineVal = cfg.work.mine && mineLeft > 0 ? mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick) : -1
+      const canDeeper = s.mine.max < R.PICK_FLOOR[s.tools.pick]
+      let bombVal = cfg.work.bomb && bombLeft > 0 && mineLeft >= 6 && (s.inv.bomb?.[0] || 0) > 0 ? mineEV(R, s, expPrices, true, t) : -1
+      // 镐子还能到更深的层时，炸矿的价值至少按「口粮成本 ×2」算：
+      // 下潜解锁的新矿层是长期收益，不能因为当下这层矿不值钱就永远不下去（旧版 canDeeper）。
+      if (bombVal >= 0 && canDeeper) bombVal = Math.max(bombVal, (W.cost.bomb || 1) * (eatCost || 0) * 2)
       // 不按当前体力筛任务：体力不够时下面会决定「吃口粮补」还是「等自然回复」。
       // 按体力筛的话，体力见底会直接跳出，永远等不到吃口粮那一步。
       const jobs = []
@@ -1222,15 +1262,23 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
   // ---------- 地块：多种一块能多收多少 ----------
   if (s.plotN < Math.min(W.plotsMax, cfg.invest?.maxPlot ?? 24)) {
     const price = W.plotPrice(s.plotN + 1)
-    const season = R.seasonOf(R.isleDay(t))
-    const best = bestCropFor(R, season, prices)
-    if (best) {
-      // 一茬的总产出（含品质溢价 54%、复茬 28.5%）减种子钱，按成熟周期折成「每天多少茬」
-      const total = best.regrow ? (best.times || 1) : 1
-      const minutes = best.grow + (best.regrow || 0) * (total - 1)
-      const perRound = (best.price * 1.54 * 1.285 * total - best.seed)
-      add(`开垦第 ${s.plotN + 1} 块地`, { a: 'expand', k: 'plot' }, price, (perRound / Math.max(1, minutes)) * 1440)
-    }
+    const weather = R.weatherOf(R.isleDay(t))
+    // 用真正的种植规划器算边际价值：它会扣掉阶梯价、加工名额和农务体力，
+    // 比「当作全价卖」的粗估更接近实收（旧版 investOptions 用的就是 planner.best()）。
+    try {
+      const foodCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
+      const soilCost = Math.max(foodCost, workValuePerEnergy(R, s, t, prices, cfg))
+      const cp = makeCropPlanner(R, s, t, prices, cfg, weather, soilCost)
+      // 先把已经在长的作物记进去，新地才是「第 N+1 块」的真实边际
+      for (let i = 0; i < s.plotN; i++) {
+        const p = s.plots[i]
+        if (!p) continue
+        if (R.cropStage(p, t, R.sprinkled(s, i) || weather === 1).stage < 0) continue
+        cp.add(p.c, cp.modeOf(i))
+      }
+      const m = cp.pick(cfg.farm?.water ? 'manual' : 'none', false)
+      if (m && m.value > 0) add(`开垦第 ${s.plotN + 1} 块地`, { a: 'expand', k: 'plot' }, price, m.value)
+    } catch { /* 算不出来就不投这项 */ }
   }
 
   // ---------- 鱼竿：四季 × 全天取最好的时段，看升级能多赚多少 ----------
@@ -1269,8 +1317,8 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     // 挖矿一次的期望受 PICK_FLOOR 影响，所以每升一级都会更深一层。
     const dayOre = (pick) => {
       const s2 = { ...s, tools: { ...s.tools, pick } }
-      const per = mineEV(R, s2, prices, false)
-      const bomb = cfg.work?.bomb ? mineEV(R, s2, prices, true) : 0
+      const per = mineEV(R, s2, prices, false, t)
+      const bomb = cfg.work?.bomb ? mineEV(R, s2, prices, true, t) : 0
       return per * R.WORLD.daily.mine + (bomb > 0 ? bomb * R.WORLD.daily.bomb : 0)
     }
     if (pickPrice != null) add(`镐子 Lv${s.tools.pick + 1}`, { a: 'upgrade', k: 'pick' }, pickPrice, (dayOre(s.tools.pick + 1) - dayOre(s.tools.pick)) * ISLE_PER_DAY)
@@ -1299,7 +1347,11 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
   }
 
   // ---------- 动物：整个成年期净赚 ÷ 总天数，挑最好的一种 ----------
-  const animalRank = R.ANIMALS.map((a) => {
+  // 离线时段开着时不买「一格多只」的动物（旧版 defense.safeAnimals）：
+  // 离线期间产出的畜产品没人收，占格多的品种损失更大。
+  const animalRank = R.ANIMALS
+    .filter((a) => !(cfg.offline?.enabled && cfg.defense?.safeAnimals) || a.cap === 1)
+    .map((a) => {
     const adultDays = (R.B12_ADULT_DAYS?.[a.id] ?? 24) / ISLE_PER_DAY
     const growDays = (R.B12_GROW_DAYS?.[a.id] ?? 2) / ISLE_PER_DAY
     const daily = (1440 / a.every) * lr(a.product) * 1.2 - (R.SHOP.feed?.price ?? 300)
@@ -1580,8 +1632,8 @@ export function nextWake(world, cfg, memo = {}) {
   // 体力常年 0~3，偷菜额度一整天都是 0（线上 11-12 全天只偷到 1 处）。
   if (cfg.social?.steal?.enabled) {
     const stealE = 5
-    const canSteal = s.en >= stealE || !!energyActions(R, s, prices, {
-      need: stealE, maxPerE: cfg.social.steal.maxEnergyCost ?? 600, cfg, coins,
+    const canSteal = s.en >= stealE || !!energyActions(R, s, world.prices, {
+      need: stealE, maxPerE: cfg.social.steal.maxEnergyCost ?? 600, cfg, coins: world.coins,
     })
     if (canSteal) {
       const last = memo.stealScanAt || 0
