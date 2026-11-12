@@ -133,6 +133,8 @@ export const DEFAULTS = {
     sellRipeOnly: false,
     // 每种作物每日全价额度（阶梯价），超出部分留到明天
     respectTiers: true,
+    // 同种作物库存超过这个数时，允许把第二档（85%）也卖掉清库存（旧版 sell.tier2Above）
+    tier2Above: 450,
     maxSellPerRound: 40,         // 单轮最多卖几格
   },
 

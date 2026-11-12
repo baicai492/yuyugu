@@ -1150,9 +1150,14 @@ export function planRound(world, cfg, log = () => {}) {
       if (r.gain > 0 && r.gain / Math.max(1, r.netNow) > (cfg.sell.minGainPct || 5) / 100) continue // 等等更赚
       let n = r.qty
       if (cfg.sell.respectTiers && r.isCrop) {
-        // 只卖今天还能全价的部分
+        // 只卖今天还能全价的部分；但库存积压太多（超过 tier2Above）时，
+        // 允许把第二档（85%）也卖掉——否则每天产量远大于全价额度，
+        // 库存永远清不掉，实际收入反而更少（旧版 tier2Above 逻辑）。
         const full = R.cropFullLeft(s, r.id)
-        n = Math.min(n, full > 0 ? full : 0)
+        const sold = s.cnt?.['sc_' + r.id] || 0
+        const tier2 = Math.max(full, (R.CROP_TIERS?.[1]?.[0] ?? 450) - sold)
+        const over = totalOf(r.id) > (cfg.sell.tier2Above ?? 450)
+        n = Math.min(n, over ? Math.max(0, tier2) : (full > 0 ? full : 0))
         if (n <= 0) continue
       }
       sells.push({ ...r, n })
@@ -1427,7 +1432,15 @@ export function nextWake(world, cfg, memo = {}) {
     const auto = R.sprinkled(s, i) || weather === 1
     const st = R.cropStage(p, t, auto)
     if (st.stage === 3) hasRipe = true
-    else if (st.stage >= 0) push(st.left)
+    else if (st.stage >= 0) {
+      push(st.left)
+      // 手动浇水的地：下一个生长阶段一开始就该浇水（旧版 nextWake）。
+      // 只在成熟时才醒会让每次浇水都晚一拍，金银星比例跟着掉。
+      if (!auto && cfg.farm?.water && st.stage < 2 && st.total > 0) {
+        const stageAt = p.t + Math.ceil(st.total * (st.stage + 1) / 3) + 2
+        push(stageAt - t)
+      }
+    }
   }
   if (hasRipe) {
     const canHarvest = s.en >= (R.WORLD.cost.harvest || 1)
