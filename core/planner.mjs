@@ -844,8 +844,19 @@ export function planRound(world, cfg, log = () => {}) {
     }
     const windowRatio = cfg.work.windowRatio ?? 0.97
     const deadlineSec = cfg.work.deadlineSec ?? 1200
+    // 窗口只在「体力足够吃完当天额度」时才有意义。
+    //
+    // 它的本意是「低谷期别把额度浪费掉，留给高峰」。但如果体力根本吃不满额度，
+    // 等着就是纯亏：额度随岛日作废，而省下的体力只会在上限里溢出浪费。
+    // 线上实测：晴天的岛日里 00-05 点比值 88%、06-11 点 85%，
+    // 阈值 93% 把前 12 个岛小时全判成「等最佳」——半个岛日一竿不下，
+    // 而剩 80 次额度需要 320 点体力，自然回复一整个岛日只有 80 点，永远吃不满。
+    const fishUsed = (s.iq?.d === R.isleIndex(t) ? s.iq.fish : 0) || 0
+    const fishLeftQ = Math.max(0, (W.daily.fish || 0) - fishUsed)
+    const regenLeft = Math.floor(Math.max(0, boundaryIn) / regen)
+    const canFinishQuota = s.en + regenLeft >= fishLeftQ * (W.cost.fish || 4)
     const fishOK = !R.b12IsLongNight(t) &&
-      (fishNowEV >= fishBestEV * windowRatio || boundaryIn < deadlineSec)
+      (fishNowEV >= fishBestEV * windowRatio || boundaryIn < deadlineSec || !canFinishQuota)
 
     // --- 跨期体力预算 ---
     // 换岛日边界前，体力每 regen 秒回 1 点。这部分「白来的」体力用来挖矿/炸矿时
@@ -887,7 +898,7 @@ export function planRound(world, cfg, log = () => {}) {
       // 净赚 775。以前只要 regenBudget 够就无脑「等自然回复」，
       // 实测体力 8、keep 6（可用 2 点）、挖矿要 3 点，于是每轮什么都不做、
       // 退避 60 秒，97 次挖矿额度整岛日烂在那里。
-      const regenLeft = Math.floor(Math.max(0, boundaryIn) / regen)
+      // regenLeft 在钓鱼窗口那段已经算过，这里直接复用。
       const quotaEnergy =
         (fishLeft > 0 && fishOK ? fishLeft : 0) * (W.cost.fish || 0) +
         Math.max(0, mineLeft) * (W.cost.mine || 0) +
