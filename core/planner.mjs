@@ -618,6 +618,18 @@ export function planRound(world, cfg, log = () => {}) {
     }
     needTotal = Math.min(needTotal, s.plotN || needTotal)
 
+    // 口粮库存越充足，要种的口粮地越少（旧版 economy() 的插值）：
+    //   库存 ≤ reserveE     → 按满额种（缺口全补）
+    //   库存 ≥ reserveEnergy → 只保留下限 foodPlots
+    // 没有这一层的话，库存攒满也照样种 10 块口粮地，白白占掉能卖钱的地。
+    {
+      const lo = cfg.energy?.reserveE ?? 600
+      const hi = Math.max(lo + 1, cfg.energy?.reserveEnergy ?? 2500)
+      const stockE = foodChoices(R, s, prices).reduce((a, f) => a + f.n * f.restore, 0)
+      const ratio = Math.max(0, Math.min(1, 1 - (stockE - lo) / (hi - lo)))
+      needTotal = Math.max(cfg.farm.foodPlots || 0, Math.ceil(needTotal * ratio))
+    }
+
     // --- 已经在长的作物先分类：前 needTotal 块口粮作物算口粮，其余计入销售产量 ---
     //
     // 旧版就是这么分的，v2 把这一层丢了——所有在长的都 planner.add()，
