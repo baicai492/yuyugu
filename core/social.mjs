@@ -65,6 +65,20 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
   let helped = 0, coins = 0
   const perDay = g.perDay ?? 10
   if ((memo.helpCount || 0) >= perDay) return { helped: 0, coins: 0 }
+  // 帮忙的 D 币有**每日上限**（实测四家 feeds 累加正好 4,000）。
+  // 到顶后服务端只扣体力不给钱：11-13 有六家一共烧了 31 点体力换 0 D，
+  // 其中 00:43 刚补的 12 点被一次 water×12 直接烧光。到顶就停，
+  // 把体力留给钓鱼/挖矿/偷菜（1 点体力值 700~2,800 D）。
+  const HELP_DAILY_CAP = 4000
+  const capBase = Number(world.state?.cnt?.helpCoin) || 0
+  if (capBase >= HELP_DAILY_CAP) {
+    const key = `${day}|cap`
+    if (memo.helpCapLogged !== key) {
+      memo.helpCapLogged = key
+      log(`帮忙：今日 D 币已到上限（${capBase.toLocaleString('en-US')}/${HELP_DAILY_CAP}），不再帮`)
+    }
+    return { helped: 0, coins: 0 }
+  }
   // 体力不够就先攒。但**必须说一声**：以前这里直接 return，
   // 日志里完全看不出帮忙停摆的原因，只能看到偷菜那一行，
   // 让人以为帮忙根本没被调用（实测今天停在 5/10 家，29 次静默跳过）。
@@ -83,12 +97,14 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
   let cursor = null
   let pages = 0, scanned = 0, skippedNewbie = 0, tried = 0
   const need = () => perDay - (memo.helpCount || 0)
-  while (helped < need() && pages++ < (g.maxPages ?? 8)) {
+  const helpCapped = () => capBase + coins >= HELP_DAILY_CAP
+  while (helped < need() && !helpCapped() && pages++ < (g.maxPages ?? 8)) {
     let d
     try { d = await neighbors(world, { cursor, limit: 20 }) } catch (e) { log('读邻居失败：' + e.message); break }
     for (const o of d.neighbors || []) {
       scanned++
       if (helped >= need()) break
+      if (helpCapped()) break
       if (memoHelp.has(o.id)) continue
       if (world.state.en < (g.minEnergy ?? 20)) break
       if (o.newbie) { skippedNewbie++; continue }        // 新手 24 小时内不可互动
@@ -122,7 +138,10 @@ export async function helpDaily(world, cfg, log = () => {}, memo = {}) {
     if (!cursor) break
   }
   if (helped) {
-    log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D（今日累计 ${memo.helpCount || 0}/${perDay}）`)
+    log(`帮忙 ${helped} 家，+${Math.round(coins).toLocaleString('en-US')} D（今日累计 ${memo.helpCount || 0}/${perDay}` +
+      `${helpCapped() ? '，D 币已到日上限' : ''}）`)
+  } else if (helpCapped()) {
+    log(`帮忙：本轮撞到 D 币日上限（${(capBase + coins).toLocaleString('en-US')}/${HELP_DAILY_CAP}），提前收工`)
   } else {
     log(`帮忙：扫了 ${pages} 页 ${scanned} 家（尝试 ${tried} 家` +
       `${skippedNewbie ? `，跳过新手 ${skippedNewbie}` : ''}）没帮到，今日 ${memo.helpCount || 0}/${perDay}，稍后再试`)
@@ -457,7 +476,7 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
  * 选择规则（旧版 v1 的 `check` 队列）：
  *   · 记录里 checkAt <= now 的岛优先，按 checkAt 升序
  *   · 没有记录的岛也排队（checkAt 视为 0），保证每座岛至少被看一次
- *   · 一小时前打输过的岛跳过
+ *   · 冷却期内打输过的岛跳过（battle.guardBlockSec，默认 10 分钟）
  * 每轮最多 visitsPerScan 家。访问过程中一旦发现「现在能偷且值得偷」的，
  * 立刻停止巡逻、返回这一家——巡逻剩下的岛不花体力，但会错过偷菜窗口。
  *
@@ -479,12 +498,15 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
   const per = st.visitsPerScan ?? 12
   const maxAge = st.checkEvery ?? 1800   // 多久没看过就值得再看一眼
   const loseAt = memo.stealLoseAt || {}
+  // 打输过的岛冷却多久：和偷菜主路径一致，用 battle.guardBlockSec（默认 10 分钟）。
+  // 以前这里写死一小时，而主路径日志说的是 10 分钟——两处对不上。
+  const loseCoolSec = cfg.battle?.guardBlockSec ?? 600
 
   // 按「下次该访问的时刻」排队。没有记录的岛 checkAt=0，最先被看。
   // 同一时刻的用目录 hint（有货的地块数）做 tiebreak，好岛排前面。
   const queue = []
   for (const id of ids) {
-    if (now - (loseAt[id] || 0) < 3600) continue        // 打输过，一小时内不去
+    if (now - (loseAt[id] || 0) < loseCoolSec) continue  // 打输过，冷却期内不去
     const rec = schedule[id]
     const checkAt = Number(rec?.checkAt) || 0
     const stale = !rec?.seenAt || now - rec.seenAt >= maxAge
@@ -814,18 +836,50 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
     const cands = waveTargets(memo.stealSchedule, memo.stealWatch, world.now, leadSec, 5, world.prices)
     if (cands.length) {
       log(`偷菜：${snipeReady ? '解禁时刻到了' : '有已解禁未处理的目标'}，直接抢这一波 ${cands.length} 家（不扫目录）`)
+      // 用 visit 回来的最新地块数据**重算**这一家的解禁时刻，
+      // 不能再拿 cands 里的旧记录：那是上一轮巡逻算的，岛日天气/连茬一变
+      // 就对不上了。线上 11-13 的 33 次偷菜失败里有 21 次是
+      // 「目标数据 0~8 秒前拿到，1 处」——访问刚拿到最新数据，提交时却用旧条目。
+      const SNIPE_WAIT_MAX_SEC = 20
+      const realNow = Date.now() / 1000
       const out = []
+      const skipped = []
       for (const c of cands) {
         let info
         try { info = await visitInfo(world, c.targetId) } catch { continue }
-        recordVisitSchedule(R, world, cfg, memo, c.targetId, info, c.level)
-        // 提前量到场时，这几处往往还没到解禁（服务端 steal=false），
-        // 只认 targetFromVisit 会整波丢掉——退回调度表里记下的那几处。
-        const tg = targetFromVisit(R, world, cfg, info, {
-          id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard, at: c.at,
-        }) || targetFromSchedule(R, world, info, c)
+        const rec = recordVisitSchedule(R, world, cfg, memo, c.targetId, info, c.level)
+        // 服务端此刻已经标了 steal=true：不用等，立刻可以提交。
+        let tg = targetFromVisit(R, world, cfg, info, {
+          id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard, at: realNow,
+        })
+        if (!tg) {
+          // 提前量到场时，这几处往往还没到解禁（服务端 steal=false），
+          // 只认 targetFromVisit 会整波丢掉——用 visit 刷新后的 upcoming 重建。
+          const fresh = (rec?.upcoming || []).map((u) => {
+            const v = u.kind === 'plot' ? rec?.plots?.[u.i]?.value : rec?.pens?.[u.i]?.value
+            return { ...u, value: Number(v) || 0 }
+          })
+          if (fresh.length) {
+            const atFresh = Math.min(...fresh.map((u) => u.unlockAt))
+            if (atFresh - realNow <= SNIPE_WAIT_MAX_SEC) {
+              tg = targetFromSchedule(R, world, info, {
+                ...c,
+                entries: fresh,
+                value: fresh.reduce((a, e) => a + e.value, 0),
+                at: atFresh,
+              })
+            } else {
+              // 刷新后解禁还在 20 秒以外：说明这一波是被旧记录提前叫醒的，
+              // 等下去只会白占窗口（后面的目标会更晚），交给下一轮唤醒。
+              skipped.push(`${c.name || c.targetId} ${Math.round(atFresh - realNow)} 秒`)
+            }
+          }
+        }
         if (!tg) continue
         out.push(tg)
+      }
+      if (skipped.length) {
+        log(`偷菜：${skipped.length} 家刷新后解禁还在 ${SNIPE_WAIT_MAX_SEC} 秒以外，本轮不等（${skipped.slice(0, 3).join('、')}${skipped.length > 3 ? ' 等' : ''}）`)
       }
       if (out.length) {
         // 访问完全部岛时可能还没到解禁时刻：T_prep 是按访问耗时反推的，
@@ -912,7 +966,9 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
         const rec = memo.stealSchedule?.[c.targetId]
         if (rec) rec.upcoming = (rec.upcoming || []).filter((u) => u.unlockAt > world.now)
       }
-      return { stolen: 0, value: 0 }
+      // 全是被旧记录提前叫醒的（刷新后发现解禁还早）：这不是「没抢到」，
+      // 不该据此放宽狙击节流——否则下一次真实解禁会被翻倍的间隔挡掉。
+      return { stolen: 0, value: 0, staleWake: skipped.length > 0 }
     }
     // 没有可去的候选（记录刚好被 sweep 清掉）→ 落回正常流程
   }
@@ -977,10 +1033,11 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
       const blockAt = memo.stealBlockAt?.[tg.id] || 0
       if (world.now - blockAt < blockSec) continue
       const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
-      // 打输过的岛一小时不去（旧版：v.check = max(v.check, now+3600)）。
-      // 守家鱼的强度不会因为我们多去几次而改变，反复去只是反复赔罚款。
+      // 打输过的岛按 blockSec 冷却（默认 10 分钟）。守家鱼强度不会因为我们
+      // 多去几次改变，反复去只是反复赔罚款；但一小时太长——有了对手档案，
+      // 养成/换装变强后可能很快就能打过（旧版写死 3600，和日志口径不符）。
       const loseAt = memo.stealLoseAt?.[tg.id] || 0
-      if (world.now - loseAt < 3600) continue
+      if (world.now - loseAt < blockSec) continue
       // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
       // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
       // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。

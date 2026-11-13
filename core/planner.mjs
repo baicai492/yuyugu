@@ -467,6 +467,8 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
   const actions = []
   const summary = []
   const MAX = R.WORLD.maxActions
+  // 跨轮记忆（引擎传进来）：只用来抑制重复日志，不参与任何决策。
+  const memo = opts.memo || {}
 
   let coins = world.coins
   // 被服务端拒绝过的动作类型：本轮不再尝试，避免像旧版那样刷 20 多次无效请求
@@ -1457,7 +1459,18 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 用「逐件最优分配」的总收入（税后），而不是「峰值日全卖」——
     // 后者被单日全价额度撑得虚高，会系统性地高估等待的价值。
     const waiting = plan.rows.filter((r) => !r.sellNow && r.gain > 0).slice(0, 3)
-    for (const r of waiting) {
+    // 这几行以前每轮都打一遍（11-13 一天 127 行），把真正有用的日志淹了。
+    // 同样的货、同样的峰值日，只在内容变化时或半小时后再说一次；
+    // 签名只取「物品种类/件数/峰值岛日」，不取金额——价格每岛日都在动，
+    // 带金额去重等于每轮都算「变了」。
+    const waitSig = waiting.map((r) => `${r.id}:${r.qty}:${r.peakIn}`).join(',')
+    const quiet = waiting.length > 0 && memo.sellWaitSig === waitSig &&
+      t - (memo.sellWaitAt || 0) < 1800
+    if (waiting.length && !quiet) {
+      memo.sellWaitSig = waitSig
+      memo.sellWaitAt = t
+    }
+    if (!quiet) for (const r of waiting) {
       const extra = (r.allocNet || 0) - r.netNow
       // 有未来到货就标出来：这是「为什么不能再等」的直接理由——
       // 明后天成熟的货会占掉同一天的全价/85% 额度。

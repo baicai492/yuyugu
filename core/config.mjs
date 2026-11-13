@@ -153,9 +153,9 @@ export const DEFAULTS = {
     horizonDays: 12,             // 往后看几个岛日（择时卖出用）
     outlookDays: 3,              // 估产出价值时看几个岛日的均价（选作物/钓鱼/挖矿/加工用）
     markdownPct: 6,              // 未来预测价打 (1 − 折让)，越大越倾向现在卖
-    minGainPct: 5,               // 等到峰值能多赚这么多百分点才等
-    keepRatio: 0,                // 保留多少比例的货不卖（0=全卖）
-    sellRipeOnly: false,
+    // 注意：minGainPct / keepRatio / sellRipeOnly 已删除。
+    // 它们从未被任何代码读取（择时完全由 allocateSale 的逐件跨桶分配决定），
+    // 留着只会让人以为改了有用。
     // 每种作物每日全价额度（阶梯价），超出部分留到明天
     respectTiers: true,
     // 同种作物库存超过这个数时，允许把第二档（85%）也卖掉清库存（旧版 sell.tier2Above）

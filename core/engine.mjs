@@ -138,7 +138,7 @@ export class Engine {
    * 巡视一轮可能要跑好几分钟（擂台 30 场要 8.5 秒/场），
    * 如果等整轮结束才记账，GUI 上的「今日收支」会长时间停在 0，看着像没在工作。
    */
-  credit(earn = 0, spend = 0, tax = 0) {
+  credit(earn = 0, spend = 0, tax = 0, { cash = true } = {}) {
     if (!earn && !spend && !tax) return
     // 跨自然日的第一笔收支：正常路径由 tick 开头的 ensureLedger 处理，
     // 但收尾统计、后台任务也可能先记账。这里再兜一次，绝不能把昨天的
@@ -158,7 +158,11 @@ export class Engine {
     // 自己赚/花的钱不是「外部突变」。把巡检基线一起平移，
     // 否则刚投出去的钱会在下一轮巡检里被当成突发变化，立刻再醒一轮——
     // 2026-11-12 就是这样在 3 分钟里连买了 6 轮畜栏。
-    if (this.watchSnap) this.watchSnap.coins = Number(this.watchSnap.coins || 0) + earn - spend
+    //
+    // cash=false 用于「记账但现金没动」的收益：偷菜拿到的是**库存**，
+    // 按市价记进今日收入是对的，但 coins 一点没变。以前也平移基线，
+    // 于是下一轮巡检立刻判出「D币突变 -172,956」并提前唤醒（11-13 01:43）。
+    if (cash && this.watchSnap) this.watchSnap.coins = Number(this.watchSnap.coins || 0) + earn - spend
     this.savePersist()
   }
 
@@ -403,7 +407,7 @@ export class Engine {
       // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
       // world 是每轮共享的对象，规划器往里写 stolenAt 也能被这里读回来。
       if (this.memo.stolenAt) w.stolenAt = this.memo.stolenAt
-      plan = planRound(w, cfg, this.log.bind(this), { allowInvest: !investedThisTick })
+      plan = planRound(w, cfg, this.log.bind(this), { allowInvest: !investedThisTick, memo: this.memo })
       if (!plan.actions.length) break
       if (cfg.dry) {
         this.log(`[演练] 本轮计划：${summarizeActions(R, plan.actions)}`)
@@ -457,9 +461,9 @@ export class Engine {
         this.setStep('串门 · 偷菜（掐点）')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.value || 0
-        this.credit(r.value || 0)
+        this.credit(r.value || 0, 0, 0, { cash: false })
         if ((r.stolen || 0) > 0) noteSnipeResult(this.memo, r.stolen)
-        else if (this.memo.stealWakePending) {
+        else if (this.memo.stealWakePending && !r.staleWake) {
           const before = this.memo.stealWakeGap || 60
           noteSnipeResult(this.memo, 0)
           if (this.memo.stealWakeGap > before) {
@@ -555,12 +559,12 @@ export class Engine {
         this.setStep('串门 · 偷菜')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.value || 0
-        this.credit(r.value || 0)
+        this.credit(r.value || 0, 0, 0, { cash: false })
         // 记录这次「因解禁而醒」的结果，喂给自适应节流：
         // 偷到了就恢复 60 秒的敏锐节奏，白醒一趟就放宽一倍（封顶 15 分钟）。
         if ((r.stolen || 0) > 0) {
           noteSnipeResult(this.memo, r.stolen)
-        } else if (this.memo.stealWakePending) {
+        } else if (this.memo.stealWakePending && !r.staleWake) {
           const before = this.memo.stealWakeGap || 60
           noteSnipeResult(this.memo, 0)
           if (this.memo.stealWakeGap > before) {
