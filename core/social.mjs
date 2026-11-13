@@ -281,21 +281,34 @@ function worthStealing(R, world, cfg, memo, tg) {
 function targetsFromIsle(R, world, isle, rules) {
   const targets = []
   let value = 0
+  let unitSum = 0        // 各处「多拿 1 个」值多少（守家胜利的加成按它算）
   const sack = sackActive(R, world) ? 1 : 0
+  const perPlot = rules.perPlot || 2
   ;(isle.plots || []).forEach((pl, i) => {
     if (!pl?.steal) return
     // 保护期：成熟后一段时间内不可偷。服务端已用 steal 标记，直接信它。
+    // 但「这一茬已经被偷过几个」要看 stolen（每茬上限 2，S:442、S:476、S:583）：
+    // 剩下能拿的是 perPlot − stolen，旧版一律按 perPlot+sack 算，
+    // stolen=1 的地块高估约 33%，正好会把不该去的目标推过 minEV。
+    const stolen = Number(pl.stolen) || 0
+    if (stolen >= 2) return
+    const qty = Math.max(0, perPlot - stolen) + sack
+    if (qty <= 0) return
     targets.push({ kind: 'plot', i })
-    value += (world.prices[pl.c] || R.BASE_PRICE[pl.c] || 0) * ((rules.perPlot || 2) + sack)
+    const unit = world.prices[pl.c] || R.BASE_PRICE[pl.c] || 0
+    value += unit * qty
+    unitSum += unit
   })
   ;(isle.barn || []).forEach((pen, i) => {
     if (!pen?.steal) return
     targets.push({ kind: 'pen', i })
     const def = R.ANIMALS.find((a) => a.id === pen.k)
     const n = Math.max(rules.perPen || 2, Number(pen.n) || 0)
-    value += (world.prices[def?.product] || def?.productPrice || 0) * (n + sack)
+    const unit = world.prices[def?.product] || def?.productPrice || 0
+    value += unit * (n + sack)
+    unitSum += unit
   })
-  return { targets, value }
+  return { targets, value, unitSum }
 }
 
 /** 被发现概率（对方潮铃 +% / 我们斗篷 −%）；规则模块缺失时按基础 55%。 */
@@ -305,18 +318,34 @@ function detectOf(R, world, info) {
   } catch { return 0.55 }
 }
 
+/**
+ * 偷一批的体力消耗：规则原文 max(1, min(max, base+(spots−1)*per) − 口哨减耗)
+ * （R:200-202）。旧版把 perSpot 写死成 1、也不减风声口哨，
+ * 手动装备口哨时每次多算 1 点体力（按 energyValue 300 约 300 D/趟）。
+ */
+function stealCostOf(R, world, now, spots, rules) {
+  try {
+    return R.b12StealCost(world.state, now, Math.max(1, spots),
+      Number(rules.energy) || 5, Number(rules.perSpot) || 1, Number(rules.energyMax) || 15)
+  } catch {
+    return Math.min(Number(rules.energyMax) || 15, (Number(rules.energy) || 5) + Math.max(0, spots - 1))
+  }
+}
+
 /** 从 visit 结果里组装一个「现在就能偷」的目标对象。 */
 function targetFromVisit(R, world, cfg, info, extra = {}) {
   const isle = info.isle || {}
   const rules = info.rules || {}
-  const { targets, value } = targetsFromIsle(R, world, isle, rules)
+  const { targets, value, unitSum } = targetsFromIsle(R, world, isle, rules)
   if (!targets.length) return null
+  const now = Number(info.now) || world.now
   return {
     targets, value,
+    bonus: unitSum,
     detect: detectOf(R, world, info),
     fineMax: rules.fineMax || 5000,
-    energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, targets.length - 1)),
-    seenAt: Number(info.now) || world.now,
+    energy: stealCostOf(R, world, now, targets.length, rules),
+    seenAt: now,
     ...extra,
   }
 }
@@ -335,13 +364,16 @@ function targetFromSchedule(R, world, info, c) {
   if (!entries.length) return null
   const rules = info.rules || {}
   const spots = entries.length
+  const now = Number(info.now) || world.now
   return {
     targets: entries.map((e) => ({ kind: e.kind, i: e.i })),
     value: Number(c.value) || 0,
+    // 守家胜利每处多拿 1 个：各处的单件价之和（steal-schedule 的 candidate.unit）
+    bonus: entries.reduce((a, e) => a + (Number(e.unit) || 0), 0),
     detect: detectOf(R, world, info),
     fineMax: rules.fineMax || 5000,
-    energy: Math.min(rules.energyMax || 15, (rules.energy || 5) + Math.max(0, spots - 1)),
-    seenAt: Number(info.now) || world.now,
+    energy: stealCostOf(R, world, now, spots, rules),
+    seenAt: now,
     id: c.targetId,
     name: c.name,
     level: c.level || 1,

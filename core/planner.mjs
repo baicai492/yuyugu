@@ -207,9 +207,13 @@ export function nextRipe(R, world, cfg = {}) {
  */
 export function ripensWhileOffline(cfg, now, growSec, regrow = 0, auto = false) {
   if (!cfg.offline?.enabled) return false
-  // 首茬用 grow，不是 regrow；岛日时代新种的一律 ×0.8（R:477 的 fast 系数），
-  // 洒水器/雨天再 ×0.6（R:478）。旧版这里拿 regrow 当首茬时间、又漏了 0.8，
-  // 复茬作物会低估 6%、单茬作物会高估 25%，避让判断跟着偏。
+  // 和 R.cropStage（cache/rules-05a5c445.mjs:472-478）逐字一致。
+  // 刚种下去的地是 {t:now, g:0, h:0}：
+  //   · 首茬用 grow 不是 regrow（regrow 只在 p.h>0 的复茬用）；
+  //   · 岛日时代（p.t >= ISLE_LAUNCH）一律 ×0.8——新种的一定是；
+  //   · 洒水器覆盖或雨天再 ×0.6。
+  // 旧版拿 regrow 顶首茬、两个系数都没乘：复茬作物偏 −17%~+4%，单茬作物一律高估 25%，
+  // 而且洒水器地块把成熟时刻算晚了，正好会漏掉「实际会落在离线时段」的那些。
   const total = (growSec || 0) * 60 * 0.8 * (auto ? 0.6 : 1)
   const ripeAt = now + total
   return !!offlineWindow(cfg, ripeAt + 60)
@@ -1508,8 +1512,25 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const stock = R.b12Stock(t, prices)
     let bought = 0
     const eatCost = foodChoices(R, s, prices)[0]?.costPerEnergy ?? 300
-    // 口粮库存折成体力，攒够了就不再买
-    let foodEnergy = foodChoices(R, s, prices).reduce((a, f) => a + f.restore * f.n, 0)
+    // 口粮库存折成体力，攒够了就不再买。
+    //
+    // 不能用 foodChoices() 求和：它的 restore 被「当前还能吃多少」的 room 截断
+    // （core/planner.mjs:26 的 Math.min(room, ...)），体力一满就返回空数组，
+    // 于是 foodEnergy 恒为 0——库存里明明躺着几千点口粮，还是每种菜买满 24 个。
+    const stockEnergy = (() => {
+      let e = 0
+      for (const c of R.CROPS) {
+        if (!(c.eat > 0)) continue
+        for (let q = 0; q < 3; q++) {
+          const n = R.b12Available(s, c.id, q)
+          if (n > 0) e += n * Math.round(c.eat * (R.QUALITY?.[q] ?? 1))
+        }
+      }
+      const snack = R.b12Available(s, 'tide_snack', 0)
+      if (snack > 0) e += snack * R.B12_SNACK.energy
+      return e
+    })()
+    let foodEnergy = stockEnergy
     const foodCap = cfg.energy?.reserveEnergy ?? 2500
     for (const it of stock) {
       if (bought >= (cfg.cargo.maxItems || 12)) break
@@ -1525,7 +1546,9 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       const perEnergy = crop && crop.eat > 0 ? it.price / crop.eat : Infinity
       const asFood = crop && foodEnergy < foodCap && perEnergy < eatCost * 0.9
       if (!arbitrage && !asFood) continue
-      const n = Math.min(left, it.limit, Math.max(1, Math.floor((coins - (cfg.cargo.reserveCoins || 0)) / it.price)))
+      // 预算不够一个就跳过：旧版用 Math.max(1, …) 兜底，会在 coins 只比
+      // reserve 多一点点时硬买一个把余额压到 reserve 以下（12 种货各一个）。
+      const n = Math.min(left, it.limit, Math.floor((coins - (cfg.cargo.reserveCoins || 0)) / it.price))
       if (n <= 0) continue
       if (push({ a: 'stockBuy', id: it.id, n, day: R.isleDay(t) })) {
         bought++

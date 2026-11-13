@@ -505,18 +505,23 @@ export function sellPlan(R, now, world, cfg = {}) {
     const isCrop = !!R.CROPS?.some((c) => c.id === id)
     const soldToday = isCrop ? (world.state?.cnt?.['sc_' + id] || 0) : 0
     const ratio = isCrop ? cropTierRatio(R, soldToday, qty) : 1
-    const grossNow = Math.round(p0 * ratio * qty)
+    // 品质系数必须进收入：规则卖出时是**逐件** round(price*QUALITY[q])
+    // （R:87、R:910），prices 里的 p0 是普通品质价。漏乘会把现价和峰值系统性地
+    // 低估最多 50%，gain 跟着偏小 → planVault 判「锁仓不划算」、日志少报收益。
+    // 用 qAvg 近似逐件取整，误差 < 1 个金币。
+    const qAvg = qty > 0 ? qSum / qty : 1
+    const grossNow = Math.round(p0 * ratio * qty * qAvg)
     const nowQuote = netSaleQuote(R, wallet, paid, grossNow)
 
     // 逐件最优：今天卖多少 / 未来哪天卖多少（阶梯 × 预测价，未来打折）
     const arrivals = isCrop ? arrivalsOf(id) : []
     const alloc = allocateSale(R, id, qty, fc, {
-      isCrop, soldToday, qAvg: qSum / qty, markdown, arrivals,
+      isCrop, soldToday, qAvg, markdown, arrivals,
     })
     // 终端清算：把这批货压到 horizon 末尾几天按真实阶梯卖掉，
     // 给「一直等」一个可执行的下界（峰值是全卖单日的虚高口径）。
     const liq = liquidationValue(R, id, qty, fc, {
-      isCrop, qAvg: qSum / qty, keepDays: cfg.terminalDays ?? 4,
+      isCrop, qAvg, keepDays: cfg.terminalDays ?? 4,
     })
     const liqQuote = netSaleQuote(R, wallet, paid, Math.round(liq.gross))
     // 逐件最优分配的总收入（税后）。和 netNow 口径一致，才能直接比较。
@@ -527,7 +532,7 @@ export function sellPlan(R, now, world, cfg = {}) {
       const day = fc[k]
       const price = baseQuote(R, id, day.day) * supplyAfterSelling(R, id, 0, external[id] || 0)
       const t2 = isCrop ? cropTierRatio(R, 0, qty) : 1
-      const gross = Math.round(price * t2 * qty)
+      const gross = Math.round(price * t2 * qty * qAvg)
       const q = netSaleQuote(R, wallet, 0, gross)
       if (q.net > best.net) best = { k, price, net: q.net, gross }
     }

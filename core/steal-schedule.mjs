@@ -79,7 +79,11 @@ export function stealEV(tg, myLevel, energyValue = 300) {
     pLoss = 1 - pWin
     pDraw = 0
   }
-  const bonus = V / spots                     // 打赢：每处多拿 1 个
+  // 打赢：每处**多拿 1 个**（S:1174、S:1209-1227），不是每处再多拿「整批货」。
+  // 旧版写 V / spots，等于把「一处全部基础货值」当成 1 个——带菜篮时每处 3 个，
+  // 胜利分支直接按 6 个/处结算，payout 翻了一倍。按单件价 × 处数才算对：
+  // 线上实测（logs/host-2026-11-13.log:4405）6 处胜利只多拿到 6 个（每处 1 个）。
+  const bonus = Number.isFinite(tg.bonus) ? Math.max(0, tg.bonus) : 0
   const fine = Math.min(tg.fineMax || 5000, V * 1.2)
   const energy = Math.min(tg.energy || 5, 15)
   // 平局按「什么都没拿到、也没赔钱」算（保守；服务端平局确实不结算收益）。
@@ -209,8 +213,13 @@ export function updateIsleSchedule({
     if (unlockAt <= now + 1 || unlockAt > horizonEnd) return
 
     const unit = priceOf(prices, pl.c, R)
-    rec.plots[i] = { unlockAt, exact: true, kind: 'plot', i, c: pl.c || '', value: unit * (perPlot + sackAdd) }
-    candidates.push({ kind: 'plot', i, at: unlockAt, item: pl.c || '', value: unit * (perPlot + sackAdd) })
+    // 每块地每茬最多被偷 2 个（S:442、S:476、S:583）；stolen 是这一茬已经被偷走的数量，
+    // 剩下能拿的是 perPlot − stolen。旧版一律按 perPlot+sack 估值：
+    // stolen=1 的地块高估约 33%，stolen=2 的还会被排进目标（服务端锁死，白跑一趟）。
+    const qty = Math.max(0, perPlot - stolen) + sackAdd
+    if (qty <= 0) return
+    rec.plots[i] = { unlockAt, exact: true, kind: 'plot', i, c: pl.c || '', value: unit * qty, unit, qty }
+    candidates.push({ kind: 'plot', i, at: unlockAt, item: pl.c || '', value: unit * qty, unit })
   })
 
   // —— 畜栏 ——
@@ -226,8 +235,8 @@ export function updateIsleSchedule({
     if (!unit) return
     // 第二个产物一出现，窝里正好 2 个；服务端按 perPen 给（通常也是 2）。
     const value = unit * (Math.max(perPen, 2) + sackAdd)
-    rec.pens[i] = { unlockAt, exact: true, kind: 'pen', i, c: pen.k || '', value }
-    candidates.push({ kind: 'pen', i, at: unlockAt, item: def.product, value })
+    rec.pens[i] = { unlockAt, exact: true, kind: 'pen', i, c: pen.k || '', value, unit }
+    candidates.push({ kind: 'pen', i, at: unlockAt, item: def.product, value, unit })
   })
 
   // —— 按时刻分组，选第一个 EV 达标的组 ——
@@ -246,8 +255,17 @@ export function updateIsleSchedule({
     k += group.length - 1
     const value = group.reduce((a, c) => a + c.value, 0)
     const spots = group.length
-    const energy = Math.min(energyMax, energyBase + Math.max(0, spots - 1))
-    const ev = stealEV({ value, targets: group, detect, guard, level, fineMax, energy }, myLevel, energyValue)
+    // 打赢每处多拿 1 个 → 额外收益 = 各处的单件价之和
+    const bonus = group.reduce((a, c) => a + (c.unit || 0), 0)
+    // 体力用规则原文的公式（R:200-202）：base + (spots−1)*per − 风声口哨。
+    // 旧版把 perSpot 写死成 1 且不减口哨，手动装了口哨时每次多算 1 点。
+    let energy
+    try {
+      energy = R.b12StealCost(state || {}, now, spots, energyBase, Number(rules?.perSpot) || 1, energyMax)
+    } catch {
+      energy = Math.min(energyMax, energyBase + Math.max(0, spots - 1))
+    }
+    const ev = stealEV({ value, bonus, targets: group, detect, guard, level, fineMax, energy }, myLevel, energyValue)
     if (ev >= minEV) { nextAt = at; nextGroup = group; nextEV = ev; break }
   }
 
@@ -255,7 +273,7 @@ export function updateIsleSchedule({
   rec.nextGroup = nextGroup
   rec.nextEV = nextEV
   rec.upcoming = nextGroup.map((c) => ({
-    kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item,
+    kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item, unit: c.unit || 0,
   }))
   // 回访时刻：
   //   · 有未来目标 → 解禁前 prepLeadSec 秒去（但不早于 60 秒后，也不晚于一个 patrol 周期）

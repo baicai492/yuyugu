@@ -46,15 +46,21 @@ export function planVault(R, world, cfg) {
     external: world.externalSoldRatio || {},
   })
   const out = []
+  // 服务端 b26Check 是**逐条**校验的：同一物品三品质总和 + n > unit 就拒绝这一条
+  // （R:1516-1520），新物品还要看已用格数。所以规划时必须自己维护两个 running 计数，
+  // 不能拿静态的 vaultIds/sumVault 循环算——否则一批里锁 3 个品质会超 unit，
+  // 被拒的那一档（通常是金星）留在可售库存里，同一轮就可能按现价卖掉。
+  const usedSlots = new Set(vaultIds)
   for (const row of plan.rows) {
     // 峰值在 ahead 个岛日之内、且等的收获明显更大 → 锁起来
     const shouldHold = !row.sellNow && row.peakIn <= ahead && row.gain > Math.max(1000, row.netNow * 0.05)
     // 格数约束：要锁一种新物品，但架子上已经没有空格 → 这一轮先不锁它。
     // 不升级也照样能卖（不锁就是可卖），只是放弃了择时，不影响正确性。
-    const isNew = !vaultIds.includes(row.id)
-    if (shouldHold && isNew && vaultIds.length >= cap.slots) continue
+    const isNew = !usedSlots.has(row.id)
+    if (shouldHold && isNew && usedSlots.size >= cap.slots) continue
     const vaultQs = world.state.b12?.vault?.[row.id] || [0, 0, 0]
-    const sumVault = (vaultQs[0] || 0) + (vaultQs[1] || 0) + (vaultQs[2] || 0)
+    // 该物品三品质的已锁总量，随本轮规划实时更新
+    let running = (vaultQs[0] || 0) + (vaultQs[1] || 0) + (vaultQs[2] || 0)
     for (let q = 0; q < 3; q++) {
       const have = world.state.inv?.[row.id]?.[q] || 0
       if (have <= 0) continue
@@ -66,9 +72,9 @@ export function planVault(R, world, cfg) {
       const capN = raw == null ? have : Math.min(have, raw)
       if (capN <= 0) continue
       // 单格上限：锁完后该物品三个品质的总和不能超过 unit。
-      // cur 之外的部分（sumVault − cur）已经占着，要给它留出空间。
+      // running − cur 就是其他两格的占用量（含本轮已经规划掉的）。
       const cur = vaultQs[q] || 0
-      const room = Math.max(0, cap.unit - (sumVault - cur))
+      const room = Math.max(0, cap.unit - (running - cur))
       // 但余量不能留：留 1 个会让 vault 永远比 inv 少 1，
       // 而 sellPlan 看到那 1 个可售货就继续生成同一行，
       // 和上面的抖动叠在一起就是无限循环。
@@ -78,6 +84,8 @@ export function planVault(R, world, cfg) {
       if (want === cur) continue
       if (shouldHold && want <= 0) continue
       out.push({ a: 'warehouse', id: row.id, q, n: want, keep: shouldHold })
+      running += want - cur
+      if (shouldHold && isNew) usedSlots.add(row.id)
     }
   }
   // 一次最多改 20 条，避免单批过大
