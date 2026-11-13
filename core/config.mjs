@@ -38,6 +38,7 @@ export const DEFAULTS = {
     stallThreshold: 3,           // 连续几次没进展算「卡住」
     idleStall: 900,              // 卡住后所有额度驱动一起放宽到这个间隔（秒）
     work: 60,                    // 钓/挖/炸还有额度时的复查间隔
+    arcade: 60,                  // 游乐馆还有次数时的复查间隔
     // 所有额度都刷完（含帮忙/五子棋/擂台/种地）之后，睡到换岛日，
     // 但封顶这个秒数：等待期的只读巡检还要负责发现「被偷」这类外部突发。
     idleSleepCap: 1800,
@@ -147,6 +148,33 @@ export const DEFAULTS = {
     fuseTarget: 'auto',          // auto / ice / thunder / wind / lava / poison
   },
 
+  // 修仙 2.0（人脉/机缘/宗门/配招/自动对战/秘境）
+  //
+  // 和 1.0 一样：灵石换不成 D 币，纯养成。默认跟随 xian.enabled 打开。
+  // 能本地精确预演的部分（ab 对战、秘境整条路径）都先算好再提交；
+  // evroll / tasks 是服务端随机，只能先提交再看回执。
+  xian2: {
+    enabled: true,
+    maxActions: 24,              // 单批最多几条（和服务端 30 的上限留余量）
+    maxBatchesPerRound: 3,       // 单轮巡视最多连做几批
+    realm: true,                 // 自动跑秘境（每天 3 次，收益最高的一块）
+    realmBeam: 6,                // 秘境路径束搜索宽度
+    loadoutMs: 900,              // 配招搜索的时间上限（毫秒）
+  },
+
+  // 游乐馆：弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄
+  //
+  // 不发 D 币，只写榜单与个人纪录，所以默认「只打有把握的两个」：
+  // pool/bowl 求解器能稳定 1200/250，bounce 的搜索还没到榜首水平。
+  // 每次开局要多等 MIN_PLAY（5/6/8 秒），一局约 10–15 秒，别让它拖住偷菜。
+  arcade: {
+    enabled: true,
+    games: ['pool', 'bowl', 'bounce'],
+    perTick: 2,                  // 单轮巡视最多玩几局
+    solveMs: 20000,              // 单局求解时间上限
+    minEnergy: 0,                // 游乐馆不吃体力，留字段备用
+  },
+
   // 卖货（核心）
   sell: {
     enabled: true,
@@ -175,7 +203,9 @@ export const DEFAULTS = {
   },
 
   // 囤货仓库
-  vault: { enabled: true, keepPeakAhead: 2 },  // 峰值在 2 个岛日内就先囤着
+  // upgrade：撞墙（格数快满）才升级，且现金要远超升级价。
+  // b26 只扩容量、不产生收益，默认开，但不会主动为它调度。
+  vault: { enabled: true, keepPeakAhead: 2, upgrade: true },
 
   // 52弟
   npc: {

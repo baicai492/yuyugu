@@ -10,6 +10,13 @@
 
 import * as M from './market.mjs'
 
+/** 当前仓库等级与容量（05a5c445 的 b26 规则；拿不到规则时按 Lv1 处理） */
+export function vaultCapacity(R, state) {
+  const B = R.B26 || { slots: [12, 18, 22, 30], unit: [300, 600, 1200, 2400], cost: [0, 80000, 300000, 1000000] }
+  const lv = Math.max(1, Math.min(4, Math.floor(Number(state?.b26?.lv)) || 1))
+  return { lv, slots: B.slots[lv - 1], unit: B.unit[lv - 1], nextCost: lv < 4 ? B.cost[lv] : 0 }
+}
+
 /**
  * 根据市场预测，决定每种货该锁多少。
  * 返回 [{ id, q, n, keep }]，只包含需要变化的项。
@@ -17,6 +24,10 @@ import * as M from './market.mjs'
 export function planVault(R, world, cfg) {
   if (!cfg.vault?.enabled) return []
   const ahead = cfg.vault?.keepPeakAhead ?? 2
+  // 容量是真约束：vault 已用格数 ≥ slots 时不能再囤新物品，
+  // 单物品三个品质加起来不能超过 unit（服务端 b26Check 的原文口径）。
+  const cap = vaultCapacity(R, world.state)
+  const vaultIds = Object.keys(world.state.b12?.vault || {})
   // 关键：判断「该不该锁」必须基于**全部解锁后**的库存，而不是当前可售量。
   //
   // sellPlan 的 qty 是 inv − vault（扣除已锁的），gain/netNow 都跟着它算。
@@ -38,7 +49,12 @@ export function planVault(R, world, cfg) {
   for (const row of plan.rows) {
     // 峰值在 ahead 个岛日之内、且等的收获明显更大 → 锁起来
     const shouldHold = !row.sellNow && row.peakIn <= ahead && row.gain > Math.max(1000, row.netNow * 0.05)
+    // 格数约束：要锁一种新物品，但架子上已经没有空格 → 这一轮先不锁它。
+    // 不升级也照样能卖（不锁就是可卖），只是放弃了择时，不影响正确性。
+    const isNew = !vaultIds.includes(row.id)
+    if (shouldHold && isNew && vaultIds.length >= cap.slots) continue
     const vaultQs = world.state.b12?.vault?.[row.id] || [0, 0, 0]
+    const sumVault = (vaultQs[0] || 0) + (vaultQs[1] || 0) + (vaultQs[2] || 0)
     for (let q = 0; q < 3; q++) {
       const have = world.state.inv?.[row.id]?.[q] || 0
       if (have <= 0) continue
@@ -47,21 +63,45 @@ export function planVault(R, world, cfg) {
       // 而服务端此刻的库存是一次动作都没执行的版本——本轮刚收的番茄它还不知道。
       // 所以上限要取「预演后」和「本轮开始时」的较小值，否则每轮都白白失败一条。
       const raw = world.rawInv?.[row.id]?.[q]
-      const cap = raw == null ? have : Math.min(have, raw)
-      if (cap <= 0) continue
+      const capN = raw == null ? have : Math.min(have, raw)
+      if (capN <= 0) continue
+      // 单格上限：锁完后该物品三个品质的总和不能超过 unit。
+      // cur 之外的部分（sumVault − cur）已经占着，要给它留出空间。
+      const cur = vaultQs[q] || 0
+      const room = Math.max(0, cap.unit - (sumVault - cur))
       // 但余量不能留：留 1 个会让 vault 永远比 inv 少 1，
       // 而 sellPlan 看到那 1 个可售货就继续生成同一行，
       // 和上面的抖动叠在一起就是无限循环。
       // 改成「要么全锁，要么不锁」——失败的极端情况交给服务端拒绝，
       // 下一轮计划器重算时会自然修正。
-      const want = shouldHold ? cap : 0
-      const cur = vaultQs[q] || 0
+      const want = shouldHold ? Math.min(capN, room) : 0
       if (want === cur) continue
+      if (shouldHold && want <= 0) continue
       out.push({ a: 'warehouse', id: row.id, q, n: want, keep: shouldHold })
     }
   }
   // 一次最多改 20 条，避免单批过大
   return out.slice(0, 20)
+}
+
+/**
+ * 仓库升级决策。
+ *
+ * b26 只扩囤货容量，对经济收益没有直接贡献（见 ANALYSIS.md 七）。
+ * 所以只在「真的撞墙」时升：架子快满了、现金又远超升级价。
+ * 这符合「不专门为它调度」的原则——撞到再升，没撞到就不动。
+ */
+export function planVaultUpgrade(R, world, cfg) {
+  if (!cfg.vault?.enabled || !cfg.vault?.upgrade) return null
+  const cap = vaultCapacity(R, world.state)
+  if (cap.lv >= 4) return null
+  const used = Object.keys(world.state.b12?.vault || {}).length
+  // 留一格余量：满了才升，等于每次都要先失败一轮囤货动作。
+  if (used < cap.slots - 1) return null
+  const coins = Number(world.coins) || 0
+  const reserve = cfg.invest?.reserveCoins ?? 3000000
+  if (coins - cap.nextCost < reserve) return null
+  return { a: 'whUp' }
 }
 
 /** 解锁指定物品（卖出前调用） */
@@ -92,7 +132,8 @@ export function vaultSummary(R, world) {
     }
   }
   rows.sort((a, b) => b.value - a.value)
-  return { rows, totalValue: Math.round(totalValue) }
+  const cap = vaultCapacity(R, world.state)
+  return { rows, totalValue: Math.round(totalValue), lv: cap.lv, used: Object.keys(vault).length, slots: cap.slots, unit: cap.unit }
 }
 
 /** 把管家配置成「只做我们不在线时的兜底」 */

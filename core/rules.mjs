@@ -9,6 +9,10 @@ export const ROOT = resolve(HERE, '..')
 const CACHE_DIR = resolve(ROOT, 'cache')
 
 let R = null, currentVer = '', loadedAt = 0
+// 游乐馆（弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄）是**独立的** /arcade-rules.js，
+// 不在 pet-world-rules.js 的导出里（b12ExtraAction 只是内部调用了同一份代码）。
+// 所以这里单独缓存、单独热替换，和主规则同版本号。
+let ARC = null, arcVer = ''
 
 /** 从站点页面里取当前版本号（app.js?v=xxxx / pets.js?v=xxxx） */
 export async function fetchVersion(baseUrl, cookie, { timeoutMs = 15000, tries = 2 } = {}) {
@@ -39,6 +43,58 @@ export function cachedRulesFile() {
   return files.length ? resolve(CACHE_DIR, files[0].f) : null
 }
 
+/** 找缓存里最新的一份游乐馆规则文件 */
+export function cachedArcadeFile() {
+  if (!existsSync(CACHE_DIR)) return null
+  const files = readdirSync(CACHE_DIR).filter((f) => /^arcade-[0-9a-f]+\.mjs$/.test(f))
+    .map((f) => ({ f, t: statSync(resolve(CACHE_DIR, f)).mtimeMs }))
+    .sort((a, b) => b.t - a.t)
+  return files.length ? resolve(CACHE_DIR, files[0].f) : null
+}
+
+/** 游乐馆规则（离线缓存优先），拿不到就返回 null —— 游乐馆接入不应拖垮主程序 */
+export async function loadArcadeRulesCached() {
+  if (ARC) return ARC
+  const file = cachedArcadeFile()
+  if (!file) return null
+  const mod = await import(pathToFileURL(file).href)
+  if (typeof mod.replay !== 'function' || typeof mod.arcAct !== 'function') return null
+  ARC = mod
+  arcVer = /arcade-([0-9a-f]+)\.mjs/.exec(file)?.[1] || 'cached'
+  return ARC
+}
+
+/** 下载/热更新游乐馆规则。失败不抛：调用方拿不到就跳过游乐馆 */
+export async function loadArcadeRules({ baseUrl = 'https://52dmeme.com', ver, force = false } = {}) {
+  const v = ver || currentVer
+  if (!v) return loadArcadeRulesCached()
+  if (ARC && arcVer === v && !force) return ARC
+  if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true })
+  const file = resolve(CACHE_DIR, `arcade-${v}.mjs`)
+  const stale = !existsSync(file) || Date.now() - statSync(file).mtimeMs > 3600_000
+  if (stale) {
+    try {
+      const res = await fetch(`${baseUrl}/arcade-rules.js?v=${v}`, {
+        headers: { 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
+        signal: AbortSignal.timeout(20000),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const text = await res.text()
+      if (!text.includes('export function replay')) throw new Error('游乐馆规则结构变了（缺少 replay）')
+      writeFileSync(file, text, 'utf8')
+    } catch {
+      return loadArcadeRulesCached()
+    }
+  }
+  const mod = await import(pathToFileURL(file).href + '?t=' + Date.now())
+  if (typeof mod.replay !== 'function') throw new Error('游乐馆规则缺少 replay')
+  ARC = mod; arcVer = v
+  return ARC
+}
+
+export const arcadeRules = () => ARC
+export const arcadeVersion = () => arcVer
+
 /** 用缓存里的规则文件初始化（不联网） */
 export async function loadRulesCached() {
   if (R) return R
@@ -49,6 +105,7 @@ export async function loadRulesCached() {
   R = mod
   currentVer = /rules-([0-9a-f]+)\.mjs/.exec(file)?.[1] || 'cached'
   loadedAt = statSync(file).mtimeMs
+  await loadArcadeRulesCached()
   return R
 }
 
@@ -105,6 +162,8 @@ export async function loadRules({ baseUrl = 'https://52dmeme.com', ver, cookie, 
   const mod = await import(pathToFileURL(file).href + '?t=' + Date.now())
   if (typeof mod.applyActions !== 'function') throw new Error('规则模块缺少 applyActions')
   R = mod; currentVer = v; loadedAt = Date.now()
+  // 游乐馆是独立文件；拉不到不影响主流程，缓存里有旧版就先用旧版
+  await loadArcadeRules({ baseUrl, ver: v }).catch(() => null)
   return R
 }
 
@@ -143,6 +202,7 @@ export async function checkRulesUpdate({ baseUrl, cookie } = {}) {
     if (epoch && R?.b12ConfigureClock) {
       try { R.b12ConfigureClock(epoch) } catch {}
     }
+    await loadArcadeRules({ baseUrl, ver: currentVer, force: true }).catch(() => null)
     return { changed: currentVer !== before, from: before, to: currentVer }
   } catch {
     return null

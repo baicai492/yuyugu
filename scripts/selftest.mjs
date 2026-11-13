@@ -10,6 +10,11 @@ import {
   snipeStaminaReservation, snipeWindowOpen,
 } from '../core/steal-schedule.mjs'
 import { probeStealable } from '../core/social.mjs'
+import { arcadeRules } from '../core/rules.mjs'
+import { solveGame, verifyShots } from '../core/arcade.mjs'
+import * as X from '../core/xian-rules.mjs'
+import { fromWireXsAction } from '../core/xian.mjs'
+import { planXian2Actions } from '../core/xian2.mjs'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -325,6 +330,53 @@ console.log('\n[偷菜掐点]')
   ok('关掉 skipMarked 时保留标记岛', noFilter.length === 2, `${noFilter.length} 家`)
   const errWorld = { client: { get: async () => { throw new Error('boom') } } }
   ok('探测失败当作没有', (await probeStealable(errWorld, {})).length === 0)
+}
+
+console.log('\n[新] 游乐馆求解器')
+{
+  const A = arcadeRules()
+  ok('游乐馆规则已加载', !!A?.GAMES && typeof A.replay === 'function')
+  if (A?.GAMES) {
+    ok('三种游戏都在', ['bounce', 'pool', 'bowl'].every((g) => A.GAMES[g]))
+    const seed = 424242
+    for (const g of ['pool', 'bowl']) {
+      const shots = solveGame(A, g, seed, { solveMs: 8000 })
+      const sc = verifyShots(A, g, seed, shots)
+      ok(`${g} 解出的棋谱能本地重放`, typeof sc === 'number', `${sc} 分 / ${shots.length} 杆`)
+    }
+    // bounce 每甩都从 seed 重建，随机数流只有一份，重放必须一致
+    const bs = solveGame(A, 'bounce', seed, { solveMs: 8000 })
+    ok('bounce 解出的棋谱能本地重放', typeof verifyShots(A, 'bounce', seed, bs) === 'number',
+      `${verifyShots(A, 'bounce', seed, bs)} 分`)
+  }
+}
+
+console.log('\n[新] 修仙 2.0 规划器')
+{
+  const now = Math.floor(Date.now() / 1000)
+  const xs = X.newXs(now)
+  xs.tech = 'fire'; xs.techs = ['fire']; xs.en = 100; xs.stone = 800
+  xs.bag = { lingcao: 20, jingu: 10, linglan: 6 }
+  xs.pills = { huiling: 3 }
+  xs.lv = 5; xs.cv = { r: 1, s: 3, xp: 0 }
+  for (const p of xs.plots) if (!p.c) p.s = 'soil'
+  const world = { state: { xs }, now }
+  const memo = {}
+  let okN = 0, bad = []
+  for (let round = 0; round < 4; round++) {
+    const plan = planXian2Actions(world, now, { memo })
+    if (!plan.actions.length) break
+    for (const wire of plan.actions) {
+      const a = fromWireXsAction(wire)
+      const r = a ? X.act(world.state.xs, a, now, () => 0.5) : { ok: false, msg: 'bad wire' }
+      if (r?.ok) okN++; else bad.push(`${wire.a}:${r?.msg}`)
+    }
+  }
+  ok('四条路径本地结算全成功', bad.length === 0, `${okN} 个动作${bad.length ? '，首个失败 ' + bad[0] : ''}`)
+  ok('秘境跑过至少一次', (world.state.xs.rd?.n || 0) > 0, `rd=${JSON.stringify(world.state.xs.rd || {})}`)
+  ok('配招已选出 4 个不同技能', Array.isArray(world.state.xs.sl) && new Set(world.state.xs.sl).size === 4,
+    JSON.stringify(world.state.xs.sl))
+  ok('绝不产生手动斗法', !['xsFight', 'xsWin', 'xsLose', 'xsRoot', 'xsStory'].some((k) => bad.includes(k)))
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)

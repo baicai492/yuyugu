@@ -132,7 +132,15 @@ export class World {
 
   logActions(batch, out) {
     const R = this.R
-    const names = { plant: '种植', water: '浇水', harvest: '收获', clear: '清理', feed: '喂食', pet: '摸摸', collect: '收产物', trap: '收蟹笼', fish: '钓鱼', mine: '挖矿', bomb: '炸矿', craft: '加工', sell: '卖出', buy: '购买', upgrade: '升级', expand: '扩建', buyTrap: '买蟹笼', buyAnimal: '买动物', sellAnimal: '卖动物', goal: '领目标', coffee: '喝咖啡', eat: '进食', stockBuy: '货船进货', npc: '52弟', scratch: '刮刮乐', lotto: '彩票', warehouse: '囤货', nightClaim: '夜潮', storyRead: '纪事', guardRefund: '守家补偿' }
+    const names = { plant: '种植', water: '浇水', harvest: '收获', clear: '清理', feed: '喂食', pet: '摸摸', collect: '收产物', trap: '收蟹笼', fish: '钓鱼', mine: '挖矿', bomb: '炸矿', craft: '加工', sell: '卖出', buy: '购买', upgrade: '升级', expand: '扩建', buyTrap: '买蟹笼', buyAnimal: '买动物', sellAnimal: '卖动物', goal: '领目标', coffee: '喝咖啡', eat: '进食', stockBuy: '货船进货', npc: '52弟', scratch: '刮刮乐', lotto: '彩票', warehouse: '囤货', nightClaim: '夜潮', storyRead: '纪事', guardRefund: '守家补偿',
+      // 囤货仓库 b26
+      whUp: '仓库升级', whOrder: '到价出售', whAlert: '到价提醒',
+      // 游乐馆
+      arcStart: '游乐馆开局', arcEnd: '游乐馆结算',
+      // 修仙 2.0
+      xsTalk: '叙话', xsGift: '赠礼', xsChap: '往事', xsEvroll: '机缘', xsEvpick: '机缘抉择',
+      xsTasks: '领委托', xsTask: '交委托', xsStipend: '领俸禄', xsSlots: '配招', xsPeek: '观气',
+      xsAb: '自动斗法', xsRin: '入秘境', xsRgo: '秘境前进', xsRbuy: '秘境购物', xsRout: '撤出秘境' }
     const ok = {}, fail = {}, got = {}
     let earn = 0, spend = 0, tax = 0
     out.forEach((o, k) => {

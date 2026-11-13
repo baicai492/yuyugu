@@ -1,22 +1,35 @@
 # 鱼鱼谷（52dmeme.com/pets）全模块机制清单
 
-对应线上版本 `a4a62d77`（2026-11-12 复核）。
+对应线上版本 **`05a5c445`**（2026-11-13 全量重新复核）；修仙对应 **`20b20a0e`**。
 
-> **规则模块 `pet-world-rules.js` 自 `63568b46` 起逐字节未变**（ETag 完全相同）。
-> `a4a62d77` 的改动全在 UI 与提交健壮性，不影响任何数值或公式。
-> 因此本文第 1–19 节的全部规则仍然有效。
+> **本轮复核方式（不是沿用旧结论）**：用登录态 cookie 重新抓取 `/pets` 与全部前端模块，
+> 重新下载 `/pet-world-rules.js?v=05a5c445`、`/arcade-rules.js?v=05a5c445`、`/xs/rules.js?v=20b20a0e`，
+> 与本地副本逐字节比对，并重新读完了新增的 `isle-arcade.js`、`isle-warehouse.js`、`xs2.js`、`xs3.js`。
+>
+> 结论：
+> - `pet-world-rules.js` 从 `a4a62d77` 到 `05a5c445` **只新增了游乐馆与 b26 囤货仓库**，
+>   原有作物/畜产/钓鱼/挖矿/加工/市场/擂台/偷菜的数值与公式逐字未变。
+> - 游乐馆是**独立文件** `/arcade-rules.js`；`pet-world-rules.js` 只是内部又内联了一份同样的
+>   `ARC_RULES`（第 1338–1502 行）供服务端 `arcAction` 调用，**没有 export**，托管必须单独加载。
+> - 修仙规则 `20b20a0e` 三份副本（线上、`cache/`、`core/xian-rules.mjs`）长度都是 43177 字节，
+>   内容一致。
+> - 旧版本文档第 14 节把 `b12.vault` 预留仓位称作「囤货仓库」，与 05a5c445 新增的 b26
+>   仓库建筑重名；本轮已拆成 14（预留仓位）与 14A（b26 仓库）。
 
-## a4a62d77 相对 63568b46 的改动
+## 05a5c445 相对 a4a62d77 的改动
 
 | 模块 | 改动 | 对托管的影响 |
 |---|---|---|
-| `pets.js` | 新增 `pet-fullscreen.js` 全屏模式 | 无 |
-| `pet-isle.js` | 提交加 `pendingRequest` + `keepalive`；409 处理更严谨；新增 `duplicate` 回执 | 幂等重试不会重复执行；我们的客户端已有等价处理 |
-| `pet-battle.js` | 对手列表支持 `minLevel`/`maxLevel` 筛选；显示升级经验进度条；说明「今日次数含偷菜触发的守护战」 | **可用**：精准挑低级对手刷掉落 |
-| `pet-isle-visit.js` | 邻居目录支持 `stealable=1` 只看可偷；新手保护口径改为「创建后 24 小时」 | **可用**：偷菜扫描省掉大量无效访问 |
-| 其余模块 | 仅版本号 | 无 |
+| `pet-world-rules.js` | 新增 `ARC_RULES` 内联段（与 `/arcade-rules.js` 同文）；新增 `b26` 囤货仓库；`warehouse` 动作增加 `b26Check`；`b12ReplenishWarehouse` 增加 `b26Room` 限制；管家结算增加 `b26AutoSell` 调用 | 规则数值无变化；新增 b26 动作 |
+| `arcade-rules.js` | **新文件**：弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄的确定性物理与计分；导出 `setup/shoot/step/replay/arcAct/arcAction` | 可完全离线预演，服务端按 `shots` 重放 |
+| `isle-arcade.js` | 新前端：全屏三游戏、三种输入方式、结算 `arcStart/arcEnd` | 可用协议直接托管 |
+| `isle-warehouse.js` | 新前端：仓库内景、拖拽上架、7 日走势、到价提醒、自动出售 | 动作协议见 14A |
+| `pet-isle.js` | 新增 `arcade` / `warehouse` 场景热点；`welcome` / `auto` / `visit` / `help` 接口与 `pet-friend-*` 事件 | 主程序已覆盖这些接口 |
+| `pet-isle-rank.js` | 榜单新增 `bounce/pool/bowl`；`balance` 只有当前余额 | 托管可读三游戏榜 |
+| `pets.js` | 懒加载 `isle-arcade.js` / `isle-warehouse.js` | 无 |
+| `xs/` 前端 | `xs2.js`（人脉/机缘/宗门）、`xs3.js`（配招对战/秘境）、`content2.js`（2.0 文本） | 修仙 2.0 协议见 14C |
 
-本文是**实现依据**：所有数值都来自站点前后端共用的规则模块 `/pet-world-rules.js`
+本文是**实现依据**：所有数值都来自站点前后端共用的规则模块
 与各前端模块原文，不写死、不猜测。
 
 ---
@@ -626,17 +639,240 @@ ev = (1−发现率) × 货值
 
 ---
 
-## 14. 囤货仓库（**本次新增**）
+## 14. 预留仓位 `b12.vault`（不是仓库建筑）
 
 `state.b12.vault[id][q]` = 预留数量（是 `inv` 的子集，不是额外库存）。
 `state.b12.keep[id][q]` = 「收获自动补足」目标。
 
 - 预留的物品**不会被**自动出售、自动加工、日常消耗使用。
-- 手动操作可加 `includeWarehouse: true` 临时动用预留。
+- 手动操作可加 `includeWarehouse: true` 临时动用预留（`craft/sell/eat/feed/bomb/fish/plant`）。
 - 动作：`{a:'warehouse', id, q, n, keep}`（`n` 是预留数量，`keep` 是是否自动补足）。
 - 管家每轮巡视前会 `b12ReplenishWarehouse`：把新收获补到 `keep` 目标。
+- 05a5c445 起，预留还受 b26 仓库容量约束（见 14A）。
 
-> **这是防砸盘的关键工具**：把不想现在卖的货锁进 vault，避免被自动逻辑贱卖。
+> **这是防砸盘的工具**：把不想现在卖的货锁进 vault，避免被自动逻辑贱卖。
+
+---
+
+## 14A. 囤货仓库 b26（05a5c445 新增）
+
+`state.b26` 与 `b12.vault` 是两层东西：b26 是**仓库建筑**（等级/格数/每格上限/提醒/订单），
+真正存放数量仍然写在 `b12.vault` 里。
+
+```
+state.b26 = {
+  v: 1,
+  lv: 1..4,
+  order: { 'item:q': [price, n] },   // 到价自动出售
+  alert: { item: price },            // 到价提醒
+  sold: [[day, item, q, n, price], …] // 最近 20 条
+}
+```
+
+```
+B26 = {
+  cost:   [0, 80000, 300000, 1000000],  // 升到下一级的花费
+  slots:  [12, 18, 22, 30],             // 能放多少种货
+  unit:   [300, 600, 1200, 2400],       // 每种货三品质合计的数量上限
+  alerts: [0, 8, 16, 24],               // 到价提醒条数
+  orders: [0, 0, 8, 16],                // 自动出售条数
+}
+```
+
+| 等级 | 升级价 | 格数 | 每格上限 | 解锁 |
+|---|---|---|---|---|
+| Lv1 | — | 12 | 300 | 基础仓储 |
+| Lv2 | 80,000 | 18 | 600 | 7 日走势、到价提醒（8 条） |
+| Lv3 | 300,000 | 22 | 1,200 | 到价自动出售（8 条） |
+| Lv4 | 1,000,000 | 30 | 2,400 | 自动出售 16 条 |
+
+动作（都走 `/api/pet/world/act`，只能在自己的岛）：
+
+- `{a:'whUp'}`：扣 D 币升一级，Lv4 封顶；返回 `spend/lv/msg`。
+- `{a:'whAlert', id, price}`：Lv2 起；`price=0` 取消；条数上限见上。
+- `{a:'whOrder', id, q, price, n}`：Lv3 起；`price=0` 取消；`1 ≤ n ≤ 2400`。
+- `{a:'warehouse', id, q, n, keep}` 受容量限制：
+  - 新物品且已用格数 ≥ `slots[lv-1]` → 「仓位已满」；
+  - 该物品三品质合计 > `unit[lv-1]` → 「每格最多放 N 个」；
+  - `n=0` 会同时删除该物品该品质的 `whOrder`；
+  - 设置 `whOrder` 会把 `b12.keep[id][q]` 清 0（前端文案也写「设了自动出售的品质会关闭自动补足」）。
+
+**到价自动出售的真实执行路径（重要复核结论）**：
+`b26AutoSell` 的原文要求 `b12WarehouseMasks.get(s)` 存在，并且只在管家结算里被调用一次。
+但调用点位于 `run()` / `b12WithAvailableInventory()` 作用域之外，此时 WeakMap 掩码已经被删除，
+所以按 `05a5c445` 原文该函数**恒返回空数组**。
+也就是说 3 级「到价自动出售」在当前线上实现里很可能不会真正触发（前端仍提示「管家巡视执行」）。
+**托管不能把它当卖出通道**；我们自己的卖出走 `sell`，仓库只用来囤货/升级容量。
+
+---
+
+## 14B. 游乐馆（05a5c445 新增）
+
+规则文件是独立的 `/arcade-rules.js?v=05a5c445`。`pet-world-rules.js` 内联了一份
+`ARC_RULES` 供服务端 `arcAction` 使用，但**没有 export**，所以托管必须单独加载。
+
+```
+GAMES = {
+  bounce: {name:'弹弹乐',   daily:10, shots:5},
+  pool:   {name:'鲸鱼桌球', daily:10, shots:6},
+  bowl:   {name:'鲸鱼保龄', daily:10, shots:10},
+}
+MIN_PLAY = {bounce:5, pool:6, bowl:8}   // 秒，arcStart→arcEnd 的最短间隔
+ARC_VERSION = 1
+BOUNCE_DIMS = {w:1280, h:720}           // 弹弹乐固定场地，服务端重放时忽略客户端尺寸
+DT = 1/120, MAX_STEPS = 1080
+```
+
+存档：
+
+```
+state.arc = {v:1, d:'YYYY-MM-DD', n:{bounce,pool,bowl}, best:{}, db:{}, cur:null, plays}
+```
+
+- 每日次数按 `ctx.day`（北京时间自然日）重置。
+- `arcStart {g}`：扣一次当日次数，返回 `{ok,seed,left}`；seed 由服务端随机。
+- `arcEnd {g,shots}`：
+  - 逐个校验 `validShot`；
+  - `ctx.t - cur.t >= MIN_PLAY[g]`，否则「太快了，这局不计分」，**次数不退**；
+  - 服务端用 `replay(g, seed, shots, BOUNCE_DIMS)` 重放，必须 `over(w)` 为真，
+    否则「这局没有打完，不计分」；
+  - 写 `arc.best[g]`（历史最高）与 `arc.db[g]`（当日最高）、`b9Rank.daily/total[g]`；
+  - **不发 D 币**，只有榜单与个人纪录。
+- 失败/放弃也会消耗次数，所以求解器必须在 `arcStart` 之前就准备好 shots。
+
+### 三种游戏的计分
+
+**鲸鱼桌球 pool**（10 颗头像球 + 大肥鱼，6 杆）：
+
+- 球进洞：`100 × combo`，金色球 `300 × combo`；combo 在每一杆开始时清零，同一杆内连续进洞递增；
+- 大肥鱼自己进洞：`−50`；
+- 全部球清空：额外 `500 + 150 × (6 − 已用杆数)`；
+- 实测贪心克隆求解：**1200 分 / 约 7.3 秒**（满分上限远高于此，但受 6 杆限制）。
+
+**鲸鱼保龄 bowl**（10 瓶，5 轮 × 最多 2 投）：
+
+- 全中：`30 + 10 × 连续全中次数`（第 1–5 次连续依次 30/40/50/60/70）；
+- 补中：20；普通：该轮击倒瓶数；
+- 理论满分 = 五连全中 = **250 分**；实测贪心克隆 250 分 / 约 2.8 秒。
+
+**弹弹乐 bounce**（固定 1280×720，5 甩）：
+
+- 场地边长：`VW = round(clamp(min(W,H)×0.34, 170, 300)) = 245`，
+  命中框 `hx = VW×0.1875 ≈ 45.94`、`hy = VW×0.2227 ≈ 54.56`、`r = VW×0.19 ≈ 46.55`；
+- 出手 `[x,y,vx,vy]`：位置必须在框内，`|vx|,|vy| ≤ 2400`，速度 ≥ `deadZone = 450`；
+- 空气阻力 `2.2`、碰边回弹 `0.6`、停速 `25`；
+- 倍率 `mult = 1 + 0.5 × 反弹次数 + bonus`，本甩内所有得分乘该倍率；
+- 四边隐藏机关：每条边按长度分段，撞击现身（st1），再撞升级（st2），
+  基础分 `[40,50,30,60,80,40,100,30]`，每级按 `pts × st` 再乘倍率；
+- 角落暴击 +60；道具框：mystery 30–150、chest 60 + 4 枚金币（各 15）、
+  bubble 40 且 bonus+1、ice 100、gift 120、spring 5；
+- 实测随机 60 组最好 953；线上当日榜首 2210，说明候选搜索空间很大，
+  需要专门设计「位置 × 速度」候选集和束搜索。
+
+**提交注意**：服务端按 `shots` 重放，任何一条 `validShot` 不合法整局判失败；
+弹弹乐的 `dims` 参数不参与服务端复算。
+
+### 榜单
+
+```
+GET /api/pet/world/rank/{bounce,pool,bowl}/{day,total}?limit=20
+```
+
+返回 `rows[{name,value,place,mine}]`；`value` 就是该周期的最高分。
+`pet-isle-rank.js` 里九类榜单：`battle / steal / help / earn / balance / bounce / pool / bowl`。
+
+---
+
+## 14C. 修仙 2.0（规则版本 `20b20a0e`）
+
+存档仍是 `state.xs`。2.0 新增的字段：
+
+```
+mind 心境(0–100，默认50) / luck 气运(-50–50)
+npc[id] = [好感, 关系, 往事进度, 最后送礼日]   // 关系 1师父 2道侣 3结拜 4仇人
+ev = {d,n,last,cur:{id,t,r}}                  // 机缘：当日次数、上次时间、当前事件
+tk = {d,list:[[任务种类下标,已完成]]}          // 宗门委托
+rep 声望 / ctb 贡献 / sp 领俸禄日
+ch = {d,ids:[]}                               // 今日已叙话
+sl = [4 个技能 id] / pk = {d,o,n}             // 配招 / 观气
+rlm = {a,sd,L,R,c,hp,mx,lt,t}                 // 进行中的秘境
+rd = {d,n} / rc = {area:1} / mat = {}         // 秘境次数/首通/材料
+df = {d,n} / dd = {d,w:[]} / tw = {d,n}       // 斗法次数/今日已胜者/今日胜场
+tm = {el:熟练} / te = 上次换主修日 / fuseCd / flag
+```
+
+### 日常上限与关键常量
+
+| 项 | 值 |
+|---|---|
+| 灵力 | 上限 100，每 360 秒回 1 点 |
+| 水壶 | 20（水灵根功法 +10） |
+| 药田 | 24 块，初始开 8 块 |
+| 斗法/自动对战 | 每自然日 8 次，每次 10 灵力 |
+| 机缘 | 每日 3 次，两次间隔 ≥ 600 秒，触发率 `0.4 + 气运/500`；事件保留 30 分钟 |
+| 秘境 | 每日 3 次，每次 15 灵力；进行中超过 6 小时再进会按失败结算一半 |
+| 宗门委托 | 每日 3 条；每条只能交一次 |
+| 俸禄 | 每日 1 次；外门 10 / 内门 25 / 真传 50 / 长老 90 灵石 |
+| 宗门声望门槛 | 0 / 200 / 800 / 2000 |
+| 好感等级 | 陌生 0 / 熟识 100 / 好友 300 / 挚友 600 / 知己 900 |
+| 炼丹 | 起炉 5 灵力，至少 15 秒；成色 q 0–2 → 出丹 1+q 颗（火系主修 q≥1 再多 1 颗） |
+| 突破成功率 | `clamp(0.6 + (心境−50)/250 + 气运/500, 0.3, 0.9)` |
+
+### 2.0 动作全集
+
+`act2`（人脉/机缘/宗门）与 `act3`（对战/秘境）都走同一个 `/api/pet/world/act` 动作数组：
+
+| 动作 | 参数 | 规则 |
+|---|---|---|
+| `talk` | `el:npcId` | +5 好感；每日每人一次、最多 30 人；当天前 3 人各 +1 心境 |
+| `gift` | `el:npcId, herb:物品id` | 每人每天一次；喜欢 +40、普通 +15、讨厌 −10；消耗 1 个药材或丹药 |
+| `chap` | `el:npcId, n:0/1, i:选项` | 往事按顺序；第 1 章要好感 100，第 2 章要好感 300 + 筑基；效果见 `CHAPTERS` |
+| `evroll` | — | 尝试触发机缘；受每日 3 次/10 分钟间隔/40%+气运限制 |
+| `evpick` | `i:选项` | 30 分钟内有效；选项可有修为门槛/消耗；结果由 `cur.r` 与气运确定 |
+| `tasks` | — | 生成当天 3 条委托（服务端随机） |
+| `task` | `n:0/1/2` | 交委托；给贡献、声望、灵石；`win` 类要求当天胜场 |
+| `stipend` | — | 领当日俸禄 |
+| `slots` | `herb:'id1,id2,id3,id4'` | 保存 4 个不同技能 |
+| `peek` | `el:npcId` | 花 20 灵石看穿对方第 n 个技能，每日每人最多 4 次 |
+| `ab` | `el:npcId` | 自动对战：10 灵力、计入每日 8 次；胜给灵石、+3 好感、功法熟练 +1 |
+| `rin` | `herb:areaId` | 进秘境：15 灵力、每日 3 次、按大境界解锁 |
+| `rgo` | `i:列号, n?:1` | 走一步；`n=1` 只有首领且要手动斗法，托管不要传 |
+| `rbuy` | `i:0/1/2` | 秘境商店买回春散/玄铁/灵玉 |
+| `rout` | — | 撤出秘境，带回一半收获 |
+
+### 确定性边界（托管最重要的部分）
+
+**可以本地精确预演的**：
+
+- `evpick`：`cur.r` 已知，气运已知，选项的 `rolls` 概率表已知 → 能算出每个选项的确定结果。
+- `ab`：种子 `hseed(day, npcId, df.n, stone, cv.xp)`，对手技能 `npcFighter(id)` 固定 → 结果确定。
+- `rin/rgo/rbuy/rout`：种子 `hseed(day, rd.n, area, stone, cv.xp, log)`，地图、怪物、战斗全部确定性。
+- `slots/talk/gift/chap/tasks/task/stipend`：纯状态变更；`tasks` 的列表生成后即可读回。
+
+**依赖服务端随机的**：
+
+- `evroll`：是否触发、触发哪个事件由服务端 `ctx.rand` 决定；
+- `tasks` 第一次生成的三条委托；
+- 农场收获品质、钓鱼、挖矿、擂台、游乐馆 `arcStart` 的 seed。
+
+→ 后两类必须「**先提交、再按真实返回/状态规划下一步**」，不能拿本地预演结果当服务端结果。
+
+### 秘境的自动化要点
+
+- 地图 3 层，每层最多 3 行；列 `0/1/2`，上一层列号决定下一层可选列（开局 `c=1, R=-1`）。
+- 节点类型：`fight / elite / boss / chest / spring / event / shop / trap / camp / herb`。
+- 每层第 3 行固定 `elite`（前两层）或 `boss`（第三层）。
+- 首领可以 `rgo` 不传 `n`，由本地确定性模拟自动结算；传 `n=1` 会进入手动斗法并写 `xsFight`，
+  托管禁止（见 `FORBIDDEN_XIAN_ACTIONS`）。
+- 战斗失败会丢掉**全部**行李；主动 `rout` 只损失一半 → 打不过首领时应在最后一步前撤出。
+- 通关（含自动击败首领）会把行李全部入账；首通每个秘境送培元丹×2、回灵丹×2。
+- 本地可以枚举路径（每层最多 3×3×1 个节点），用模拟结果直接选收益最高且能打赢的路线。
+
+### 托管禁止项
+
+`core/xian.mjs` 的 `FORBIDDEN_XIAN_ACTIONS = {xsRoot, xsStory, xsFight, xsWin, xsLose}`。
+即：测灵根、剧情、手动斗法与其胜负结算不自动提交；`xsFuse` 只在 `autoFuse` 时提交，
+`xsBreak` 只在非 manual 模式提交。2.0 的 `ab`、`rin/rgo/rbuy/rout` 都是安全的自动路径。
 
 ---
 
@@ -688,13 +924,22 @@ ev = (1−发现率) × 货值
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/api/pet/world` | 世界状态（state/rev/coins/prices/clockStart/now） |
-| POST | `/api/pet/world/act` | 提交动作 `{rev, operation, actions≤40}` |
+| POST | `/api/pet/world/act` | 提交动作 `{rev, operation, actions≤40}`；b26/游乐馆/修仙 2.0 都走这里 |
 | POST | `/api/pet/world/auto` | 管家配置 `{rev, operation, config}` |
-| POST | `/api/pet/world/welcome` | 领新人礼 |
+| POST | `/api/pet/world/welcome` | 领新人礼（`WELCOME_GIFT = 1,000,000 D`，每账号一次） |
 | GET | `/api/pet/world/tax` | 公库账目 |
 | GET | `/api/pet/world/lotto` | 彩票开奖记录 |
-| GET | `/api/pet/world/rank/{battle,steal,help,earn,balance}/{day,total}` | 榜单 |
-| GET/POST | `/api/pet/world/refund` | 一键回收（**已过期 2026-11-05**） |
+| GET | `/api/pet/world/rank/{battle,steal,help,earn,balance,bounce,pool,bowl}/{day,total}` | 榜单；`balance` 实际只有当前余额（`period=current`） |
+| GET | `/api/pet/world/neighbors?limit=&q=&cursor=` | 邻居目录 |
+| GET | `/api/pet/world/neighbors/marked` | 标记的邻居 |
+| GET | `/api/pet/world/visit/:id` | 串门详情（含地块成熟时间、`battle` 守家信息） |
+| POST | `/api/pet/world/visit/:id` | 偷菜 `{operation, kind:'all', i}` |
+| POST | `/api/pet/world/help/:id` | 帮忙 `{operation}` |
+| GET | `/api/pet/world/board/:id` | 留言板读取 |
+| POST | `/api/pet/world/board/:id` | 留言 `{operation, text}` |
+| GET | `/api/pet/world/guard-log?cursor=` | 守家战日志 |
+| POST | `/api/pet/world/favorite/:id` | 标记邻居 `{active}` |
+| GET | `/api/pet/world/refund` | 一键回收（**已过期 2026-11-05**） |
 | GET | `/api/pet/battle/home` | 擂台首页 |
 | GET | `/api/pet/battle/gear` | 装备/加点/商店/每日 |
 | GET | `/api/pet/battle/opponents` | 对手列表 |
@@ -703,6 +948,13 @@ ev = (1−发现率) × 货值
 | POST | `/api/pet/battle/{equip,enhance,points,respec,buy,train,chest}` | 装备操作 |
 | GET/POST | `/api/pet/duel` | 约战 |
 | GET/POST | `/api/pet/state` | 站宠云档 |
+
+**b26 / 游乐馆 / 修仙 2.0 的动作名**（全部塞进 `/act` 的 `actions`）：
+
+- b26：`whUp`、`whAlert`、`whOrder`（`warehouse` 同时受 b26 容量约束）
+- 游乐馆：`arcStart`、`arcEnd`
+- 修仙 2.0：`talk`、`gift`、`chap`、`evroll`、`evpick`、`tasks`、`task`、`stipend`、
+  `slots`、`peek`、`ab`、`rin`、`rgo`、`rbuy`、`rout`
 
 ### 协议要点
 
@@ -723,16 +975,23 @@ ev = (1−发现率) × 货值
    每点体力钓鱼 300–3500 D，而口粮成本 70–350 D/点。
 2. **市场择时**：未来价格完全可预测，只在接近峰值时卖；
    避免同一天砸同一物品（自我砸盘）。
-3. **偷菜**：前排每天偷 85–176 处；我们今天只有 1 次。**这是最大的缺口。**
-4. **五子棋**：每天 10 局计奖，困难档 ×1.5，全胜约 5 万 D + 物品。
-5. **加工**：把低阶作物/矿变成高价值品，绕过作物阶梯价。
-6. **货船套利**：基础价进货，按行情价卖出。
-7. **投资**：地块 24、工具满级、洒水器 3、蟹笼 4、畜栏 8 —— 一次性投入换长期产能。
+3. **偷菜**：前排每天偷 85–176 处。**这是最大的缺口。**
+4. **修仙 2.0**：不花 D 币，只花灵力/时间；宗门任务、俸禄、机缘、秘境首通、
+   自动对战给灵石、丹药、材料与功法熟练。收益不在 D 币榜上，但能换擂台资源。
+5. **五子棋**：每天 10 局计奖，困难档 ×1.5，全胜约 5 万 D + 物品。
+6. **加工**：把低阶作物/矿变成高价值品，绕过作物阶梯价。
+7. **货船套利**：基础价进货，按行情价卖出。
+8. **投资**：地块 24、工具满级、洒水器 3、蟹笼 4、畜栏 8 —— 一次性投入换长期产能。
+9. **游乐馆**：每天 3 × 10 局，**不发 D 币**，只争 `bounce/pool/bowl` 榜。
+   托管价值是「排名 + 个人纪录」，不是经济收益；时间成本要先算清楚。
+10. **b26 仓库**：升级只扩大预留容量；3 级自动出售在当前实现里很可能不触发（见 14A），
+    所以只作为「囤货不砸盘」的容量投资，优先级低。
 
 ### 明确不做
 
 - 刮刮乐（期望 74%）、大乐透（期望 3.3%）、约战（零和抽 5%）
 - 押注类、彩票类
+- 修仙的 `xsFight/xsWin/xsLose/xsStory/xsRoot`（手动/剧情结算，托管禁止）
 
 ---
 

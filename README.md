@@ -23,7 +23,11 @@ core/
   world.mjs              世界状态、本地预演、批量提交
   market.mjs             市场预测（供需反推、未来岛日价格、择时卖出、累进税、阶梯价）
   planner.mjs            每轮动作规划（收/种/养/加工/钓矿/投资/卖货/货船）
-  warehouse.mjs          囤货仓库（锁定待涨的货，防自动贱卖）
+  warehouse.mjs          囤货仓库 b26（锁定待涨的货、容量约束、撞墙才升级）
+  arcade.mjs             游乐馆求解器（弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄）
+  xian.mjs               修仙 1.0（种田/炼丹/打坐/突破/功法）
+  xian2.mjs              修仙 2.0（人脉/机缘/宗门/配招/自动对战/秘境）
+  xian-rules.mjs         修仙规则原文（站点 xs/rules.js 的副本）
   npc.mjs                52弟（五子棋求解 + 其他小游戏）
   gomoku.mjs             五子棋求解器（多路线试走，只提交复盘验证过必胜的棋谱）
   arena.mjs              擂台（挑战、宝箱、静止防守装、加点、训练）
@@ -128,6 +132,7 @@ node scripts/install-host.mjs --ext-id=<你的扩展ID>
 | `4be1c2b4` | 11-09 | 旧版基线 | v1 插件（已归档） |
 | `63568b46` | 11-11 | 五子棋 15 路三档 / 每天 10 局计奖、管家不抽成改 2 小时、新增囤货仓库 | v2 全部重写 |
 | `a4a62d77` | 11-12 | **规则表未变**；新增全屏模式、提交幂等修正（pendingRequest/keepalive/duplicate）、擂台等级筛选、偷菜「只看可偷」 | 用上 `stealable=1` 与 `minLevel/maxLevel`；动作预演加 blocked 集合避免无效重试 |
+| `05a5c445` | 11-13 | 新增**游乐馆**（`arcade-rules.js` 独立文件）与 **b26 囤货仓库**；修仙 2.0（`20b20a0e`） | `core/arcade.mjs` 本地求解后提交 shots、`warehouse.mjs` 加容量约束、`core/xian2.mjs` 全量接入；经济数值逐项比对未变 |
 
 > 规则表（`pet-world-rules.js`）是价格、结算、五子棋 AI 的唯一来源。
 > 它没变，收益模型就不用重算——这是「直接 import 线上规则模块」这个设计的直接好处。

@@ -7,7 +7,7 @@
 //   3. 卖货只在价格接近未来峰值时做，并尊重阶梯价与累进税
 //   4. 投资只看回本周期
 import * as M from './market.mjs'
-import { planVault } from './warehouse.mjs'
+import { planVault, planVaultUpgrade, vaultCapacity } from './warehouse.mjs'
 import { nextUnlock, physicalPrepLeadSec, stealGearSwaps, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { allocateStamina } from './stamina-dp.mjs'
 
@@ -1368,6 +1368,12 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       if (push(a)) locked++
     }
     if (locked) summary.push(`囤货仓库调整 ${locked} 项`)
+    // 撞墙才升级：只扩容量、不产收益，和「投资」共用一次巡视一次的预算。
+    if (cfg.vault.upgrade && opts.allowInvest !== false) {
+      const before = vaultCapacity(R, s).lv
+      const up = planVaultUpgrade(R, { state: s, coins }, cfg)
+      if (up && push(up)) summary.push(`囤货仓库升到 ${before + 1} 级（扩容）`)
+    }
   }
 
   // ---------- 9. 卖货（择时） ----------

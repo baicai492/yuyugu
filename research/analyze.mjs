@@ -1,9 +1,11 @@
 // 用站点规则模块系统计算各项数值，输出 Markdown 表格（research/analysis-tables.md）。
 import { writeFileSync } from 'node:fs'
-import * as R from '../cache/rules-4be1c2b4.mjs'
+import * as R from '../cache/rules-05a5c445.mjs'
 import { fishEV, oreEV, mineHits, bombHits, ISLE_PER_DAY } from '../extension/lib/strategy.mjs'
 R.b12ConfigureClock(1794212939)
 const W = R.WORLD, out = [], P = (s = '') => out.push(s)
+const NOW0 = Math.floor(Date.now() / 1000)
+P(`<!-- 生成于 ${new Date().toISOString()}，规则版本 05a5c445，岛日基准 ${R.isleDay(NOW0)} -->`)
 const f0 = (n) => Math.round(n).toLocaleString('en-US'), f1 = (n) => n.toFixed(1), f2 = (n) => n.toFixed(2)
 const base = (id) => R.BASE_PRICE[id] || 0
 const table = (head, rows) => { P('| ' + head.join(' | ') + ' |'); P('|' + head.map(() => ' --- ').join('|') + '|'); for (const r of rows) P('| ' + r.join(' | ') + ' |'); P() }
@@ -59,7 +61,7 @@ P(`每岛日 ${W.daily.craft} 次、每次 1 体力。成品和原料的行情�
 
 // ---------- 行情 ----------
 P('## 行情波动（往后 98 个岛日 = 28 天，不含供需压价）'); P()
-const t0 = 1794370000, day0 = R.isleDay(t0), dayAdd = (d, k) => new Date(Date.parse(d) + k * 86400000).toISOString().slice(0, 10)
+const t0 = Math.floor(Date.now() / 1000), day0 = R.isleDay(t0), dayAdd = (d, k) => new Date(Date.parse(d) + k * 86400000).toISOString().slice(0, 10)
 const N = 98, ids = Object.keys(R.BASE_PRICE)
 const series = Object.fromEntries(ids.map((id) => [id, Array.from({ length: N }, (_, k) => R.priceOf(id, dayAdd(day0, k), 0) / base(id))]))
 const stat = (a) => { const s = a.slice().sort((x, y) => x - y), m = a.reduce((x, y) => x + y, 0) / a.length; return { min: s[0], p25: s[Math.floor(a.length * 0.25)], med: s[Math.floor(a.length / 2)], p75: s[Math.floor(a.length * 0.75)], max: s[a.length - 1], mean: m } }

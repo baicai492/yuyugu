@@ -13,12 +13,24 @@ import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound, probeStealable } from './social.mjs'
 import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
+import { xian2Round, xian2Snapshot } from './xian2.mjs'
+import { arcadeRound, arcadeSummary } from './arcade.mjs'
+import { planVaultUpgrade } from './warehouse.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
 const bj = (ms = Date.now()) => new Date(ms + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19)
 
 export class Engine {
+  /** 游乐馆今天还剩几局（三种游戏合计） */
+  arcadeLeft() {
+    try {
+      const sum = arcadeSummary(this.world)
+      if (!sum) return 0
+      return Object.values(sum).reduce((a, g) => a + (g.left || 0), 0)
+    } catch { return 0 }
+  }
+
   constructor({ world, cfg, logDir }) {
     this.world = world
     this.cfg = cfg
@@ -636,6 +648,29 @@ export class Engine {
         const xr = await xianRound(w, cfg, this.log.bind(this), this.memo)
         totalActions += xr.actions || 0
       } catch (e) { this.log('修仙出错：' + e.message, 'err') }
+      // 2.0：人脉/机缘/宗门/配招/自动对战/秘境。秘境整条路径本地预演过再提交。
+      if (cfg.xian2?.enabled !== false) {
+        try {
+          this.setStep('修仙 · 秘境')
+          const x2 = await xian2Round(w, cfg, this.log.bind(this), this.memo)
+          totalActions += x2.actions || 0
+        } catch (e) { this.log('修仙2.0出错：' + e.message, 'err') }
+      }
+    }
+
+    // ---------- 游乐馆 ----------
+    // 不发 D 币，只争榜单，所以放在所有经济动作之后、偷菜之前；
+    // 每局要等 MIN_PLAY（5/6/8 秒），单轮只玩 perTick 局，不拖住掐点偷菜。
+    if (cfg.arcade?.enabled && !cfg.dry && !snipeWindow) {
+      try {
+        const left = this.arcadeLeft()
+        if (left > 0) {
+          this.setStep('游乐馆')
+          const ar = await arcadeRound(w, cfg, this.log.bind(this), this.memo)
+          if (ar.played > 0) this.memo.arcadeStall = 0
+          else this.memo.arcadeStall = (this.memo.arcadeStall || 0) + 1
+        }
+      } catch (e) { this.log('游乐馆出错：' + e.message, 'err') }
     }
 
     // ---------- 偷菜 ----------
@@ -697,6 +732,22 @@ export class Engine {
       const at = Number(this.memo.xianWakeAt) || 0
       const wait = at > 0 ? at - w.tickClock() : Infinity
       if (wait >= 10 && wait < sleep) sleep = wait
+      // 修仙 2.0 自己的窗口（机缘冷却 600 秒、秘境进行中、委托刷新）
+      if (cfg.xian2?.enabled !== false) {
+        const at2 = Number(this.memo.xian2WakeAt) || 0
+        const wait2 = at2 > 0 ? at2 - w.tickClock() : Infinity
+        if (wait2 >= 10 && wait2 < sleep) sleep = wait2
+      }
+    }
+    // 游乐馆：还有次数就按 wake.arcade 回来；连续几轮一局都开不起来就退避，
+    // 避免「看起来有次数、其实每次都失败」变成每 60 秒一次的空转。
+    if (cfg.arcade?.enabled && !cfg.dry) {
+      const left = this.arcadeLeft()
+      if (left > 0) {
+        const stall = this.memo.arcadeStall || 0
+        const want = stall >= 3 ? Math.max(cfg.loop?.stuckCool ?? 300, 300) : (cfg.wake?.arcade ?? 60)
+        if (sleep > want) sleep = want
+      }
     }
     // 保险：nextWake 说「立刻有事」（<10 秒）但这一轮一个动作都没做成，
     // 说明「看起来有活其实干不了」（体力/材料/现金卡住）。
@@ -1097,6 +1148,8 @@ export class Engine {
       history: this.history.slice(-240),
       // 修仙面板的数据。灵石不能换 D 币，界面上必须写清楚（见 GUI）。
       xian: this.xianView(),
+      xian2: this.xian2View(),
+      arcade: this.arcadeView(),
     }
   }
 
@@ -1105,6 +1158,20 @@ export class Engine {
     const w = this.world
     if (!w.ready) return null
     try { return xianSnapshot(w, this.cfg) } catch (e) { return { exists: false, error: e.message } }
+  }
+
+  /** 修仙 2.0 快照（人脉/机缘/宗门/秘境） */
+  xian2View() {
+    const w = this.world
+    if (!w.ready) return null
+    try { return xian2Snapshot(w) } catch (e) { return { error: e.message } }
+  }
+
+  /** 游乐馆快照（各游戏今日剩余、个人纪录） */
+  arcadeView() {
+    const w = this.world
+    if (!w.ready) return null
+    try { return arcadeSummary(w) } catch (e) { return { error: e.message } }
   }
 
   /** 市场预测（给 GUI 的市场面板） */
