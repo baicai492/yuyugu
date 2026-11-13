@@ -14,6 +14,36 @@ import { allocateStamina } from './stamina-dp.mjs'
 const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
 
+/**
+ * 一自然日有几个岛日。
+ *
+ * 长夜时钟只在 08:00–22:00 这 14 小时里走（规则的 b12ActiveSeconds，
+ * R:1179-1182；b12ClockSeconds 就是用它累计的），夜里原地冻结。
+ * 所以是 14h/ISLE_SPAN = 3.5 个岛日，不是 24h/ISLE_SPAN = 6。
+ * 实测日志也吻合：岛时 08:12→08:21→08:30 每 10 分钟走 1 点，而 00:30 和
+ * 08:02 都停在「0 点」——夜里没过。
+ * 服务端没配时钟（b12ClockStart() 为 0）时才按真实时间算。
+ */
+export function isleDaysPerDay(R) {
+  const span = R.ISLE_SPAN || 14400
+  return (R.b12ClockStart?.() ? 14 * 3600 : 86400) / span
+}
+
+/**
+ * 把「N 个岛日的岛钟时长」折成现实秒数。
+ * 规则自己的 b12AfterActive 就是干这个的（跳过 22:00–08:00），直接复用，
+ * 免得手工算「一天 14 小时」时踩到边界。
+ */
+export function isleSpanToReal(R, t, isleSec) {
+  try {
+    if (R.b12ClockStart?.() && R.b12AfterActive) {
+      const at = R.b12AfterActive(t, Math.max(0, isleSec))
+      if (Number.isFinite(at)) return at
+    }
+  } catch { /* 超出 1000 次循环上限就退回线性 */ }
+  return t + Math.max(0, isleSec)
+}
+
 /** 体力/精力相关：找出最便宜的补体力方式 */
 export function foodChoices(R, s, prices) {
   const room = Math.max(0, R.energyMax(s) - s.en)
@@ -119,7 +149,10 @@ export function workValuePerEnergy(R, s, t, prices, cfg) {
     if (ev > 0) best = Math.max(best, ev / (W.cost.fish || 1))
   }
   if (cfg.work?.mine && left('mine', W.daily.mine) >= 3) {
-    const ev = mineEV(R, s, prices, false, t) / (1.25 + 0.05 * (s.tools?.pick || 0))
+    // mineEV 返回的已经是「每次挥镐的期望收益」（内部乘过命中期望 1.25+0.05*pick），
+    // 这里不能再除一次——旧版除完等于只算「命中那一下」的收益：
+    // pick 2 的每点体力从 824 压到 610（低估 26%），pick 2/3/4 的边际值完全相同。
+    const ev = mineEV(R, s, prices, false, t)
     if (ev > 0) best = Math.max(best, ev / (W.cost.mine || 1))
   }
   if (cfg.work?.bomb && left('bomb', W.daily.bomb) > 0 && (s.inv?.bomb?.[0] || 0) > 0) {
@@ -414,7 +447,7 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
 
   const perE = (v, cost) => (v > 0 ? Math.round(v / cost) : 0)
   const fish = cfg.work?.fish ? perE(fishEV(R, s, t, expPrices, useBait), R.WORLD.cost.fish) : 0
-  const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick), R.WORLD.cost.mine) : 0
+  const mine = cfg.work?.mine ? perE(mineEV(R, s, expPrices, false, t), R.WORLD.cost.mine) : 0
   const bomb = cfg.work?.bomb ? perE(mineEV(R, s, expPrices, true, t), R.WORLD.cost.bomb) : 0
 
   // 本岛日还剩下多少额度。日志里必须写清楚——「每点体力收益 炸矿 2,952」
@@ -722,8 +755,11 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       const workE = (cfg.work?.fish ? (W.daily.fish || 0) * (W.cost.fish || 0) : 0) +
         (cfg.work?.mine ? (W.daily.mine || 0) * (W.cost.mine || 0) : 0) +
         (cfg.work?.bomb ? (W.daily.bomb || 0) * (W.cost.bomb || 0) : 0)
-      // 一自然日有几个岛日（现在 ISLE_SPAN=14400 → 6 个）
-      const islePerDay = Math.max(1, Math.round(86400 / (R.ISLE_SPAN || 14400)))
+      // 一自然日有几个岛日：长夜时钟只走 08:00–22:00，所以是 3.5 个（见 isleDaysPerDay）。
+      // 旧版按 86400/ISLE_SPAN 算成 6 个，工作体力需求被高估 71%：
+      // 钓鱼 80×4 + 挖矿 100×3 + 炸矿 10×6 = 680 点/岛日，乘 6 是 4,080 点/天，
+      // 自然回复才 480 点 —— 口粮地从正确的 6 块被推到 12 块，占掉一半能卖钱的地。
+      const islePerDay = isleDaysPerDay(R)
       const farmE = (s.plotN || 0) * (cashPick?.cy?.energy || 0)
       const regenPerDay = 86400 / (W.regen || 180)
       const demand = workE * islePerDay + farmE - regenPerDay * 0.9
@@ -1128,9 +1164,12 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const haveBait = Math.max(0, Math.floor(s.inv?.bait?.[0] || 0))
     const haveBomb = Math.max(0, Math.floor(s.inv?.bomb?.[0] || 0))
     const pickFloor = Math.min(s.mine.max, R.PICK_FLOOR[s.tools.pick])
-    const mineVal = mineLeft > 0 ? mineEV(R, s, expPrices, false, t) / (1.25 + 0.05 * s.tools.pick) : 0
+    const mineVal = mineLeft > 0 ? mineEV(R, s, expPrices, false, t) : 0
     const canDeeper = s.mine.max < R.PICK_FLOOR[s.tools.pick]
-    let bombVal = bombLeft > 0 && mineLeft >= 6 && haveBomb > 0 ? mineEV(R, s, expPrices, true, t) : 0
+    // 炸矿只吃「炸药 + 6 点体力」，不吃挖矿额度：规则里 `s.cnt.mine += 6` 只是统计，
+    // 不写 iq.mine（R:783）。旧版加了 mineLeft>=6 的门槛，挖矿额度剩 <6 时一次不炸，
+    // 一天最多 10 次（约 11 万 D）被白白放弃。
+    let bombVal = bombLeft > 0 && haveBomb > 0 ? mineEV(R, s, expPrices, true, t) : 0
     // 镐子还能到更深的层时，炸矿的价值至少按「口粮成本 ×2」算：
     // 下潜解锁的新矿层是长期收益，不能因为当下这层矿不值钱就永远不下去。
     if (bombVal > 0 && canDeeper) bombVal = Math.max(bombVal, (W.cost.bomb || 1) * (eatCost || 0) * 2)
@@ -1596,7 +1635,7 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     if (payback > maxPayback) return
     out.push({ name, action, cost, dailyGain, payback, extra })
   }
-  const ISLE_PER_DAY = 3.5   // 14 小时白昼 ÷ 4 小时一个岛日
+  const ISLE_PER_DAY = isleDaysPerDay(R)   // 3.5：长夜时钟只走 08:00–22:00
 
   // ---------- 地块：多种一块能多收多少 ----------
   if (s.plotN < Math.min(W.plotsMax, cfg.invest?.maxPlot ?? 24)) {
@@ -1625,13 +1664,21 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     const rodPrice = R.upgradePrice(s, 'rod')
     // 四季 × 全天找出「每竿平均收益」最高的时段，取四季平均。
     // 同一个 t 往前推季节，用虚拟时刻让 fishPool 选到对应季节的鱼。
+    //
+    // 注意推进要用 isleSpanToReal：一个季节是 12 个**岛日**（R.ISLE_SEASON_DAYS），
+    // 岛日只在 08:00–22:00 走，所以 12 岛日 ≈ 3.43 真实日。
+    // 旧版写 `se * 12 * ISLE_PER_DAY * ISLE_SPAN`，等于推 12*3.5 个岛日的真实秒数（7 天），
+    // 每个 se 都多走一个季节，「四季平均」实际取到的是季节 +0/+2/+4/+6，两个冬天。
+    const SEASON_DAYS = R.ISLE_SEASON_DAYS || 12
     const fishBest = (rodLv) => {
       const s2 = { ...s, tools: { ...s.tools, rod: rodLv } }
       let sum = 0
       for (let se = 0; se < 4; se++) {
+        const base = isleSpanToReal(R, t, se * SEASON_DAYS * R.ISLE_SPAN)
         let best = 0
         for (let h = 0; h < 24; h++) {
-          const probe = t + se * 12 * ISLE_PER_DAY * R.ISLE_SPAN + h * (R.ISLE_SPAN / 24)
+          // 岛上小时同样可能落在冻结段里，用规则自己的推进函数跳过夜间
+          const probe = isleSpanToReal(R, base, h * (R.ISLE_SPAN / 24))
           // 开不开饵料都试一遍，取更大的那个
           const ev = Math.max(fishEV(R, s2, probe, lrPrices, false), fishEV(R, s2, probe, lrPrices, true))
           if (ev > best) best = ev
@@ -1652,13 +1699,29 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
   // ---------- 镐子：下潜层数变深，能挖到更值钱的矿 ----------
   if (s.tools.pick < (cfg.invest?.maxPick ?? 4) && cfg.work?.mine) {
     const pickPrice = R.upgradePrice(s, 'pick')
-    // 用「该等级能到的层」直接算期望，比模拟时刻稳定。
-    // 挖矿一次的期望受 PICK_FLOOR 影响，所以每升一级都会更深一层。
+    // 升级后 s.mine.max 会**自己爬上来**：在最深层挖有 25% 概率发现梯子、
+    // 炸矿 60%（R:762-763、R:789），梯子不用买。
+    //
+    // 旧版这里只换了 tools.pick，没动 mine.max，于是
+    // min(s.mine.max, PICK_FLOOR[pick]) 两边都等于当前 max —— 增量恒为 0，
+    // 镐子被算成「不赚钱」（pick3 显示 16.99 天回本其实是拿 bomb 的 NaN 凑的）。
+    //
+    // 现在按「先花 climb 镐在新地板上挖、剩下的额度按新地板算」：
+    // 爬一层期望 4 镐，爬升期间收益仍按旧地板，比直接假设一升级就到新层诚实。
+    const oreAt = (floor, pick) => {
+      const st = { ...s, mine: { ...s.mine, max: Math.max(1, floor) }, tools: { ...s.tools, pick } }
+      const per = mineEV(R, st, lrPrices, false, t)
+      const bomb = cfg.work?.bomb ? mineEV(R, st, lrPrices, true, t) : 0
+      return { per, bomb }
+    }
     const dayOre = (pick) => {
-      const s2 = { ...s, tools: { ...s.tools, pick } }
-      const per = mineEV(R, s2, lrPrices, false, t)
-      const bomb = cfg.work?.bomb ? mineEV(R, s2, lrPrices, true, t) : 0
-      return per * R.WORLD.daily.mine + (bomb > 0 ? bomb * R.WORLD.daily.bomb : 0)
+      const nowFloor = Math.min(Math.max(1, s.mine.max || 1), R.PICK_FLOOR[pick] || 1)
+      const capFloor = Math.max(nowFloor, R.PICK_FLOOR[pick] || nowFloor)
+      const steps = capFloor - nowFloor
+      const climb = Math.min(R.WORLD.daily.mine, steps * 4)
+      const lo = oreAt(nowFloor, pick), hi = oreAt(capFloor, pick)
+      return lo.per * climb + hi.per * Math.max(0, R.WORLD.daily.mine - climb) +
+        hi.bomb * (R.WORLD.daily.bomb || 0)
     }
     if (pickPrice != null) add(`镐子 Lv${s.tools.pick + 1}`, { a: 'upgrade', k: 'pick' }, pickPrice, (dayOre(s.tools.pick + 1) - dayOre(s.tools.pick)) * ISLE_PER_DAY)
   }
@@ -1674,42 +1737,79 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
     }
   }
 
-  // ---------- 蟹笼：只出普通品质、不会跑货 ----------
+  // ---------- 蟹笼：抓的是鱼池里的鱼（鱼竿 Lv1 能钓到的那些） ----------
   if (s.traps.length < W.trapMax) {
     const trapPrice = W.trapPrice(s.traps.length + 1)
-    // 按当前所有产物的长期均价估一个典型收益（蟹笼产物种类固定，不用逐项模拟）
-    const trapProducts = (R.TRAP_PRODUCTS || ['shrimp', 'crab', 'lobster']).filter((id) => R.BASE_PRICE[id])
-    const productVal = trapProducts.length
-      ? trapProducts.reduce((a, id) => a + lr(id), 0) / trapProducts.length
-      : 1500
-    add(`第 ${s.traps.length + 1} 个蟹笼`, { a: 'buyTrap' }, trapPrice, productVal * (1440 / W.trapEvery) * 1.15)
+    // 服务端的 a==='trap' 分支直接 pickWeighted(fishPool(s, ctx.t, 1), …)（R:708-713）：
+    // 蟹笼产物就是「rod ≤ 1 的鱼」按 w 加权抽，和鱼竿等级、饵料都无关。
+    // 旧版读 R.TRAP_PRODUCTS（规则里根本没有这个键）后回退到 1,500 的常数，
+    // 而四个季节的 rod-1 池加权均价在 1,900~2,300 之间 —— 回本被高估 26~30%。
+    //
+    // 收笼时刻不固定，所以按「四季 × 全天」96 个采样点取加权均价，别拿当前这一小时当全年。
+    const SEASON_DAYS2 = R.ISLE_SEASON_DAYS || 12
+    let sum = 0, cnt = 0
+    for (let se = 0; se < 4; se++) {
+      const base = isleSpanToReal(R, t, se * SEASON_DAYS2 * R.ISLE_SPAN)
+      for (let h = 0; h < 24; h++) {
+        const tt = isleSpanToReal(R, base, h * (R.ISLE_SPAN / 24))
+        const pool = R.fishPool ? R.fishPool(s, tt, 1) : []
+        if (!pool.length) continue
+        const wsum = pool.reduce((a, f) => a + f.w, 0) || 1
+        sum += pool.reduce((a, f) => a + lr(f.id) * f.w, 0) / wsum
+        cnt++
+      }
+    }
+    const productVal = cnt ? sum / cnt : 1500
+    // 每天 8 个：trapEvery=180 分钟、trapCap=4，3 小时出 1 个 / 12 小时满，
+    // 不论收多勤都是 8 个/天（雨天只加速不超 cap，所以旧版的 ×1.15 是白送）。
+    add(`第 ${s.traps.length + 1} 个蟹笼`, { a: 'buyTrap' }, trapPrice, productVal * (1440 / W.trapEvery))
   }
 
   // ---------- 动物：整个成年期净赚 ÷ 总天数，挑最好的一种 ----------
   // 离线时段开着时不买「一格多只」的动物（旧版 defense.safeAnimals）：
   // 离线期间产出的畜产品没人收，占格多的品种损失更大。
-  const animalRank = R.ANIMALS
+  //
+  // 品质按心情算（规则 b12AnimalQuality，R:1599-1602）：我们是**手动提交**，
+  // ctx.auto=false，服务端按 pen.m 出品质（R:675），不是管家代收的全 q0。
+  // 每天摸 +6、喂 +8、收 −2，稳态心情就是 100：
+  //   gold = min(0.45, 100/250) = 0.4，silver = min(0.8, 100/120) = 0.8
+  //   → 平均品质系数 = 0.4×1.5 + 0.6×0.8×1.25 + 0.6×0.2×1 = 1.32
+  // 旧版固定 ×1.2，低估约 9%，而且还拿不准是哪个口径。
+  const mood = 100
+  const goldP = Math.min(0.45, mood / 250)
+  const silverP = Math.min(0.8, mood / 120)
+  const ANIMAL_Q = goldP * R.QUALITY[2] + (1 - goldP) * silverP * R.QUALITY[1] +
+    (1 - goldP) * (1 - silverP) * R.QUALITY[0]
+  const animalRanked = R.ANIMALS
     .filter((a) => !(cfg.offline?.enabled && cfg.defense?.safeAnimals) || a.cap === 1)
     .map((a) => {
-    const adultDays = (R.B12_ADULT_DAYS?.[a.id] ?? 24) / ISLE_PER_DAY
-    const growDays = (R.B12_GROW_DAYS?.[a.id] ?? 2) / ISLE_PER_DAY
-    const daily = (1440 / a.every) * lr(a.product) * 1.2 - (R.SHOP.feed?.price ?? 300)
-    // 退役时只能卖回本钱的 40%（站点规则 sellAnimal: price × 0.4），
-    // 所以净成本是 60% —— 旧版写的是 `- price * 0.6`，这里以前错写成 0.4，
-    // 等于把每只动物的成本算低了 20%，回本期被高估、买得过于积极。
-    const life = (daily * adultDays - a.price * 0.6) / (adultDays + growDays)
-    return { a, daily, growDays, life, adultDays }
-  }).sort((x, y) => y.life - x.life)[0]
+      const adultDays = (R.B12_ADULT_DAYS?.[a.id] ?? 24) / ISLE_PER_DAY
+      const growDays = (R.B12_GROW_DAYS?.[a.id] ?? 2) / ISLE_PER_DAY
+      const daily = (1440 / a.every) * lr(a.product) * ANIMAL_Q - (R.SHOP.feed?.price ?? 300)
+      // 退役时只能卖回本钱的 40%（站点规则 sellAnimal: price × 0.4），
+      // 净成本 60%，摊到整个成年期。add() 的 dailyGain 必须用扣完摊销的净值，
+      // 旧版传的是毛 daily —— 等于把每只动物都当成「永不退役」，回本期普遍偏短。
+      const netDaily = daily - (a.price * 0.6) / adultDays
+      const life = (daily * adultDays - a.price * 0.6) / (adultDays + growDays)
+      return { a, daily, netDaily, growDays, life, adultDays }
+    })
+    .sort((x, y) => y.life - x.life)
 
-  if (animalRank && animalRank.life > 0) {
+  // 不只看第一名：第一名回本期超过 maxPayback 时，第二名/第三名可能仍然划算。
+  // 旧版 sort 完直接取 [0]，一旦当前最优品种不达标就**一只都不买**——
+  // 默认配置下（离线避让开着时只剩 cap=1 的品种）经常是这种情况。
+  for (const rank of animalRanked) {
+    if (!(rank.life > 0)) continue
+    const before = out.length
     if (s.barn.length < s.barnN) {
-      // 有空位：直接买最好的那只
-      add(`买${animalRank.a.name}`, { a: 'buyAnimal', k: animalRank.a.id }, animalRank.a.price, animalRank.daily, animalRank.growDays)
+      // 有空位：直接买这一只
+      add(`买${rank.a.name}`, { a: 'buyAnimal', k: rank.a.id }, rank.a.price, rank.netDaily, rank.growDays)
     } else if (s.barnN < Math.min(W.barnMax, cfg.invest?.maxBarn ?? 8)) {
       // 没空位：扩建一格，连动物一起算
       const barnPrice = W.barnPrice(s.barnN + 1)
-      add(`扩畜栏 + ${animalRank.a.name}`, { a: 'expand', k: 'barn' }, barnPrice + animalRank.a.price, animalRank.daily, animalRank.growDays, { first: barnPrice })
+      add(`扩畜栏 + ${rank.a.name}`, { a: 'expand', k: 'barn' }, barnPrice + rank.a.price, rank.netDaily, rank.growDays, { first: barnPrice })
     }
+    if (out.length > before) break   // 买到一只就不再往下试
   }
 
   // ---------- 小屋：只加体力上限 ----------
