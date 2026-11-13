@@ -23,3 +23,15 @@
       core/world.mjs 动作名表、core/engine.mjs 主流程（游乐馆段、修仙2.0、唤醒时间）、
       core/config.mjs 开关（xian2 / arcade / vault.upgrade）；
       清理 arc-bench/arc-probe/arc-probe2；selftest 81 项全过；commit + push。
+- [x] 全模块审计（AUDIT-05a5c445.md）
+      重新拉取 33 个前端模块（pets.js 入口链 + xs/*.js），逐个核对 71 个协议动作；
+      线上三份规则文件与本地缓存逐字节一致；未接的 10 项逐条给出量化理由
+      （彩票返奖率 3.49% / 74%、山谷纪事无奖励、whOrder 只服务端管家触发、
+      弹幕与序章属手动专属）。
+- [x] GUI 接上 2.0 与游乐馆
+      概览加仓库行；修仙页加「修仙 2.0」与「游乐馆」两张卡片；设置页加修仙2.0/游乐馆/仓库升级；
+      /api/status 增加 vault 快照；manifest 2.1.0。
+- [x] 修弹弹乐「太快了」十连 0 分
+      根因：MIN_PLAY 比的是服务端两次处理时刻之差，而客户端 POST 有 2.15 秒节流；
+      旧计时起点在发请求之前，5.8 秒到服务端只剩 4 秒。改为从 arcStart 回执之后计时、
+      余量 1.2 秒，并对「太快了」重试 arcEnd（服务端不清 arc.cur）。
