@@ -179,9 +179,17 @@ function planRealm(A_, x, now, opts) {
       const z = st.x.rlm
       if (!z) { finished.push(st); continue }
       const cands = [{ rout: true }, ...A.rlmNext(A.rlmMap(z.sd), z).map((n) => ({ i: n.c }))]
+      // 行商节点：气血低于七成时买一包回春散（25 灵石回一半血）。
+      // 这笔永远划算——多撑过一个战斗节点就多几十灵石和材料。
+      // 玄铁/灵玉（80 灵石换一份材料）按相对价值是亏的，不买。
+      if (z.R >= 0 && z.hp < z.mx * 0.7 && (st.x.stone || 0) >= 25) {
+        const m = A.rlmMap(z.sd)
+        const node = m[z.L]?.[z.R]?.find((n) => n.c === z.c)
+        if (node?.k === 'shop' && !(z.bought || []).includes(`${z.L}.${z.R}.0`)) cands.push({ buy: 0 })
+      }
       for (const c of cands) {
         const cw = structuredClone(st.x)
-        const act = c.rout ? { a: 'rout' } : { a: 'rgo', i: c.i }
+        const act = c.rout ? { a: 'rout' } : c.buy != null ? { a: 'rbuy', i: c.buy } : { a: 'rgo', i: c.i }
         const r = A.act(cw, act, now, () => 0.99)
         if (!r?.ok) continue
         const na = [...st.acts, act]
