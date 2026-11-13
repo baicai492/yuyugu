@@ -151,7 +151,8 @@ function planRealm(A_, x, now, opts) {
   // 已在秘境里：直接续；否则先选一处进（优先没通关过的、越靠后越好）
   let acts = []
   let sim
-  if (x.rlm) {
+  const hadRlm = Boolean(x.rlm)
+  if (hadRlm) {
     sim = structuredClone(x)
   } else {
     const d = xsDay(now)
@@ -199,8 +200,10 @@ function planRealm(A_, x, now, opts) {
   const all = [...finished, ...beam].sort((p, q) => q.val - p.val)
   const best = all[0]
   if (!best) return null
-  // 开局那一步没得到任何收益、还立刻撤出 → 这趟不划算，别浪费次数
-  if (best.acts.length <= 2 && best.val < 30) return null
+  // 开局那一步没得到任何收益、还立刻撤出 → 这趟不划算，别浪费次数。
+  // 但「本来就在秘境里」的情况必须把 rout 发出去：否则那个存档会一直卡着
+  // （6 小时内进不了别的秘境），还会让唤醒时间一直很短。
+  if (!hadRlm && best.acts.length <= 2 && best.val < 30) return null
   return best.acts
 }
 
@@ -401,16 +404,32 @@ export function nextXian2WakeSec(world, now) {
   const t = Math.floor(now || world.now || 0)
   const d = xsDay(t)
   const cands = []
-  if (x.ev?.cur && t - x.ev.cur.t <= 1800) cands.push(x.ev.cur.t + 1800 > t ? t + 20 : t + 5)
-  else if ((x.ev?.d !== d || (x.ev?.n || 0) < A.EV_DAILY)) {
-    const wait = (x.ev?.last || 0) + A.EV_GAP - t
-    if (wait > 0) cands.push(t + Math.min(wait, 900))
-    else cands.push(t + 30)
+
+  // 机缘：手上有未决的事件就尽快选；否则等冷却好了再抽
+  if (x.ev?.cur && t - x.ev.cur.t <= 1800) cands.push(t + 15)
+  else if (x.ev?.d !== d || (x.ev?.n || 0) < A.EV_DAILY) {
+    const at = (x.ev?.d === d ? (x.ev.last || 0) : 0) + A.EV_GAP
+    cands.push(at <= t ? t + 20 : at)
   }
-  if (x.rlm) cands.push(t + 30)
-  else if (x.rd?.d === d ? (x.rd.n || 0) < A.RLM_DAILY : true) cands.push(t + 30)
+
+  // 秘境：在里面就尽快继续；否则等灵力回到够一次
+  if (x.rlm) cands.push(t + 20)
+  else if (x.tech) {
+    const left = x.rd?.d === d ? A.RLM_DAILY - (x.rd.n || 0) : A.RLM_DAILY
+    if (left > 0) {
+      const need = Math.max(0, A.RLM_EN - (x.en || 0))
+      cands.push(t + (need > 0 ? need * A.EN_REGEN : 20))
+    }
+  }
+
+  // 斗法：今天还有名额且灵力不够时，等灵力回到 10
+  const duels = x.df?.d === d ? (x.df.n || 0) : 0
+  if (duels < A.FIGHT_DAILY && (x.en || 0) < A.FIGHT_COST) {
+    cands.push(t + (A.FIGHT_COST - (x.en || 0)) * A.EN_REGEN)
+  }
+
   const next = cands.length ? Math.min(...cands) : Infinity
-  return Number.isFinite(next) ? next : Infinity
+  return Number.isFinite(next) ? Math.max(t + 10, next) : Infinity
 }
 
 /**
@@ -430,7 +449,11 @@ export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
   }
   const first = planXian2Actions(world, world.now, opts)
   if (!first.actions.length) {
-    memo.xian2WakeAt = nextXian2WakeSec(world, world.now)
+    // 算出来的唤醒点很近但这一轮一个动作都排不出来（比如秘境预演判定不值），
+    // 说明「看起来有活其实干不了」——把唤醒推后，避免每 20 秒空转一次。
+    let at = nextXian2WakeSec(world, world.now)
+    if (Number.isFinite(at) && at - world.now < 60) at = world.now + 300
+    memo.xian2WakeAt = at
     memo.xian2Reason = first.reason
     return { ran: false, actions: 0, reason: first.reason, nextWakeAt: memo.xian2WakeAt }
   }
@@ -474,6 +497,11 @@ export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
   }
 
   memo.xian2WakeAt = nextXian2WakeSec(world, world.now)
+  if (total === 0) {
+    // 提交了但全被拒：多半是规则/状态不同步，别马上回来重试
+    const t = world.now
+    if (Number.isFinite(memo.xian2WakeAt) && memo.xian2WakeAt - t < 120) memo.xian2WakeAt = t + 600
+  }
   memo.xian2Reason = plan.reason
   memo.xian2LastAt = world.now
   memo.xian2LastOk = total
