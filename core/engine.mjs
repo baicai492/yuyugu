@@ -15,7 +15,7 @@ import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snip
 import { xianRound, xianSnapshot } from './xian.mjs'
 import { xian2Round, xian2Snapshot } from './xian2.mjs'
 import { arcadeRound, arcadeSummary } from './arcade.mjs'
-import { planVaultUpgrade } from './warehouse.mjs'
+import { planVaultUpgrade, vaultSummary, vaultCapacity } from './warehouse.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -1150,7 +1150,19 @@ export class Engine {
       xian: this.xianView(),
       xian2: this.xian2View(),
       arcade: this.arcadeView(),
+      vault: this.vaultView(),
     }
+  }
+
+  /** 囤货仓库（b26）快照：等级、已用/总格数、单格上限、下一级价格 */
+  vaultView() {
+    const w = this.world
+    if (!w.ready) return null
+    try {
+      const s = vaultSummary(w.R, w)
+      const cap = vaultCapacity(w.R, w.state)
+      return { lv: s.lv, used: s.used, slots: s.slots, unit: s.unit, nextCost: s.lv < 4 ? cap.nextCost : 0, totalValue: s.totalValue }
+    } catch (e) { return { error: e.message } }
   }
 
   /** 修仙快照（GUI 用；世界状态没就绪时返回 null） */

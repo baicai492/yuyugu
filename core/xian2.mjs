@@ -535,6 +535,13 @@ export function xian2Snapshot(world) {
     stipendDone: x.sp === d,
     tasks: x.tk?.d === d ? (x.tk.list || []).map((v) => ({ done: !!v[1] })) : [],
     talks: x.ch?.d === d ? (x.ch.ids || []).length : 0,
+    // 机缘：今日已抽次数 / 上限，以及「有事件没选」的状态（GUI 要提示用户/显示待决）
+    ev: {
+      n: x.ev?.d === d ? x.ev.n || 0 : 0,
+      max: A.EV_DAILY,
+      pending: Boolean(x.ev?.cur && t - x.ev.cur.t <= 1800),
+      gapIn: Math.max(0, (x.ev?.d === d ? x.ev.last || 0 : 0) + A.EV_GAP - t),
+    },
     duels: x.df?.d === d ? x.df.n || 0 : 0,
     duelsMax: A.FIGHT_DAILY,
     realms: x.rd?.d === d ? x.rd.n || 0 : 0,

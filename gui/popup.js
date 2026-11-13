@@ -78,6 +78,9 @@ async function loadStatus() {
     status = j.status
     config = j.config
     renderOverview()
+    // 修仙页的 2.0 面板与游乐馆数据都在 /api/status 里，顺手渲染（元素隐藏时也安全）
+    renderXian2()
+    renderArcade()
     $('ver').textContent = 'v' + (j.version || 2)
   } catch (e) {
     // 重启空窗、进程刚退出都会走到这里。进行中的重启不算故障；
@@ -159,6 +162,10 @@ function renderOverview() {
     ? `${Math.floor(w.energy)} / ${w.energyMax}（超上限）`
     : `${Math.floor(w.energy)} / ${w.energyMax}`
   $('scale').textContent = `${w.plots} / ${w.barn}/${w.barnN} / ${w.traps}`
+  const v = status.vault
+  $('vault').textContent = v && !v.error
+    ? `Lv${v.lv} · ${v.used}/${v.slots} 格 · 单格 ${fmt(v.unit)}` + (v.lv < 4 ? ` · 升级 ${wan(v.nextCost)}` : '（满级）')
+    : '—'
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
 
   const q = w.quotas || {}
@@ -260,6 +267,16 @@ const TECH_NAMES = {
   fire: '流火诀', water: '沧澜诀', wood: '青木诀', metal: '庚金剑诀', earth: '厚土诀', ice: '玄冰诀',
   thunder: '紫霄雷法', wind: '御风诀', lava: '熔岩诀', poison: '万毒经',
 }
+// 2.0 配招用的技能名（core/xian-rules.mjs 的 skill() 同一张表）
+const SPELL_NAMES = {
+  bolt: '灵弹', guard: '护体金光',
+  fire1: '焚天环', fire2: '流火扇', water1: '千重浪', water2: '镜花水月',
+  wood1: '万木春', wood2: '藤缚', metal1: '万剑归宗', metal2: '一线天',
+  earth1: '山岳镇', earth2: '流沙', ice1: '千里冰封', ice2: '霜华',
+  thunder1: '九天落雷', thunder2: '雷网', wind1: '青岚', wind2: '回风',
+  lava1: '地火', lava2: '岩浆潮', poison1: '瘴雾', poison2: '蛊潮',
+}
+const MAT_NAMES = { xuantie: '玄铁', lingyu: '灵玉', yaodan: '妖丹' }
 const nm = (map, id) => map[id] || id
 const fmtSec = (s) => {
   const n = Math.max(0, Math.round(Number(s) || 0))
@@ -350,6 +367,42 @@ async function loadXian() {
   }
 }
 
+// ---------- 渲染：修仙 2.0 与游乐馆（数据在 /api/status 里） ----------
+function renderXian2() {
+  const s = status?.xian2
+  const ids = ['x2Sect', 'x2Stipend', 'x2Tasks', 'x2Talk', 'x2Ev', 'x2Duel', 'x2Realm', 'x2Areas', 'x2Slots', 'x2Mats']
+  if (!s || s.error) { for (const id of ids) $(id).textContent = '—'; return }
+  $('x2Sect').textContent = `${s.sect || '未入门'} · 心境 ${s.mind} · 气运 ${s.luck} · 声望 ${s.rep}`
+  $('x2Stipend').textContent = s.stipendDone ? '已领' : '待领'
+  const tk = s.tasks || []
+  $('x2Tasks').textContent = tk.length ? `${tk.filter((v) => v.done).length}/${tk.length} 已交` : '今天还没刷新'
+  $('x2Talk').textContent = `${s.talks || 0}/30 位`
+  const ev = s.ev || {}
+  $('x2Ev').textContent = ev.pending
+    ? '有事件待选（本轮会处理）'
+    : `${ev.n || 0}/${ev.max || 3} 次` + (ev.gapIn > 0 ? ` · ${fmtSec(ev.gapIn)}后可再抽` : '')
+  $('x2Duel').textContent = `${s.duels || 0}/${s.duelsMax || 8} 场`
+  $('x2Realm').textContent = s.inRealm
+    ? `探索中：${s.inRealm.area}（气血 ${Math.round(s.inRealm.hp)}/${s.inRealm.mx}）`
+    : `${s.realms || 0}/${s.realmsMax || 3} 次`
+  const areas = Object.values(s.areas || {})
+  $('x2Areas').textContent = areas.length
+    ? areas.map((a) => `${a.name}${a.cleared ? '✓' : a.unlocked ? '' : '🔒'}`).join(' · ')
+    : '—'
+  $('x2Slots').textContent = (s.slots || []).map((id) => nm(SPELL_NAMES, id)).join(' → ') || '默认（主修两式 + 灵弹 + 护体）'
+  $('x2Mats').textContent = countList(s.mats, MAT_NAMES) || '—'
+}
+
+function renderArcade() {
+  const a = status?.arcade
+  const map = { pool: 'xArcPool', bowl: 'xArcBowl', bounce: 'xArcBounce' }
+  for (const [g, id] of Object.entries(map)) {
+    const v = a?.[g]
+    if (!v) { $(id).textContent = '—'; continue }
+    $(id).textContent = `今日剩 ${v.left}/${v.daily} · 今日最好 ${fmt(v.today)} · 个人纪录 ${fmt(v.best)}`
+  }
+}
+
 async function saveXianCfg(mut) {
   if (!config) return
   config.xian = config.xian || {}
@@ -421,9 +474,39 @@ const FIELD_GROUPS = [
   },
   {
     title: '囤货仓库',
-    fields: ['vault.enabled', 'vault.keepPeakAhead'],
-    labels: { 'vault.enabled': '启用仓库', 'vault.keepPeakAhead': '峰值在几个岛日内就囤' },
-    hints: { 'vault.enabled': '把「等涨更划算」的货锁进仓库，防止被管家低价卖掉' },
+    fields: ['vault.enabled', 'vault.keepPeakAhead', 'vault.upgrade'],
+    labels: { 'vault.enabled': '启用仓库', 'vault.keepPeakAhead': '峰值在几个岛日内就囤', 'vault.upgrade': '格位不够时自动升级' },
+    hints: {
+      'vault.enabled': '把「等涨更划算」的货锁进仓库，防止被管家低价卖掉',
+      'vault.upgrade': '升到 2 级 18 格 / 3 级 22 格 / 4 级 30 格且单格翻倍，价格分别是 8 万 / 30 万 / 100 万 D 币',
+    },
+  },
+  {
+    title: '修仙 2.0',
+    fields: ['xian2.enabled', 'xian2.realm', 'xian2.maxActions', 'xian2.realmBeam', 'xian2.loadoutMs'],
+    labels: {
+      'xian2.enabled': '启用修仙 2.0',
+      'xian2.realm': '自动探索秘境',
+      'xian2.maxActions': '每批最多动作数',
+      'xian2.realmBeam': '秘境束搜索宽度',
+      'xian2.loadoutMs': '配招搜索上限（毫秒）',
+    },
+    hints: {
+      'xian2.enabled': '人脉叙话、赠礼、往事、机缘、宗门委托、配招、同门斗法、秘境',
+      'xian2.realm': '关掉就不进秘境（每次耗灵力 15，每天 3 次；本地预演打得过才进）',
+      'xian2.maxActions': '和 1.0 的动作共用一次提交，服务端单批上限 40',
+      'xian2.realmBeam': '越大越可能找到高收益路线，但本地算得越慢',
+      'xian2.loadoutMs': '枚举技能组合 × 出手顺序做本地模拟的时间上限',
+    },
+  },
+  {
+    title: '游乐馆',
+    fields: ['arcade.enabled', 'arcade.perTick', 'arcade.solveMs'],
+    labels: { 'arcade.enabled': '启用游乐馆', 'arcade.perTick': '每轮最多玩几局', 'arcade.solveMs': '每局求解上限（毫秒）' },
+    hints: {
+      'arcade.enabled': '弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄，每天各 10 次；只写个人纪录和榜单，不发 D 币',
+      'arcade.perTick': '求解要花几秒，每轮少玩几局避免拖慢主流程',
+    },
   },
   {
     title: '加工',
@@ -710,7 +793,7 @@ function bind() {
       document.querySelectorAll('nav.tabs button').forEach((x) => x.classList.toggle('on', x === b))
       document.querySelectorAll('.tab').forEach((s) => { s.hidden = s.id !== 'tab-' + b.dataset.tab })
       if (b.dataset.tab === 'market') refreshMarket()
-      if (b.dataset.tab === 'xian') loadXian()
+      if (b.dataset.tab === 'xian') { loadXian(); loadStatus().catch(() => {}) }
       if (b.dataset.tab === 'settings') loadConfig().catch(() => {})
     }
   })
@@ -857,7 +940,7 @@ function startAuto() {
     // 概览页要看到「正在做什么」和逐笔收支，1.5 秒刷一次
     if (!$('tab-overview').hidden && alive) await loadStatus()
     // 修仙页只在切过去时刷，免得平白多打本地请求
-    if (!$('tab-xian').hidden && alive) await loadXian()
+    if (!$('tab-xian').hidden && alive) { await loadXian(); await loadStatus() }
   }, 1500)
 }
 
