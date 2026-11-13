@@ -374,6 +374,9 @@ export function planXian2Actions(world, now, opts = {}) {
       if (n >= A.FIGHT_DAILY) break
       if (acts.length >= maxN) break
       if ((sim.en || 0) < 10) break
+      // 再赢一次只有 +3 好感 +1 熟练，性价比低于种地/钓鱼；体力不宽裕时让给 1.0。
+      // 首胜有灵石，不受这道门槛限制。
+      if (wonToday.includes(c.id) && (sim.en || 0) < 40) continue
       // 先克隆预演一次，确认能赢再真的 emit
       const cw = structuredClone(sim)
       const r = A.act(cw, { a: 'ab', el: c.id }, t, () => 0.99)
