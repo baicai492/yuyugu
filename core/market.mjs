@@ -39,7 +39,8 @@ export function inferSupply(R, prices, day) {
     const p = Number(prices?.[id]) || 0
     if (!q || !p) continue
     const s = p / q
-    const depth = R.marketDepth(id)
+    // 非岛日的正常量是 NORMAL_VOLUME=400 而不是 1600/基础价（见 normalVolume）
+    const depth = normalVolume(R, id, day)
     // 报价是 round(q × s)，所以真实供需落在 [(p−0.5)/q, (p+0.5)/q]。
     // 这个区间才是「我们真正知道的」，点估计只是它的中点。
     //
@@ -68,9 +69,26 @@ export function inferSupply(R, prices, day) {
   return { day, rows, n: Object.keys(rows).length }
 }
 
+/**
+ * 供需公式的「正常量」分母。
+ *
+ * 规则原文（R:136-141 priceOf）是 `isIsleDay(day) ? marketDepth(item) : NORMAL_VOLUME`。
+ * 现在是岛日时代，所以绝大多数时候走 marketDepth；但时钟没校准时、
+ * 或者跨到非岛日时代做预测时，拿 1600/基础价 的深度当分母会把供需算高
+ * （基础价 1000 的商品 depth=1600，非岛日 normal 只有 400，差 4 倍）。
+ */
+function normalVolume(R, id, day) {
+  try {
+    if (day != null && typeof R.isIsleDay === 'function' && !R.isIsleDay(day)) {
+      return R.NORMAL_VOLUME || 400
+    }
+  } catch { /* 规则模块缺字段时按岛日口径 */ }
+  return R.marketDepth(id)
+}
+
 /** 卖掉 units 个后，下一个岛日的供需 */
-export function supplyAfterSelling(R, id, units, externalRatio = 0) {
-  const depth = R.marketDepth(id)
+export function supplyAfterSelling(R, id, units, externalRatio = 0, day = null) {
+  const depth = normalVolume(R, id, day)
   return clampSupply(1.06 - 0.3 * ((units + Math.max(0, externalRatio) * depth) / depth))
 }
 
@@ -113,9 +131,9 @@ export function forecastPrices(R, now, prices, { days = 8, external = {}, planne
       const extLo = rec ? Math.max(0, (1.06 - rec.hi) / 0.3) : ext * 0.4
       const extHi = rec ? Math.max(extLo, (1.06 - rec.lo) / 0.3) : ext * 1.8
       // 外部卖得越多 → 供需越低 → 价格越低（glut）；卖得越少 → tight。
-      const sBase = supplyAfterSelling(R, id, sell, ext)
-      const sGlut = supplyAfterSelling(R, id, sell, Math.max(extHi, ext))
-      const sTight = supplyAfterSelling(R, id, sell, Math.min(extLo, ext))
+      const sBase = supplyAfterSelling(R, id, sell, ext, d.day)
+      const sGlut = supplyAfterSelling(R, id, sell, Math.max(extHi, ext), d.day)
+      const sTight = supplyAfterSelling(R, id, sell, Math.min(extLo, ext), d.day)
       out.supply[id] = sBase
       out.price[id] = Math.max(1, Math.round(q * sBase))
       out.low[id] = Math.max(1, Math.round(q * Math.min(sGlut, sTight)))
@@ -530,7 +548,7 @@ export function sellPlan(R, now, world, cfg = {}) {
     let best = { k: 0, price: p0, net: nowQuote.net, gross: grossNow }
     for (let k = 1; k < fc.length; k++) {
       const day = fc[k]
-      const price = baseQuote(R, id, day.day) * supplyAfterSelling(R, id, 0, external[id] || 0)
+      const price = baseQuote(R, id, day.day) * supplyAfterSelling(R, id, 0, external[id] || 0, day.day)
       const t2 = isCrop ? cropTierRatio(R, 0, qty) : 1
       const gross = Math.round(price * t2 * qty * qAvg)
       const q = netSaleQuote(R, wallet, 0, gross)
