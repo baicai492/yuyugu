@@ -24,8 +24,8 @@
       core/config.mjs 开关（xian2 / arcade / vault.upgrade）；
       清理 arc-bench/arc-probe/arc-probe2；selftest 81 项全过；commit + push。
 - [x] 全模块审计（AUDIT-05a5c445.md）
-      重新拉取 33 个前端模块（pets.js 入口链 + xs/*.js），逐个核对 71 个协议动作；
-      线上三份规则文件与本地缓存逐字节一致；未接的 10 项逐条给出量化理由
+      重新拉取 36 个前端模块（pets.js 入口链 + xs/*.js），逐个核对 72 个协议动作
+      （岛 36 + 修仙 36）；线上三份规则文件与本地缓存逐字节一致；未接的 11 项逐条给出量化理由
       （彩票返奖率 3.49% / 74%、山谷纪事无奖励、whOrder 只服务端管家触发、
       弹幕与序章属手动专属）。
 - [x] GUI 接上 2.0 与游乐馆

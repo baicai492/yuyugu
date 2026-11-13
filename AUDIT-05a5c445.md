@@ -114,7 +114,7 @@ if (what === 'visit')    return import('/pet-isle-visit.js')...   // 串门
 
 ## 二、协议动作全清单
 
-### 鱼鱼谷（规则里 `a === '...'` 的 35 个分支）
+### 鱼鱼谷（规则里 `a === '...'` 的 36 个分支）
 
 ```
 arcEnd arcStart bomb buy buyAnimal buyTrap clear coffee collect craft eat expand
@@ -123,7 +123,7 @@ plant scratch sell sellAnimal stockBuy storyRead trap upgrade warehouse water
 whAlert whOrder whUp
 ```
 
-托管覆盖 **30 个**，未接 5 个（`lotto` / `scratch` / `storyRead` / `whAlert` / `whOrder`），
+托管覆盖 **31 个**，未接 5 个（`lotto` / `scratch` / `storyRead` / `whAlert` / `whOrder`），
 理由见第三节。
 
 > 注：`whOrder` 是 b26Action 里的分支，写法是 `a!=='whUp'&&a!=='whOrder'&&a!=='whAlert'`，
@@ -137,12 +137,16 @@ learn lose peek plant rbuy refill rgo rin rise root rout sell sit slots stipend
 story talk task tasks use water win
 ```
 
-托管覆盖 **31 个**，未接 5 个（`fight` / `lose` / `peek` / `root` / `story`），理由见第三节。
-`win` 在代码里出现在战斗结果的判断（`r.fight?.w`），不是提交的动作。
+托管覆盖 **30 个**，未接 6 个（`fight` / `lose` / `peek` / `root` / `story` / `win`），理由见第三节。
+`win` / `lose` 是弹幕打完后的结算动作（`game.js:132,135`），和 `fight` 同属「必须真人」那一条。
+`core/xian.mjs:32` 的 `FORBIDDEN_XIAN_ACTIONS = new Set(['xsRoot','xsStory','xsFight','xsWin','xsLose'])` 是这条边界的代码落点。
+
+> 覆盖数用脚本核对过：扫 `core/xian.mjs` + `core/xian2.mjs` 里的 `a: '<名字>'` 字面量，
+> 36 个动作里命中 30，剩下的 6 个与上表完全一致。
 
 ---
 
-## 三、未接的 10 项，逐条理由（都不是遗漏）
+## 三、未接的 11 项，逐条理由（都不是遗漏）
 
 ### 1. `lotto`（谷内大乐透）—— 数学上是负收益，接了就是亏钱
 
@@ -187,16 +191,20 @@ WeakMap 里有当前存档——它只在 `b12WithAvailableInventory` 的 try �
 托管不启用管家，所以这条路径对我们永远是死代码。
 （如果哪天要用管家做离线兜底，再补 `whOrder`，届时需要单独验证。）
 
-### 6–8. `fight` / `lose` / `peek`（修仙手动弹幕斗法）
+### 6–8. `fight` / `win` / `lose`（修仙手动弹幕斗法）
 
-- `fight` 进入弹幕关，`win`/`lose` 是弹幕结束的回执动作——**只对手动弹幕有意义**；
-- `peek` 是花 20 灵石「观气」提前看对手招式，只对手动弹幕有用；
+- `fight` 进入弹幕关，`win`/`lose` 是弹幕结束后的结算动作（`game.js:132,135`）——
+  **只对手动弹幕有意义**，服务端还要验时长 `S.min..1800` 与收取上限 `S.spells`（`xs/rules.js:115-116`）；
 - 托管走 `ab`（自动对战），种子由 `hseed(日, 对手, 当日第几场, 灵石, 修为)` 确定，
-  本地 `sim` 预演能赢才提交，不需要观气。
+  本地 `sim` 预演能赢才提交。
 
 **安全边界（硬约束）**：绝不提交 `xsFight` / `xsWin` / `xsLose`。
 
-### 9–10. `root` / `story`（测灵根 + 序章剧情）
+### 9. `peek`（观气）
+
+花 20 灵石提前看对手招式，只对手动弹幕有用；自动战不需要。
+
+### 10–11. `root` / `story`（测灵根 + 序章剧情）
 
 `xs/story.js` 的序章「商会来信」要求按顺序推进（`state.xs.st` 服务端校验），
 测灵根（`root`）是一次性的、影响整个账号灵根走向的选择。
