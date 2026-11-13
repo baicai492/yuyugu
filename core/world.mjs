@@ -109,11 +109,12 @@ export class World {
     for (const batch of batches) {
       const j = await this.client.act(this.rev, batch, randomUUID())
       this.accept(j)
-      // 站内管家代替我们跑了巡视：它会和托管抢体力，代卖还抽 20%，
-      // 现场发现时提示一次（同一岛日只提示一次，避免每批动作刷屏）。
+      // 站内管家代替我们跑了巡视：它会和托管抢体力。
+      // 05a5c445 起 AUTO.fee=0、surcharge=0（cache/rules-05a5c445.mjs:1021），
+      // 管家已不抽成；旧版日志里的「抽 20% 代卖费」不再成立。
       if (j.autoLog?.visits && this.autoLogNotedDay !== this.R.worldDay(this.now)) {
         this.autoLogNotedDay = this.R.worldDay(this.now)
-        this.log(`站内管家补算了 ${j.autoLog.visits} 轮巡视（建议在游戏里关掉管家，避免和托管抢体力、被抽 20% 代卖费）`)
+        this.log(`站内管家补算了 ${j.autoLog.visits} 轮巡视（建议在游戏里关掉管家，避免和托管抢体力）`)
       }
       const out = j.out || []
       all.out.push(...out)

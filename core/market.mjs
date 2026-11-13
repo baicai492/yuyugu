@@ -475,7 +475,13 @@ export function sellPlan(R, now, world, cfg = {}) {
   const markdown = (cfg.markdownPct ?? 6) / 100
   const external = cfg.external || {}
   const wallet = Number(world.coins) || 0
-  const paid = Number(world.state?.b12?.tax?.paid) || 0
+  // 售卖税的「当日已缴」按自然日重置（R:1650-1653 的 b12TaxSale：d.tax.day!==day
+  // 就 paid=0）。b12SaleQuote 本身是纯函数、不管日界，所以这里必须自己判：
+  // 跨过 0 点后 state.b12.tax 里还是昨天的 paid，直接拿来预测会高估今天的税，
+  // 把「现在卖」判得比实际更亏。世界时钟未配置时规则不收税，同样按 0 处理。
+  const taxDay = R.worldDay(now)
+  const taxRec = world.state?.b12?.tax
+  const paid = (taxRec && taxRec.day === taxDay) ? (Number(taxRec.paid) || 0) : 0
   const fc = forecastPrices(R, now, world.prices, { days, external })
   const cur = inferSupply(R, world.prices, fc[0].day)
   const rows = []

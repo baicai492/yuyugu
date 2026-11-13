@@ -59,6 +59,8 @@
 | 岛日额度 fish/mine/craft/bomb | `iq={d,...}` | `isleIndex` 变化 | R:433、R:510-511、R:721-722、R:743-744、R:771、R:780-781 |
 | 每日目标 | `goals={day,list}` | 目标 day 变化 | R:287-288 |
 | 售卖税日 | `b12.tax={day,paid}` | 自然日变化且时钟已配置 | R:1651-1653 |
+
+> `b12SaleQuote(wallet,paid,gross)` 是**纯函数、不做日界**；只有 `b12TaxSale` 会在 `d.tax.day!==worldDay(t)` 时把 paid 归零。所以任何在本地预测卖货税的地方（`core/market.mjs` 的 `sellPlan`）都必须自己先判 `tax.day===worldDay(now)`，否则跨 0 点后拿昨天的 paid 去算，会高估今天的税。
 | 货船个人额度 | `b12.shop={d,n}` | `isleDay(t)` 变化 | R:1339、R:1558 |
 | 游乐馆次数 | `arc.d/n` | `ctx.day` 变化 | R:1477、R:1489 |
 | 夜潮领取 | `b12.night.key` | 夜潮 key 变化 | R:1686-1701 |
@@ -76,6 +78,7 @@
   - 咖啡：15000 D，+60 体力，每天 3 杯（R:22、R:875-888）。
   - 潮汐饭团 `B12_SNACK={energy:20, daily:2, price:6500}`，按上限截断；货船 15% 概率刷出（R:1326、R:1562-1568、R:1334）。
 - 动作耗体 `WORLD.cost`：播种 2、浇水 1、收获 1、清理 1、喂食 1、钓鱼 4、挖矿 3（R:21）；加工每个 1、炸矿 6（R:173）。其余动作 0。
+- **运行时补丁**（R:173）：`WORLD.cost.craft=1`、`WORLD.cost.bomb=6`、`WORLD.daily.craft=80`、`WORLD.daily.bomb=10`、`WORLD.xp.craft=2`。所以 `WORLD.daily` 的最终值是 `{fish:80, mine:100, coffee:3, craft:80, bomb:10}`，`WORLD.cost` 也多了 craft/bomb 两项。离线读 R:22 的字面量会漏掉这两项。
 - 工具等级不直接改变耗体；鱼竿影响空竿/鱼池/品质，镐子影响矿层/额外矿石/炸矿/梯子，洒水器影响自动浇水，房屋影响上限（R:732、R:739、R:748、R:754-756、R:786、R:470）。
 - 管家 `keep` 是保留体力阈值，夹 0–300；钓鱼/挖矿/种植前检查 `s.en-a.keep`（R:1029、R:1121、R:1127、R:1140-1141）。
 - `fish`/`mine` 附加耗体 `AUTO.surcharge=0`，注释里的「+1/+2」已失效（R:515、R:1021）。
