@@ -402,16 +402,147 @@ export function nextWave(schedule, now, { leadSec = 0, waveSpanSec = 2, graceSec
  *   · 太早——白等，还可能在等待期间被别人抢走
  *   · 太晚——访问完就已经过了窗口
  *
- * 上限 30 秒：一波再大也只能先到先得，跑不完的部分留给下一轮
- * （醒来后按价值排序，高价值的先跑）。
+ * 榜一的 computePhysicalPrepLeadSec 还把「准备动作」也算进来：
+ *   actPrep  = 剩余 act 冷却 + minGap + 2×RTT   （吃口粮/喝咖啡/买道具）
+ *   gearPrep = 剩余 equip 冷却 + 槽位数×1.3 + 2×RTT
+ * 以前这里只算了换装、没算吃口粮，于是「醒来 → 补体力（2.15 秒）→ 提交」
+ * 必然把第一批货拖到解禁后 2~5 秒；线上 11-13 13:21 那次就是这样丢了 3 处。
+ *
+ * 上限 30 秒（要换装/提前补体力时跟着放宽）：一波再大也只能先到先得，
+ * 跑不完的部分留给下一轮（醒来后按价值排序，高价值的先跑）。
  */
-export function prepLeadSec(nIsles, { visitSec = 1.5, slackSec = 4, maxSec = 30, gearSwaps = 0, gearSwapSec = 2.2 } = {}) {
+export function prepLeadSec(nIsles, {
+  visitSec = 1.5, slackSec = 4, maxSec = 30,
+  gearSwaps = 0, gearSwapSec = 2.2,
+  // 解禁前补体力的那一个 POST：由调用方按「剩余 POST 冷却 + minGap + 2×RTT」算好传进来。
+  prepActSec = 0,
+} = {}) {
   const n = Math.max(1, Number(nIsles) || 1)
   // 战前换装是 POST，受 2.15 秒串行间隔约束。把这几秒算进提前量，
   // 否则「换完装已经过了解禁时刻」——掐点偷菜最怕的就是这个。
   const swapSec = Math.max(0, Number(gearSwaps) || 0) * gearSwapSec
-  // 换装把提前量撑长时上限跟着放宽，但不无限增长（一波没跑完就留给下一轮）。
-  return Math.min(maxSec + (swapSec > 0 ? 15 : 0), Math.max(2, Math.ceil(n * visitSec + slackSec + swapSec)))
+  const prepSec = Math.max(0, Number(prepActSec) || 0)
+  const extraCap = (swapSec > 0 ? 15 : 0) + (prepSec > 0 ? 10 : 0)
+  return Math.min(maxSec + extraCap, Math.max(2, Math.ceil(n * visitSec + slackSec + swapSec + prepSec)))
+}
+
+/**
+ * 偷菜前要不要换装、换几件。
+ *
+ * 换装是 POST（每个槽位约 2.2 秒），提前量必须算上；但只有
+ * 「擂台开着 + 自动装备 + 偷菜前换装 + 用档案模拟守家」四项同时成立才会换。
+ * 三个调用点（engine 唤醒 / social 掐点 / planner nextWake）必须同一口径。
+ */
+export function stealGearSwaps(cfg) {
+  const arena = cfg?.arena || {}
+  const battle = cfg?.battle || {}
+  return (arena.enabled && arena.autoEquip !== false &&
+    battle.stealSwap !== false && battle.guardPosterior !== false) ? 3 : 0
+}
+
+/**
+ * 掐点唤醒的完整提前量：访问耗时 + 换装 + 解禁前补体力。
+ *
+ * 唤醒时刻、主循环的 shouldSnipe、以及 stealRound 内部的等待用的是同一个值。
+ * 以前三处各算各的（planner 连换装都没算），结果引擎按 8 秒醒来，
+ * 换装的 6.6 秒加上去，解禁那一刻还在排队。
+ *
+ * @param {object} args
+ *   schedule     调度表（决定这一波有几家）
+ *   now          当前时间（秒）
+ *   gearSwaps    这一波要换几件装（0 = 不换）
+ *   needPrepAct  解禁前是否需要补体力
+ *   remainingPostCdMs 下一个 POST 还要等多久（毫秒）
+ *   minGapSec    POST 最小间隔
+ *   rttMs        最近往返耗时
+ *   fixedLeadSec 配置里写死的提前量（>0 时直接用它）
+ */
+export function physicalPrepLeadSec({
+  schedule = {}, now = 0, gearSwaps = 0,
+  needPrepAct = false, remainingPostCdMs = 0, minGapSec = 2.15, rttMs = 600,
+  fixedLeadSec = 0, ...leadOpts
+} = {}) {
+  if (Number(fixedLeadSec) > 0) return Number(fixedLeadSec)
+  const prepActSec = prepActLeadSec({ needPrep: needPrepAct, remainingPostCdMs, minGapSec, rttMs })
+  return waveLeadSec(schedule, now, { ...leadOpts, gearSwaps, prepActSec })
+}
+
+/**
+ * 解禁前补体力要预留多久（秒）。移植自榜一的 computePhysicalPrepLeadSec：
+ *   剩余 POST 冷却 + minGap + 2×RTT
+ * 只在「当前体力不够这一波」时才需要；够了就不占提前量。
+ */
+export function prepActLeadSec({ needPrep = false, remainingPostCdMs = 0, minGapSec = 2.15, rttMs = 600 } = {}) {
+  if (!needPrep) return 0
+  const rttSec = Math.max(0.4, Math.min(2.0, Number(rttMs) / 1000))
+  return Math.max(0, Number(remainingPostCdMs) / 1000) + Math.max(1.5, Number(minGapSec) || 2.15) + 2 * rttSec
+}
+
+/**
+ * 为「即将解禁的偷菜」预留体力（榜一 computeImminentSnipeStaminaReservation 的移植）。
+ *
+ * 为什么需要：以前是临到解禁那一刻才在 stealFromTargets 里现场吃口粮，
+ * 一个 POST 2.15 秒，等吃完货已经被抢光（11-13 13:21 实测）。
+ * 现在把「到解禁前会缺多少体力」提前算出来，交给规划器的 keep：
+ * 钓鱼/挖矿/炸矿不会把体力花到不够偷，解禁那一刻只需要发一个 visit 请求。
+ *
+ *   need        = min(maxEnergy, max(6, 这一组几处需要的体力))
+ *   naturalRegen= floor(距离解禁还有多久 / regen)
+ *   floorNow    = clamp(need − naturalRegen, 0, energyMax)
+ *
+ * 只统计 horizonSec 内、且 rec.nextEV 过线的记录（updateIsleSchedule 已经
+ * 把「不值得去的解禁」过滤掉了）。
+ *
+ * @returns {{ floor:number, until:number, targetId:number|null, unlockAt:number, need:number }}
+ *   floor  现在必须保留的体力
+ *   until  保留到什么时候（解禁时刻）；没有目标时为 0
+ */
+export function snipeStaminaReservation(schedule, now, {
+  horizonSec = 900, regenSec = 180, energyMax = 200,
+  maxEnergy = 15, energyBase = 5,
+} = {}) {
+  let floor = 0
+  let until = 0
+  let targetId = null
+  let needAtUnlock = 0
+  const horizonEnd = now + Math.max(0, Number(horizonSec) || 0)
+  for (const [id, rec] of Object.entries(schedule || {})) {
+    if (!rec || !(Number(rec.nextEV || 0) > 0)) continue
+    const upcoming = (rec.upcoming || []).filter((u) => u && Number.isFinite(u.unlockAt))
+    if (!upcoming.length) continue
+    // 只认这座岛最早的那一组（updateIsleSchedule 已经把同一组的条目放在一起）。
+    const at = Math.min(...upcoming.map((u) => Number(u.unlockAt)))
+    const lead = at - now
+    if (lead < -10 || lead > horizonEnd - now) continue
+    const spots = Math.max(1, upcoming.length)
+    const need = Math.min(maxEnergy, Math.max(6, energyBase + Math.max(0, spots - 1)))
+    const naturalRegen = lead > 0 ? Math.floor(lead / Math.max(60, regenSec)) : 0
+    const floorNow = Math.min(Math.max(0, Number(energyMax) || 200), Math.max(0, need - naturalRegen))
+    if (floorNow > floor) {
+      floor = floorNow
+      until = at
+      targetId = Number(id)
+      needAtUnlock = need
+    } else if (floorNow > 0 && floorNow === floor) {
+      until = Math.max(until, at)
+    }
+  }
+  return { floor, until: floor > 0 ? until : 0, targetId, unlockAt: until, need: needAtUnlock }
+}
+
+/**
+ * 偷菜窗口是否已经打开（榜一 shouldBlockBackgroundWork 的等价物）。
+ *
+ * 「有目标在 leadSec + 4 秒内解禁」或「刚解禁 30 秒内」都算窗口：
+ * 这段时间里不该让五子棋/擂台/帮忙/修仙的 POST 插队——每个 POST 都要
+ * 占 2.15 秒，插一个就可能把解禁那一刻的请求推到窗口外。
+ */
+export function snipeWindowOpen(schedule, now, { leadSec = 8, graceSec = WAKE_GRACE_SEC, extraSec = 4 } = {}) {
+  const nx = nextUnlock(schedule || {}, now, { leadSec, wakeGraceSec: graceSec })
+  if (!nx) return null
+  if (nx.at < now - graceSec) return null
+  if (nx.at - now > leadSec + extraSec) return null
+  return nx
 }
 
 /** 当前这一波该提前几秒醒；没有待解禁记录时返回 fallback */

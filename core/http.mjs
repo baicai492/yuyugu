@@ -16,6 +16,10 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
 
   let lastPostAt = 0
   let queueTail = Promise.resolve()
+  // 最近一次请求的耗时（毫秒）。掐点偷菜要把它算进提前量：
+  // 榜一的 computePhysicalPrepLeadSec 用的是 lastRttMs，我们以前按固定值估，
+  // 网络慢的时候会醒得太晚，解禁那一刻还在路上。
+  let lastRttMs = 600
   const stats = { get: 0, post: 0, errors: 0, lastError: '', lastOkAt: 0, lastPostAt: 0 }
 
   // POST 串行化：保证同一时刻只有一个 POST 在飞，且间隔 ≥ minGap
@@ -39,15 +43,22 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
       accept: 'application/json, text/plain, */*',
     }
     if (isPost) { headers['content-type'] = 'application/json'; headers.origin = baseUrl }
-    const res = await fetch(baseUrl + path, {
-      method, headers, keepalive,
-      body: isPost ? JSON.stringify(body ?? {}) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    const text = await res.text()
-    let json = {}
-    try { json = text ? JSON.parse(text) : {} } catch { json = { raw: text.slice(0, 500) } }
-    return { res, json, text }
+    const t0 = Date.now()
+    try {
+      const res = await fetch(baseUrl + path, {
+        method, headers, keepalive,
+        body: isPost ? JSON.stringify(body ?? {}) : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const text = await res.text()
+      let json = {}
+      try { json = text ? JSON.parse(text) : {} } catch { json = { raw: text.slice(0, 500) } }
+      return { res, json, text }
+    } finally {
+      // 失败也记：抢解禁时要按「最近一次真实往返」估提前量，不是理想值。
+      const dt = Date.now() - t0
+      if (dt > 0 && dt < 30000) lastRttMs = lastRttMs * 0.7 + dt * 0.3
+    }
   }
 
   async function request(path, { method = 'GET', body, retries = 3, keepalive = false } = {}) {
@@ -101,6 +112,12 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
     stats,
     get: (p, o) => request(p, { ...o, method: 'GET' }),
     post: (p, body, o) => request(p, { ...o, method: 'POST', body }),
+    // 掐点用：最近一次往返耗时 / 下一次 POST 还要等多久。
+    // 榜一的 computePhysicalPrepLeadSec 就是按这两个值算 T_prep：
+    //   actPrep = 剩余 act 冷却 + minGap + 2×RTT
+    // 用它才能保证「解禁前把口粮吃完、道具买好」，而不是解禁后才排队。
+    get lastRttMs() { return lastRttMs },
+    getRemainingPostCooldownMs: () => Math.max(0, minGap * 1000 - (Date.now() - lastPostAt)),
     // 世界状态 / 动作
     world: () => request('/api/pet/world'),
     act: (rev, actions, operation) => request('/api/pet/world/act', { method: 'POST', body: { rev, operation, actions } }),

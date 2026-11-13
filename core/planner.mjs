@@ -8,7 +8,7 @@
 //   4. 投资只看回本周期
 import * as M from './market.mjs'
 import { planVault } from './warehouse.mjs'
-import { nextUnlock, waveLeadSec, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
+import { nextUnlock, physicalPrepLeadSec, stealGearSwaps, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { allocateStamina } from './stamina-dp.mjs'
 
 const clone = (x) => structuredClone(x)
@@ -1018,7 +1018,12 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 上限取体力上限的 60%（默认 140 → 84）：24 块地 × 3 点 = 72 能完整覆盖一波，
     // 又不至于把体力全锁死——旧版 keep=24 那次因为口粮抵扣写成 0 才饿死钓鱼，
     // 但反过来把上限开到 100% 同样会让钓/挖/炸一滴都分不到。
-    const keep = Math.min(needForRipe, Math.floor(R.energyMax(s) * 0.6))
+    const keepRipe = Math.min(needForRipe, Math.floor(R.energyMax(s) * 0.6))
+    // 解禁前要预留的偷菜体力（engine 按 snipeStaminaReservation 算好传进来）。
+    // 它和「成熟待收」的 keep 是同一本账：都是「现在不能花掉的体力」。
+    // 重叠部分不能再加一遍，所以取 max 而不是相加。
+    const snipeReserve = Math.max(0, Math.min(R.energyMax(s), Math.floor(Number(opts.snipeReserve) || 0)))
+    const keep = Math.max(keepRipe, snipeReserve)
 
     // --- 补货：炸弹和鱼饵 ---
     //
@@ -1971,7 +1976,18 @@ export function nextWake(world, cfg, memo = {}) {
       const wakeReady = t - (memo.stealWakeAt || 0) >= gap
       const nx = wakeReady
         ? nextUnlock(memo.stealSchedule || {}, t, {
-          leadSec: cfg.social.steal.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, t),
+          // 提前量必须和 engine 的 shouldSnipe 用同一个口径：换装 + 解禁前
+          // 补体力都是 POST，不然「引擎按 8 秒醒、换完装已经过了窗口」。
+          leadSec: physicalPrepLeadSec({
+            schedule: memo.stealSchedule || {},
+            now: t,
+            gearSwaps: stealGearSwaps(cfg),
+            needPrepAct: s.en < Math.min(cfg.social.steal.maxEnergy ?? 15, 15),
+            remainingPostCdMs: world.client?.getRemainingPostCooldownMs?.() || 0,
+            minGapSec: cfg.minGap ?? 2.15,
+            rttMs: world.client?.lastRttMs || 600,
+            fixedLeadSec: cfg.social.steal.prepLeadSec || 0,
+          }),
         })
         : null
       if (nx) {

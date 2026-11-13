@@ -5,6 +5,10 @@ import { solveGomoku, verifyGomoku, playLine } from '../core/gomoku.mjs'
 import * as M from '../core/market.mjs'
 import { DEFAULTS, mergeConfig } from '../core/config.mjs'
 import { todayBookFromLog, todayStartFromLedger } from '../core/logfile.mjs'
+import {
+  prepLeadSec, prepActLeadSec, physicalPrepLeadSec, stealGearSwaps,
+  snipeStaminaReservation, snipeWindowOpen,
+} from '../core/steal-schedule.mjs'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -240,6 +244,67 @@ console.log('\n[7] 守家战绩与后验混合')
   } finally {
     try { rmSync(dir, { recursive: true, force: true }) } catch {}
   }
+}
+
+console.log('\n[偷菜掐点]')
+{
+  // 提前量：访问耗时 + 余量，换装/补体力各占几个 POST，必须算进去
+  ok('提前量基础值', prepLeadSec(1, {}) === 6, `${prepLeadSec(1, {})} 秒`)
+  ok('补体力计入提前量', prepLeadSec(1, { prepActSec: 3 }) === 9, `${prepLeadSec(1, { prepActSec: 3 })} 秒`)
+  ok('换装计入提前量', prepLeadSec(1, { gearSwaps: 3 }) === 13, `${prepLeadSec(1, { gearSwaps: 3 })} 秒`)
+
+  // actPrep = 剩余 POST 冷却 + minGap + 2×RTT
+  ok('不需要补体力时不占提前量', prepActLeadSec({ needPrep: false, remainingPostCdMs: 2000 }) === 0)
+  const actPrep = prepActLeadSec({ needPrep: true, remainingPostCdMs: 0, minGapSec: 2.15, rttMs: 600 })
+  ok('actPrep = minGap + 2×RTT', Math.abs(actPrep - 3.35) < 1e-9, `${actPrep.toFixed(2)} 秒`)
+  const actPrep2 = prepActLeadSec({ needPrep: true, remainingPostCdMs: 1000, minGapSec: 2.15, rttMs: 600 })
+  ok('actPrep 叠加剩余冷却', Math.abs(actPrep2 - 4.35) < 1e-9, `${actPrep2.toFixed(2)} 秒`)
+
+  // 三个调用点（engine 唤醒 / social 掐点 / planner nextWake）共用一个提前量
+  ok('默认配置要换 3 件装', stealGearSwaps(DEFAULTS) === 3)
+  ok('擂台关掉就不换装', stealGearSwaps({ arena: { enabled: false } }) === 0)
+  ok('偷菜前换装关掉就不换装', stealGearSwaps({ arena: { enabled: true }, battle: { stealSwap: false } }) === 0)
+  const prepSched = { 42: { upcoming: [{ unlockAt: 100, kind: 'plot', i: 0 }] } }
+  ok('统一提前量含换装', physicalPrepLeadSec({ schedule: prepSched, now: 0, gearSwaps: 3 }) === 13,
+    `${physicalPrepLeadSec({ schedule: prepSched, now: 0, gearSwaps: 3 })} 秒`)
+  ok('配置写死时优先用配置值',
+    physicalPrepLeadSec({ schedule: prepSched, now: 0, gearSwaps: 3, fixedLeadSec: 5 }) === 5)
+
+  // 解禁前体力预留：需要 7 点（3 处），600 秒自然回复 3 点 → 现在留 4 点
+  const now = 100000
+  const at = now + 600
+  const schedule = {
+    42: {
+      nextEV: 9000,
+      upcoming: [
+        { kind: 'plot', i: 0, unlockAt: at, item: 'grape' },
+        { kind: 'plot', i: 1, unlockAt: at, item: 'grape' },
+        { kind: 'plot', i: 2, unlockAt: at, item: 'grape' },
+      ],
+    },
+  }
+  const resv = snipeStaminaReservation(schedule, now, {
+    horizonSec: 900, regenSec: 180, energyMax: 200, maxEnergy: 15, energyBase: 5,
+  })
+  ok('预留体力 = 需要 − 自然回复', resv.floor === 4, `floor=${resv.floor} need=${resv.need}`)
+  ok('预留到解禁时刻', resv.until === at && resv.targetId === 42, `until=${resv.until}`)
+  const far = snipeStaminaReservation({ 42: { ...schedule[42], upcoming: [{ unlockAt: now + 5000 }] } }, now,
+    { horizonSec: 900, regenSec: 180, energyMax: 200 })
+  ok('超出视界不解禁的不预留', far.floor === 0, `floor=${far.floor}`)
+  const longLead = snipeStaminaReservation({ 42: { ...schedule[42], upcoming: [{ unlockAt: now + 3600 }] } }, now,
+    { horizonSec: 7200, regenSec: 180, energyMax: 200 })
+  ok('自然回复够时不预留', longLead.floor === 0, `floor=${longLead.floor}`)
+  ok('负期望目标不预留', snipeStaminaReservation({ 42: { ...schedule[42], nextEV: 0 } }, now).floor === 0)
+
+  // 窗口判定：lead+4 秒内解禁、或刚解禁 30 秒内
+  const soon = { 42: { upcoming: [{ unlockAt: now + 10, kind: 'plot', i: 0 }] } }
+  ok('10 秒内解禁算窗口', !!snipeWindowOpen(soon, now, { leadSec: 8 }))
+  ok('30 秒后解禁不算窗口',
+    !snipeWindowOpen({ 42: { upcoming: [{ unlockAt: now + 30, kind: 'plot', i: 0 }] } }, now, { leadSec: 8 }))
+  ok('刚解禁 5 秒仍算窗口',
+    !!snipeWindowOpen({ 42: { upcoming: [{ unlockAt: now - 5, kind: 'plot', i: 0 }] } }, now, { leadSec: 8 }))
+  ok('解禁已过 60 秒不算窗口',
+    !snipeWindowOpen({ 42: { upcoming: [{ unlockAt: now - 60, kind: 'plot', i: 0 }] } }, now, { leadSec: 8 }))
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)

@@ -278,6 +278,14 @@ export const DEFAULTS = {
       // 解禁时刻的「同一瞬间」容差（秒）。2 秒内的多处并成一组算期望，
       // 差得更远的分开——解禁时刻是精确值，合并会把第一批推迟。
       groupSpanSec: 2,
+      // 为「即将解禁的偷菜」提前预留体力（榜一 computeImminentSnipeStaminaReservation）。
+      // 以前是解禁那一刻才现场吃口粮（一个 POST 2.15 秒），吃完货已经被抢走；
+      // 现在钓鱼/挖矿/炸矿不会把体力花到不够偷，解禁前只补一次。
+      reserve: true,
+      reserveHorizonSec: 900,    // 未来这么久内解禁的目标参与预留（秒）
+      // 偷菜窗口内不跑五子棋/擂台/帮忙/修仙（榜一 shouldBlockBackgroundWork）。
+      // 这些模块每个 POST 占 2.15 秒，插一个就可能把解禁请求推到窗口外。
+      preempt: true,
       // 只把未来这么久以内的解禁记进调度表（秒）。更远的等下一轮巡逻重算，
       // 免得每座岛都堆着几天后的记录。
       horizonSec: 7200,

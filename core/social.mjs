@@ -5,7 +5,7 @@
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
 import {
-  updateIsleSchedule, stealEV, nextUnlock, nextWave, waveLeadSec,
+  updateIsleSchedule, stealEV, nextUnlock, nextWave, physicalPrepLeadSec, stealGearSwaps,
   WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC,
 } from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
@@ -615,6 +615,47 @@ export async function ensureThiefItems(world, cfg, log = () => {}) {
   } catch (e) { log('偷菜：买道具失败：' + e.message) }
 }
 
+/**
+ * 解禁前把体力补到「这一波全偷完」的量（榜一 executeStagedSnipe 里 physical-prep 的移植）。
+ *
+ * 以前体力是在 stealFromTargets 的循环里按目标现场吃：解禁那一刻先发一个
+ * act（吃口粮），2.15 秒后才发 visit。线上 11-13 13:21 就是这么丢的：
+ *   13:21:04 发现能偷 3 处 → 13:21:06 吃口粮 → 13:21:09 提交，
+ *   服务端回「已经没得偷了｜目标数据 3 秒前拿到」。
+ *
+ * 现在把补体力挪到「解禁之前」：醒来 → 拉最新快照 → 吃口粮/喝咖啡 → 等解禁 →
+ * 解禁那一刻只发 visit 请求。和榜一一样，解禁窗口里不排任何准备动作。
+ *
+ * 返回补了多少点体力（0 表示本来就够 / 补不上）。
+ */
+async function preStageStamina(world, cfg, log, targets, { label = '' } = {}) {
+  const st = cfg.social?.steal || {}
+  const R = world.R
+  if (!targets?.length) return 0
+  const per = Math.max(1, st.maxEnergy ?? 15)
+  // 一波全偷完需要的体力。超过上限的部分补不进去，按上限补即可。
+  const waveNeed = targets.reduce((a, t) => a + Math.min(Number(t.energy) || 5, per), 0)
+  const cap = R.energyMax(world.state)
+  const target = Math.min(waveNeed, cap)
+  const before = Math.floor(world.state.en)
+  if (before >= target) return 0
+  const acts = energyActions(R, world.state, world.prices, {
+    need: target, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
+  })
+  if (!acts?.length) return 0
+  try {
+    const r = await world.act(acts, { silent: true })
+    const ok = (r.out || []).filter((o) => o?.ok).length
+    if (!ok) return 0
+    const after = Math.floor(world.state.en)
+    log(`偷菜：解禁前先把体力补到 ${after}（${before} → ${after}，花 ${Math.round(r.spend || 0).toLocaleString('en-US')} D）${label}`)
+    return after - before
+  } catch (e) {
+    log('偷菜：解禁前补体力失败：' + e.message)
+    return 0
+  }
+}
+
 /** 偷一家（一批全偷） */
 export async function stealIsle(world, id) {
   const r = await wpost(world, 'visit/' + id, { operation: randomUUID(), kind: 'all', i: 0 })
@@ -791,10 +832,18 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   // 醒来后要串行访问每一家（约 1.5 秒/家），访问完最后一家刚好越过解禁点。
   // 固定 8 秒时，一波 4~5 家根本访问不完，第一家还没提交就过窗口了。
   // 开了战前换装的话还要再留出 3 个槽位的 POST 时间（约 6.6 秒），
-  // 否则换完装解禁时刻已经过去。
-  const tacticalPrepHint = stealBattleCtx(cfg).on
-  const leadSec = st.prepLeadSec || waveLeadSec(memo.stealSchedule || {}, world.now, {
-    gearSwaps: tacticalPrepHint ? 3 : 0,
+  // 否则换完装解禁时刻已经过去。体力不够这一波还要加「剩余 POST 冷却 +
+  // minGap + 2×RTT」——补体力也是一个 act POST，不能在解禁那一刻排队。
+  const client = world.client || {}
+  const leadSec = physicalPrepLeadSec({
+    schedule: memo.stealSchedule || {},
+    now: world.now,
+    gearSwaps: stealGearSwaps(cfg),
+    needPrepAct: world.state.en < Math.min(st.maxEnergy ?? 15, 15),
+    remainingPostCdMs: client.getRemainingPostCooldownMs?.() || 0,
+    minGapSec: cfg.minGap ?? 2.15,
+    rttMs: client.lastRttMs || 600,
+    fixedLeadSec: st.prepLeadSec || 0,
   })
 
   // 先把「已经处理过 / 已经失效」的解禁记录清掉，再判断要不要绕过扫描间隔。
@@ -948,6 +997,10 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
           .sort((a, b) => b.ev - a.ev)
         const swap = ctx ? pickSwapTarget(rankedPrep) : null
 
+        // 榜一 physical-prep：解禁前先把体力补够（一个 act POST），
+        // 解禁那一刻只发 visit。补体力排在换装/买道具前面，三者都在等解禁之前。
+        await preStageStamina(world, cfg, log, out, { label: `，${out.length} 家等解禁` })
+
         if (swap) {
           // 道具（24 小时有效）先买好，再换装，最后用剩余时间等解禁。
           // 三者都是串行 POST，顺序反过来会把换装挤到解禁之后。
@@ -974,7 +1027,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
               equipSlotFn: equipSlotFnFor(world),
               waitBeforeActionFn: sleepUntilUnlock,
               actionFn: async () => {
-                try { return await stealFromTargets(world, cfg, log, memo, out, { tactical: false, ctx }) }
+                try { return await stealFromTargets(world, cfg, log, memo, out, { tactical: false, ctx, energyPrepped: true }) }
                 catch (e) { return { stolen: 0, value: 0, error: e } }
               },
               trials: ctx.trials,
@@ -1007,7 +1060,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
           // 访问没跑完就到点，等待被截断、提前提交被服务端拒掉。
           await sleep(Math.min(leftMs, 30000))
         }
-        return await stealFromTargets(world, cfg, log, memo, out, { ctx })
+        return await stealFromTargets(world, cfg, log, memo, out, { ctx, energyPrepped: true })
       }
       // 到点了但货已经没了（被抢 / 被偷满）。把这些过时记录清掉，
       // 否则下一轮还是 overdue，主循环会被它反复催醒。
@@ -1039,7 +1092,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
  */
 
 /** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
-async function stealFromTargets(world, cfg, log, memo, targets, { tactical = true, ctx = null } = {}) {
+async function stealFromTargets(world, cfg, log, memo, targets, { tactical = true, ctx = null, energyPrepped = false } = {}) {
   const st = cfg.social?.steal
   const R = world.R
   let stolen = 0, value = 0, tried = 0
@@ -1070,6 +1123,12 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
     need: needE, maxPerE: st.maxEnergyCost ?? 600, cfg, coins: world.coins,
   })
   const worth = ranked.some(({ t, ev }) => ev >= minEV && canPay(Math.min(t.energy, st.maxEnergy ?? 15)))
+  // 巡逻/扫描发现的（非掐点路径）也要在动手前一次性把体力补够：
+  // 循环里按目标逐次补体力，每个都占一个 2.15 秒的 POST 间隔。
+  // 掐点路径已经在等解禁时补过（energyPrepped），不重复。
+  if (worth && !energyPrepped) {
+    await preStageStamina(world, cfg, log, ranked.map(({ t }) => t), { label: '（巡逻发现）' })
+  }
   if (worth) await ensureThiefItems(world, cfg, log)
 
   // 真正动手的那段。抽成闭包是为了能整体套在「换装 → 偷 → 还原」里：

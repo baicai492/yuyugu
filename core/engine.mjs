@@ -11,7 +11,7 @@ import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { helpDaily, stealRound } from './social.mjs'
-import { shouldSnipe, noteSnipeResult, waveLeadSec } from './steal-schedule.mjs'
+import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
 import * as M from './market.mjs'
 
@@ -405,6 +405,35 @@ export class Engine {
         `｜地块 ${d.plotN - d.empty}/${d.plotN} 已种（${d.topCrop}）｜空 ${d.empty} 块`)
     } catch (e) { /* 决策依据只是辅助信息，算不出来不影响主流程 */ }
 
+    // ---------- 偷菜体力预留 ----------
+    //
+    // 榜一 computeImminentSnipeStaminaReservation 的移植：未来 reserveHorizonSec
+    // 秒内有解禁目标时，先按「这一波要几点体力 − 到解禁自然回复几点」算出下限，
+    // 交给规划器当 keep，钓鱼/挖矿/炸矿不会把体力花到不够偷。
+    // 以前是解禁那一刻才现场吃口粮：一个 POST 2.15 秒，等吃完货已经被抢光
+    // （线上 11-13 13:21 就是这么丢了 3 处）。
+    let snipeReserve = 0
+    {
+      const st = cfg.social?.steal
+      if (st?.enabled && !cfg.dry && st.reserve !== false) {
+        try {
+          const res = snipeStaminaReservation(this.memo.stealSchedule || {}, w.now, {
+            horizonSec: st.reserveHorizonSec ?? 900,
+            regenSec: R.WORLD.regen || 180,
+            energyMax: R.energyMax(s),
+            maxEnergy: st.maxEnergy ?? 15,
+          })
+          snipeReserve = res.floor
+          // 只在「目标换了」时记一次，避免每次巡视都刷同样一行。
+          const key = snipeReserve > 0 ? `${res.targetId}@${res.unlockAt}` : ''
+          if (key && this.memo.snipeReserveKey !== key) {
+            this.memo.snipeReserveKey = key
+            this.log(`偷菜：${Math.max(0, Math.round(res.unlockAt - w.now))} 秒后有目标解禁，规划时先留 ${snipeReserve} 点体力（需要 ${res.need}，自然回复补一部分）`)
+          }
+        } catch { /* 调度表异常不影响规划 */ }
+      }
+    }
+
     // ---------- 主规划 ----------
     let plan = { actions: [], summary: [] }
     let rounds = 0
@@ -421,7 +450,7 @@ export class Engine {
       // 把「上次被偷的时刻」交给规划器：它据此决定要不要续守家道具。
       // world 是每轮共享的对象，规划器往里写 stolenAt 也能被这里读回来。
       if (this.memo.stolenAt) w.stolenAt = this.memo.stolenAt
-      plan = planRound(w, cfg, this.log.bind(this), { allowInvest: !investedThisTick, memo: this.memo })
+      plan = planRound(w, cfg, this.log.bind(this), { allowInvest: !investedThisTick, memo: this.memo, snipeReserve })
       if (!plan.actions.length) break
       if (cfg.dry) {
         this.log(`[演练] 本轮计划：${summarizeActions(R, plan.actions)}`)
@@ -462,13 +491,7 @@ export class Engine {
     // 平时仍按原顺序（下面那块）走，不改变日常节奏。
     let stealSnipeDone = false
     w.tickClock()
-    // 开了守家换装时，提前量里还要算上 3 个槽位的 POST 时间（约 6.6 秒），
-    // 不然醒来时只剩访问邻居的时间，换完装窗口已经过了。
-    const tacticalPrep = cfg.arena?.enabled && cfg.arena?.autoEquip !== false &&
-      cfg.battle?.stealSwap !== false && cfg.battle?.guardPosterior !== false
-    const snipeLead = cfg.social?.steal?.enabled
-      ? (cfg.social.steal.prepLeadSec || waveLeadSec(this.memo.stealSchedule || {}, w.now, { gearSwaps: tacticalPrep ? 3 : 0 }))
-      : 8
+    const snipeLead = cfg.social?.steal?.enabled ? this.snipeLeadSec(w) : 8
     if (cfg.social?.steal?.enabled && !cfg.dry &&
         shouldSnipe(this.memo, this.memo.stealSchedule, w.now, { leadSec: snipeLead })) {
       try {
@@ -496,8 +519,23 @@ export class Engine {
       try { await w.refresh() } catch (e) { this.log('偷菜后刷新状态失败：' + e.message) }
     }
 
+    // ---------- 偷菜窗口：抢占后台任务 ----------
+    // 榜一 shouldBlockBackgroundWork 的移植：有目标在 lead+4 秒内解禁（或刚解禁
+    // 30 秒内）时，五子棋/擂台/帮忙/修仙全部让路。这些模块每个 POST 都占
+    // 2.15 秒，插一个就可能把解禁那一刻的请求推到窗口外。
+    let snipeWindow = null
+    if (cfg.social?.steal?.enabled && !cfg.dry && cfg.social.steal.preempt !== false) {
+      try {
+        snipeWindow = snipeWindowOpen(this.memo.stealSchedule || {}, w.tickClock(), { leadSec: snipeLead })
+        if (snipeWindow && this.memo.snipeWindowKey !== snipeWindow.at) {
+          this.memo.snipeWindowKey = snipeWindow.at
+          this.log(`偷菜：${Math.max(0, Math.round(snipeWindow.at - w.now))} 秒内解禁，这一轮先不跑五子棋/擂台/帮忙/修仙`)
+        }
+      } catch { snipeWindow = null }
+    }
+
     // ---------- 52弟 ----------
-    if (cfg.npc?.enabled && !cfg.dry) {
+    if (cfg.npc?.enabled && !cfg.dry && !snipeWindow) {
       try {
         if (cfg.npc.gomoku) {
           this.setStep('52弟 · 五子棋')
@@ -515,7 +553,7 @@ export class Engine {
     }
 
     // ---------- 擂台 ----------
-    if (cfg.arena?.enabled && !cfg.dry) {
+    if (cfg.arena?.enabled && !cfg.dry && !snipeWindow) {
       try {
         this.setStep('擂台')
         const ar = await arenaDaily(w, cfg, this.log.bind(this), {
@@ -542,7 +580,7 @@ export class Engine {
     }
 
     // ---------- 帮忙 ----------
-    if (cfg.social?.help?.enabled && !cfg.dry) {
+    if (cfg.social?.help?.enabled && !cfg.dry && !snipeWindow) {
       try {
         this.setStep('串门 · 帮忙')
         const r = await helpDaily(w, cfg, this.log.bind(this), this.memo)
@@ -558,7 +596,7 @@ export class Engine {
     // 灵石不能换 D 币，所以这一步对现金收益零贡献；它只推进养成进度。
     // 放在帮忙之后、偷菜之前：修仙的短窗口（炼丹 19 秒出炉、抢双倍收获）
     // 靠 xianRound 内部的连批完成，不会拖住后面的掐点偷菜。
-    if (cfg.xian?.enabled) {
+    if (cfg.xian?.enabled && !snipeWindow) {
       try {
         this.setStep('修仙 · 药园')
         const xr = await xianRound(w, cfg, this.log.bind(this), this.memo)
@@ -917,8 +955,7 @@ export class Engine {
       if (canSteal) {
         // 提前量按这一波的岛数算：醒来后要串行访问每家 ~1.5 秒，
         // 固定 8 秒在 4~5 家同波时根本访问不完。
-        const leadSec = this.cfg.social.steal.prepLeadSec ||
-          waveLeadSec(this.memo.stealSchedule || {}, t)
+        const leadSec = this.snipeLeadSec(w, t)
         const nx = shouldSnipe(this.memo, this.memo.stealSchedule || {}, t, { leadSec })
         if (nx) {
           this.memo.stealWakeAt = t
@@ -935,6 +972,27 @@ export class Engine {
     }
 
     return ''
+  }
+
+  /**
+   * 掐点唤醒的提前量。唤醒时刻（watchOnce / planner.nextWake）和
+   * shouldSnipe 必须用同一个值，否则引擎以为该醒了、窗口判定却说不算。
+   * 换装和补体力都是 POST，必须算进去（见 steal-schedule.physicalPrepLeadSec）。
+   */
+  snipeLeadSec(w, now = w.tickClock()) {
+    const cfg = this.cfg
+    const st = cfg.social?.steal || {}
+    const client = w.client || {}
+    return physicalPrepLeadSec({
+      schedule: this.memo.stealSchedule || {},
+      now,
+      gearSwaps: stealGearSwaps(cfg),
+      needPrepAct: w.state.en < Math.min(st.maxEnergy ?? 15, 15),
+      remainingPostCdMs: client.getRemainingPostCooldownMs?.() || 0,
+      minGapSec: cfg.minGap ?? 2.15,
+      rttMs: client.lastRttMs || 600,
+      fixedLeadSec: st.prepLeadSec || 0,
+    })
   }
 
   /** 让主循环立刻醒来巡视（GUI 用） */
