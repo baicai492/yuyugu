@@ -8,7 +8,7 @@
 
 | 文件 | 职责 | export 清单 |
 |---|---|---|
-| `pet-isle.js` | 小岛主场景、镜头、输入、渲染、操作队列、本地预测、服务端同步、串门、偷菜、守家对战演出、管家报告、HUD | `setSfx`（:31）、`sfx`（:32）、`mountIsle`（:91）；返回对象见 :1678-1684 |
+| `pet-isle.js` | 小岛主场景、镜头、输入、渲染、操作队列、本地预测、服务端同步、串门、偷菜、守家对战演出、管家报告、HUD | `setSfx`（:31）、`sfx`（:32）、`mountIsle`（:91）；返回对象见 :1678-1684（文件共 1685 行） |
 | `pet-isle-ui.js` | 集市（卖货、行情、加工、货船、杂货、公库）、背包图鉴、说明、挂机管家配置、囤货列表、山谷纪事 | `sheet`（:25）、`openMarket`（:51）、`openBag`（:176）、`openGuide`（:229）、`openAuto`（:273）、`openWarehouse`（:325）、`openB12Journal`（:455） |
 | `pet-isle-visit.js` | 玩家目录、搜索、留言板、守护对战日志与回放入口 | `openBoard`（:9）、`openGuardLog`（:25）、`openVisit`（:43） |
 | `pet-isle-fun.js` | 52弟玩具摊（猜拳、抽牌、五子棋、盲盒）与鱼彩（刮刮乐、大乐透） | `openFun`（:44）、`openLotto`（:174） |
