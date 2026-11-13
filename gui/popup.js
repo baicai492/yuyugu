@@ -379,7 +379,7 @@ function renderXian2() {
   $('x2Stipend').textContent = s.stipendDone ? '已领' : '待领'
   const tk = s.tasks || []
   $('x2Tasks').textContent = tk.length ? `${tk.filter((v) => v.done).length}/${tk.length} 已交` : '今天还没刷新'
-  $('x2Talk').textContent = `${s.talks || 0}/30 位`
+  $('x2Talk').textContent = `${s.talks || 0}/${s.talksMax || 30} 位`
   const ev = s.ev || {}
   $('x2Ev').textContent = ev.pending
     ? '有事件待选（本轮会处理）'

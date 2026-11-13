@@ -645,12 +645,12 @@ export class Engine {
     // 放在帮忙之后、偷菜之前：修仙的短窗口（炼丹 19 秒出炉、抢双倍收获）
     // 靠 xianRound 内部的连批完成，不会拖住后面的掐点偷菜。
     if (cfg.xian?.enabled && !snipeWindow) {
-      try {
-        this.setStep('修仙 · 药园')
-        const xr = await xianRound(w, cfg, this.log.bind(this), this.memo)
-        totalActions += xr.actions || 0
-      } catch (e) { this.log('修仙出错：' + e.message, 'err') }
-      // 2.0：人脉/机缘/宗门/配招/自动对战/秘境。秘境整条路径本地预演过再提交。
+      // 2.0 必须先跑。两者抢的是同一池灵力：斗法 10/场（每天 8 场）、秘境 15/次（每天 3 次），
+      // 而 1.0 的药园是个只要还有灵力就会一直锄地/播种/浇水/收获的无底洞。
+      // 顺序反过来的话，1.0 先把灵力吃到 0，2.0 每次规划都只能返回 idle——
+      // 线上实测 en=0/100 时「同门斗法 0/8、秘境 0/3、试炼首通 0/4」挂了好几天。
+      // 单位灵力收益也支持这个顺序：秘境 15 点换一次首通（培元丹×2、回灵丹×2，
+      // 按卖价 300 灵石）外加路径掉落，而灵草一整茬（锄3+种1+浇1+收2=7 点）只卖约 15 灵石。
       if (cfg.xian2?.enabled !== false) {
         try {
           this.setStep('修仙 · 秘境')
@@ -658,6 +658,12 @@ export class Engine {
           totalActions += x2.actions || 0
         } catch (e) { this.log('修仙2.0出错：' + e.message, 'err') }
       }
+      // 1.0：药园/炼丹/打坐，用 2.0 剩下的灵力。
+      try {
+        this.setStep('修仙 · 药园')
+        const xr = await xianRound(w, cfg, this.log.bind(this), this.memo)
+        totalActions += xr.actions || 0
+      } catch (e) { this.log('修仙出错：' + e.message, 'err') }
     }
 
     // ---------- 游乐馆 ----------

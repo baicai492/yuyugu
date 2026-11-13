@@ -573,6 +573,9 @@ export function xian2Snapshot(world) {
     stipendDone: x.sp === d,
     tasks: x.tk?.d === d ? (x.tk.list || []).map((v) => ({ done: !!v[1] })) : [],
     talks: x.ch?.d === d ? (x.ch.ids || []).length : 0,
+    // 规则里写死的上限是 30，但全服只有 29 个 NPC——显示 29/30 会让人以为
+    // 「还差一个没做」，其实是当天全部叙完了。按实际人数封顶。
+    talksMax: Math.min(30, npcList().length),
     // 机缘：今日已抽次数 / 上限，以及「有事件没选」的状态（GUI 要提示用户/显示待决）
     ev: {
       n: x.ev?.d === d ? x.ev.n || 0 : 0,

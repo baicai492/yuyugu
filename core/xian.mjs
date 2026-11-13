@@ -13,8 +13,9 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FIGHT_DAILY, FUSIONS,
+  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FIGHT_COST, FIGHT_DAILY, FUSIONS,
   HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS,
+  RLM_DAILY, RLM_EN,
   ROOT_GROW, STAGES, STORY_END, TECH_PRICE, TECHS,
   act as xsAct, canMax, cvNeed, fuseKey, medBonus, rootMult, tick as xsTick,
 } from './xian-rules.mjs'
@@ -30,6 +31,22 @@ export const BREW_READY_SEC = Math.max(BREW_MIN + 4, 19)
 // 这些动作只允许真人点：测灵根、剧情、斗法（斗法是服务端判定的弹幕关卡）。
 // 自动化提交它们要么被拒、要么破坏存档，一律不碰。
 const FORBIDDEN_XIAN_ACTIONS = new Set(['xsRoot', 'xsStory', 'xsFight', 'xsWin', 'xsLose'])
+
+// 会被「2.0 门票预留」拦下的动作：纯扩张类，属于「有余力才做」的事。
+// 收获不在里面——它是田块周转的保底，每块只吃 2 点；
+// 炼丹也不在——回灵丹是唯一能把灵力「变多」的东西（5 点换 30 点），
+// 拦掉它等于把这条正收益的链路也掐了，2.0 反而更难攒够门票。
+const RESERVE_GATED = new Set(['hoe', 'plant', 'water'])
+
+/** 一条修仙动作要花多少灵力（照规则 act 的扣费；earth 主修锄地只要 1 点） */
+function xsEnergyCost(a, sim) {
+  if (!a) return 0
+  if (a.a === 'ab') return FIGHT_COST
+  if (a.a === 'rin') return RLM_EN
+  if (a.a === 'hoe') return sim?.tech === 'earth' ? 1 : (COST.hoe || 0)
+  const c = COST[a.a]
+  return Number.isFinite(c) ? c : 0
+}
 
 const HERB_ENTRIES_DESC = Object.entries(HERBS).sort((a, b) => b[1].lv - a[1].lv || b[1].sell - a[1].sell)
 const PURE_CASH_HERBS = new Set(
@@ -77,6 +94,7 @@ export function normalizeXianOptions(raw = {}) {
   const fuseRaw = String(raw?.fuseTarget || 'auto').trim().toLowerCase()
   const fuseTarget = ['auto', 'ice', 'thunder', 'wind', 'lava', 'poison'].includes(fuseRaw) ? fuseRaw : 'auto'
   const maxRaw = Number(raw?.maxActions ?? raw?.maxActionsPerBatch ?? MAX_XS_BATCH)
+  const reserveRaw = Number(raw?.reserveEnergy)
   return {
     enabled: Boolean(raw?.enabled),
     breakMode,
@@ -85,7 +103,37 @@ export function normalizeXianOptions(raw = {}) {
     maxActionsPerBatch: Number.isFinite(maxRaw)
       ? Math.max(1, Math.min(MAX_XS_BATCH, Math.floor(maxRaw)))
       : MAX_XS_BATCH,
+    // 给修仙 2.0 预留的灵力（见 xian2EnergyReserve）
+    reserveEnergy: Number.isFinite(reserveRaw) ? Math.max(0, Math.min(EN_MAX, Math.floor(reserveRaw))) : 0,
   }
+}
+
+/**
+ * 给修仙 2.0 预留多少灵力。
+ *
+ * 斗法（10/场、每天 8 场）和秘境（15/次、每天 3 次）都是「够门槛才让进，进去当场扣光」，
+ * 而 1.0 的药园是个只要还有灵力就会继续锄地/播种/浇水的无底洞——它每轮都把刚回的
+ * 那几点灵力花掉，灵力就永远攒不到 15，2.0 的额度于是永远是 0：
+ * 线上 2026-11-13 实测 en=0/100，同门斗法 0/8、秘境 0/3、试炼首通 0/4。
+ *
+ * 这里只留「下一次 2.0 动作的门槛」（max(15,10)=15），不是把整天要的 125 点全锁住——
+ * 锁满 100 的话 1.0 连地都种不了，药园产出和炼丹原料会一起断。
+ * 2.0 的额度全部刷完后这里归零，1.0 照常用剩下的灵力。
+ */
+export function xian2EnergyReserve(xs, cfg, nowSec = Date.now() / 1000) {
+  if (!xs || cfg?.xian2?.enabled === false) return 0
+  // 还没学功法时秘境/斗法都进不去，别白锁灵力
+  if (!xs.tech) return 0
+  const d = xsDay(nowSec)
+  const need = []
+  // 已在秘境里不用再交门票（rgo/rout 不耗灵力），走出去就行
+  if (!xs.rlm) {
+    const used = xs.rd?.d === d ? (xs.rd.n || 0) : 0
+    if (used < RLM_DAILY) need.push(RLM_EN)
+  }
+  const fights = xs.df?.d === d ? (xs.df.n || 0) : 0
+  if (fights < FIGHT_DAILY) need.push(FIGHT_COST)
+  return need.length ? Math.max(...need) : 0
 }
 
 /** 提交前自检：禁手动动作、只许 xs*、批次长度不超限 */
@@ -452,8 +500,16 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
   let truncatedByBatchCap = false
   let emittedStochastic = false
 
+  const reserve = opts.reserveEnergy || 0
   const emit = (internalAct) => {
     if (actions.length >= opts.maxActionsPerBatch) { truncatedByBatchCap = true; return false }
+    // 给 2.0 留出门票灵力（见 xian2EnergyReserve）。
+    // 只拦扩张/维护类动作：收获是田块周转的保底，每块只要 2 点，而且修仙作物
+    // 不会烂（规则 tick 里 g 到 3 就停住），晚收只是占着田，不会亏。
+    if (reserve > 0 && RESERVE_GATED.has(internalAct?.a)) {
+      const cost = xsEnergyCost(internalAct, sim)
+      if (cost > 0 && Math.max(0, Number(sim.en || 0) - cost) < reserve) return false
+    }
     const res = xsAct(sim, internalAct, t, () => 0.99)
     if (!res?.ok) return false
     actions.push(toWireXsAction(internalAct))
@@ -837,8 +893,15 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
   const xc = cfg?.xian || {}
   if (xc.enabled === false) return { ran: false, actions: 0, reason: 'disabled', nextWakeAt: 0 }
 
-  const opts = normalizeXianOptions({ ...xc, enabled: true })
   const t = Math.floor(world.now || 0)
+  const opts = normalizeXianOptions({
+    ...xc,
+    enabled: true,
+    // 2.0 还有额度时，把它的门票灵力（15）留给它，1.0 只用超出的部分。
+    // 引擎现在也是先跑 2.0 再跑 1.0，但光靠顺序不够：1.0 只要还有 3 点灵力
+    // 就会锄地，灵力永远攒不到 15，2.0 还是排不进动作。
+    reserveEnergy: xian2EnergyReserve(world.state?.xs, cfg, t),
+  })
   const first = planXianActions(world, t, opts)
 
   if (!first.actions.length) {
