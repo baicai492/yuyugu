@@ -168,10 +168,15 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
         switch (cmd) {
           case 'start':
             cfg.enabled = true
+            // 写回 config.json：GUI 的开关现在是「电源开关」语义（右上角一打开就拉起主程序
+            // 并开托管）。不落盘的话，主程序下次重启会按文件里的旧值恢复，
+            // 用户明明关掉了却又自己开起来。
+            saveConfig(cfg)
             engine.log('GUI：启动托管')
             return send(res, 200, { ok: true })
           case 'stop':
             cfg.enabled = false
+            saveConfig(cfg)
             engine.log('GUI：暂停托管')
             return send(res, 200, { ok: true })
           case 'dry':

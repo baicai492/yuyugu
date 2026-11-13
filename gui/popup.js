@@ -18,6 +18,7 @@ const balanceTax = (coins) => {
 let port = 8787
 let alive = false
 let restarting = false      // 正在重启的 1~2 秒空窗：期间的网络错误不写状态栏
+let switching = false       // 正在「拉起主程序 + 开托管」：期间不按 config.enabled 回弹开关
 let status = null
 let market = null
 let xian = null
@@ -113,7 +114,9 @@ function renderOverview() {
   // 三种运行态：working（正在巡视）/ waiting（巡视完，等下次）/ paused（总开关关着）
   const working = status.running && enabled && status.state === 'working'
   const waiting = status.running && enabled && status.state === 'waiting'
-  $('enabled').checked = enabled
+  // 正在自动拉起时别按旧配置把开关弹回去：主程序还没起、config 还是上次的 false，
+  // 弹回会让用户以为「点了没反应」，然后重复点。
+  if (!switching) $('enabled').checked = enabled
   $('dry').checked = !!config?.dry
   $('dot').className = 'dot ' + (working || waiting ? 'on' : status.running ? '' : 'err')
   if (!enabled) {
@@ -804,9 +807,24 @@ function bind() {
     }
   })
 
+  // 右上角总开关 = 一键开托管。
+  //   · 没连上（主程序没在跑）→ 先用 Native Messaging 把它拉起来，再开托管。
+  //     这就是原来 connBox 里那个「启动主程序」按钮干的事，现在并进开关里了。
+  //   · 已经连上 → 只发 start。
+  // 关掉只是暂停托管，不杀进程：杀进程会丢掉正在跑的轮次，也看不到日志；
+  // 真要退出/重启进程，用「设置」页的按钮。
   $('enabled').onchange = async () => {
-    try { await cmd($('enabled').checked ? 'start' : 'stop'); await loadStatus() }
-    catch (e) { $('statusline').textContent = e.message }
+    if (!$('enabled').checked) {
+      try { await cmd('stop'); await loadStatus() }
+      catch (e) { $('statusline').textContent = e.message }
+      return
+    }
+    if (alive) {
+      try { await cmd('start'); await loadStatus() }
+      catch (e) { $('statusline').textContent = e.message }
+      return
+    }
+    await startProgram()
   }
   $('dry').onchange = async () => {
     try { await cmd('dry', { value: $('dry').checked }); await loadStatus() }
@@ -890,34 +908,8 @@ function bind() {
     await connect()
   }
 
-  // 用 Native Messaging 拉起主程序（不需要开机自启，也不用敲命令）
-  $('btnLaunch').onclick = async () => {
-    const hint = $('launchHint')
-    const btn = $('btnLaunch')
-    btn.disabled = true
-    hint.textContent = '正在启动…'
-    try {
-      port = Number($('port').value) || 8787
-      await chrome.storage.local.set({ port })
-      const res = await sendNative({ cmd: 'launch', port })
-      if (res?.ok) {
-        hint.textContent = res.msg || '已启动'
-        // 等端口就绪后连接
-        for (let i = 0; i < 30; i++) {
-          await new Promise((r) => setTimeout(r, 500))
-          try { await api('/api/ping'); await connect(); hint.textContent = ''; break }
-          catch { if (i === 29) hint.textContent = '已启动但连不上，检查端口 ' + port }
-        }
-      } else {
-        hint.textContent = '启动失败：' + (res?.msg || '宿主没有响应')
-      }
-    } catch (e) {
-      hint.textContent = '无法调用本地宿主：' + e.message +
-        '（需要先运行 node scripts/install-host.mjs --ext-id=' + chrome.runtime.id + '）'
-    } finally {
-      btn.disabled = false
-    }
-  }
+  // 备用入口：和右上角开关走同一条流程（自动拉起失败时还有这个按钮可点）
+  $('btnLaunch').onclick = () => { startProgram() }
 
   $('logModeNow').onclick = () => setLogMode('now')
   $('logModeHist').onclick = () => setLogMode('hist')
@@ -937,6 +929,62 @@ function sendNative(msg) {
       })
     } catch (e) { reject(e) }
   })
+}
+
+/**
+ * 拉起主程序：Native Messaging → 等端口就绪 → 连接 → 打开托管。
+ *
+ * 右上角总开关和 connBox 的「启动主程序」按钮都走这里。
+ * 宿主会自己处理三种情况（native/yuyugu-host.mjs 的 launch）：
+ *   · 端口已在监听 → 直接返回 running（不动现有进程）
+ *   · 有 PID 但端口不通（进程僵死）→ 杀掉重起
+ *   · 没在跑 → 新起一个
+ * 所以「启动」和「重启」是同一个入口，不用单独判断。
+ */
+async function startProgram() {
+  const sw = $('enabled')
+  const btn = $('btnLaunch')
+  const hint = $('launchHint')
+  const say = (t) => {
+    if (hint && !$('connBox').hidden) hint.textContent = t
+    if (t) $('statusline').textContent = t
+  }
+  switching = true
+  sw.disabled = true
+  btn.disabled = true
+  try {
+    port = Number($('port').value) || 8787
+    await chrome.storage.local.set({ port })
+    say('正在启动主程序…')
+    const res = await sendNative({ cmd: 'launch', port })
+    if (!res?.ok) { say('启动失败：' + (res?.msg || '宿主没有响应')); return false }
+    say(res.msg || '已启动')
+    // launch 返回时主程序可能还在加载规则模块（联网失败会退回缓存，最坏 30 秒）
+    let up = false
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      try { await api('/api/ping'); up = true; break } catch { /* 还没起来 */ }
+    }
+    if (!up) { say('已启动但连不上，检查端口 ' + port); return false }
+    await connect()
+    // 主程序可能是上次 stop 掉的状态，补一次 start 才真的开始托管。
+    // start 是幂等的（server.mjs 里只是 cfg.enabled = true），重复发无害。
+    try { await cmd('start') } catch {}
+    await loadStatus()
+    return true
+  } catch (e) {
+    say('无法自动启动：' + e.message +
+      '（需要先运行 node scripts/install-host.mjs --ext-id=' + chrome.runtime.id + '）')
+    return false
+  } finally {
+    switching = false
+    sw.disabled = false
+    btn.disabled = false
+    // 没连上就把开关弹回去，避免「开关开着但其实什么都没发生」。
+    // 连上了但拿不到 config（状态请求失败）就保留用户点的状态，别自作主张。
+    if (!alive) sw.checked = false
+    else if (config) sw.checked = !!config.enabled
+  }
 }
 
 function startAuto() {

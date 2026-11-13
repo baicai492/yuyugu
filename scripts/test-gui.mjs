@@ -1,8 +1,7 @@
 // 在真实浏览器里加载 GUI 插件，检查 popup 是否正常渲染、能否连上本地服务。
 // 用法：node scripts/test-gui.mjs [chromium|msedge] [端口]
 import { createRequire } from 'node:module'
-import { mkdtempSync, existsSync, readdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -27,7 +26,8 @@ function findPlaywright() {
 
 const { chromium } = findPlaywright()
 
-const profile = mkdtempSync(path.join(tmpdir(), 'yyg-gui-'))
+// 临时 profile 放项目里（不写 C 盘），跑完在 finally 里删掉
+const profile = mkdtempSync(path.join(ROOT, '.tmp-gui-'))
 let ctx
 try {
   ctx = await chromium.launchPersistentContext(profile, {
@@ -130,4 +130,5 @@ try {
   process.exitCode = 1
 } finally {
   await ctx?.close()
+  try { rmSync(profile, { recursive: true, force: true }) } catch {}
 }

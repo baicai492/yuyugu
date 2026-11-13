@@ -14,14 +14,15 @@
     </div>
     <div class="top-right">
       <span class="pill" id="linkState">未连接</span>
-      <label class="switch" title="托管总开关">
+      <label class="switch" title="一键托管：主程序没在跑时会自动拉起；关掉只是暂停，不退出进程">
         <input type="checkbox" id="enabled" /><span></span>
       </label>
     </div>
   </header>
 
   <div class="conn launch-box" id="connBox" hidden>
-    <p><b>主程序没有运行。</b>点下面的按钮直接拉起（无需开机自启，也不用敲命令）：</p>
+    <p><b>主程序没有运行。</b>打开右上角的开关会自动启动它（无需开机自启，也不用敲命令）。</p>
+    <p class="muted">自动启动失败时，也可以用下面的按钮或命令兜底：</p>
     <div class="row">
       <button id="btnLaunch">启动主程序</button>
       <button id="reconnect" class="ghost">已启动，重新连接</button>
