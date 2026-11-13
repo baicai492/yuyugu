@@ -53,17 +53,31 @@ export function foodChoices(R, s, prices) {
     for (let q = 0; q < 3; q++) {
       const n = R.b12Available(s, c.id, q)
       if (n <= 0) continue
-      const restore = Math.min(room, Math.round(c.eat * R.QUALITY[q]))
-      if (restore <= 0) continue
+      // full = 这一份本身的回复量；restore = 现在吃下去实际能回多少（受 room 截断）。
+      //
+      // 旧版在这里直接 `if (restore <= 0) continue`，体力一满 room=0 就整条过滤掉，
+      // foodChoices 返回空数组。下游拿它算「库存折多少体力」「每点体力多少口粮钱」，
+      // 于是满体力时库存成本全变成 0 / 兜底 300 —— 口粮堆着几千点还是把地全种上口粮。
+      // 现在满体力也把条目留下（restore=0），用 full 算库存与单价。
+      const full = Math.round(c.eat * R.QUALITY[q])
+      if (full <= 0) continue
+      const restore = Math.min(room, full)
       const unit = Math.round((prices[c.id] || 0) * R.QUALITY[q])
-      out.push({ id: c.id, q, n, restore, unit, costPerEnergy: unit / restore })
+      out.push({ id: c.id, q, n, full, restore, unit, costPerEnergy: unit / full })
     }
   }
-  // 潮汐饭团
+  // 潮汐饭团：每天最多吃 2 个（R.B12_SNACK.daily），不是「有多少能吃多少」。
+  // n 保留真实库存（折算口粮当量要用），limit 才是今天还能吃的份数，
+  // energyActions / 口粮榨取都按 limit 走。旧版只判了「今天没吃满」，然后
+  // 把整仓 n 都塞进池子，吃第三个起全被服务端拒绝，白占一轮动作名额。
   const snack = R.b12Available(s, 'tide_snack', 0)
-  if (snack > 0 && (s.cnt?.tide_snack || 0) < R.B12_SNACK.daily && room > 0) {
-    const restore = Math.min(R.B12_SNACK.energy, room)
-    out.push({ id: 'tide_snack', q: 0, n: snack, restore, unit: R.B12_SNACK.price, costPerEnergy: R.B12_SNACK.price / restore })
+  const snackLeft = Math.max(0, R.B12_SNACK.daily - (s.cnt?.tide_snack || 0))
+  if (snack > 0 && snackLeft > 0) {
+    const full = R.B12_SNACK.energy
+    out.push({
+      id: 'tide_snack', q: 0, n: snack, limit: Math.min(snack, snackLeft), full,
+      restore: Math.min(full, room), unit: R.B12_SNACK.price, costPerEnergy: R.B12_SNACK.price / full,
+    })
   }
   out.sort((a, b) => a.costPerEnergy - b.costPerEnergy)
   return out
@@ -92,7 +106,8 @@ export function energyActions(R, state, prices, { need, maxPerE, cfg = {}, coins
   let en = state.en
   // 口粮池：按「每点体力成本」从便宜到贵。left 记剩余可吃的份数，
   // 因为同一份口粮吃完一口就要扣一件（foodChoices 不知道我们吃了多少）。
-  const pool = foodChoices(R, state, prices).map((f) => ({ ...f, left: f.n }))
+  // 有日限的（潮汐饭团）按 limit 截断，不然会排出今天注定失败的吃法。
+  const pool = foodChoices(R, state, prices).map((f) => ({ ...f, left: Math.min(f.n, f.limit ?? f.n) }))
   let guard = 0
   while (en < need && guard++ < 50) {
     const room = Math.max(0, max - en)
@@ -101,10 +116,12 @@ export function energyActions(R, state, prices, { need, maxPerE, cfg = {}, coins
       for (const f of pool) {
         if (f.left <= 0) continue
         if (f.costPerEnergy > maxPerE) break      // 已排序，后面更贵
-        if (f.restore <= 0) continue
+        // 按当前缺口动态截断：吃之前 room 可能已经被前面几口吃小了
+        const restore = Math.min(room, f.full ?? f.restore)
+        if (restore <= 0) continue
         acts.push({ a: 'eat', id: f.id, q: f.q })
         f.left--
-        en = Math.min(max, en + f.restore)
+        en = Math.min(max, en + restore)
         progressed = true
         break
       }
@@ -337,7 +354,13 @@ export function makeCropPlanner(R, s, t, prices, cfg, weather, foodCost = 300) {
   }
 
   const crops = R.CROPS.filter((c) => c.seasons.includes(season)).map((c) => {
-    // 单原料配方：加工能增值就用加工价（普通/银星），金星直接卖
+    // 单原料配方：加工能增值就用加工价（普通/银星），金星直接卖。
+    //
+    // 已知近似：多原料配方（田园沙拉 turnip+carrot、南瓜派 pumpkin+egg）没算进来。
+    // 它需要同时知道辅料的供给和价格，而辅料本身也是要排产的作物，属于全局优化；
+    // 硬塞一个「辅料按市价扣」的估计会让加工名额在两种作物之间来回抢，实测更难收敛。
+    // 影响面：胡萝卜和南瓜的估值偏低，但它们仍有单原料替代（南瓜派除外），
+    // 不会把本来该种的作物排除掉——只是排序靠后。
     const rec = cfg.craft?.enabled
       ? R.RECIPES.filter((r) => r.price && Object.keys(r.in).length === 1 && r.in[c.id])
         .sort((a, b) => ((prices[b.id] || b.price) / b.in[c.id]) - ((prices[a.id] || a.price) / a.in[c.id]))[0]
@@ -349,7 +372,10 @@ export function makeCropPlanner(R, s, t, prices, cfg, weather, foodCost = 300) {
 
   const craftedSlots = () => Object.entries(prod).reduce((a, [id, p]) => {
     const x = byId[id]
-    return a + (x?.u > 0 ? p.reduce((q, n) => q + n, 0) / (x.k || 1) : 0)
+    // 只算普通(0)和银星(1)：revenue() 里 `useCraft = q < 2`，金星是直接卖的
+    // （加工成成品不区分品质，金星拿去加工反而亏）。旧版三个品质全加进来，
+    // 占用的加工名额被高估——洒水器地金星多，后面的作物会更早被判「没名额」。
+    return a + (x?.u > 0 ? (p[0] + p[1]) / (x.k || 1) : 0)
   }, 0)
 
   /** 给定产量和可用加工名额，按「加工优先、再按阶梯」算出能卖多少钱 */
@@ -438,10 +464,9 @@ export function decisionSnapshot(R, s, t, prices, expPrices, cfg) {
   const fmt = (n) => Math.round(n).toLocaleString('en-US')
   const season = R.seasonOf(R.isleDay(t))
   const useBait = cfg.work?.bait && (s.inv.bait?.[0] || 0) > 0
-  // 体力超上限时 room=0，foodChoices 会返回空（没有「恢复空间」）。
-  // 但口粮成本仍然是个有意义的参考值，这时按「不考虑上限」再算一遍。
-  let food = foodChoices(R, s, prices)
-  if (!food.length) food = foodChoices(R, { ...s, en: 0 }, prices)
+  // 体力超上限时 room=0，旧版 foodChoices 会返回空数组——现在它保留条目
+  // （restore 被钳到 0，但 full / unit / costPerEnergy 都是准的），这里直接用。
+  const food = foodChoices(R, s, prices)
   const foodCost = Math.round(food[0]?.costPerEnergy ?? 0)
   const foodName = food[0] ? (R.ITEM_NAME?.[food[0].id] || food[0].id) : ''
 
@@ -621,7 +646,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
         // 下一滴在 1 个回复周期内到账（正常情况恒成立）→ 值得等，这一轮先不做
         if (nextDrop - t <= regenSec + 2) return false
       }
-      // 口粮优先；体力已满时 foodChoices 返回空，此时只能等自然回复
+      // 口粮优先；体力已满时吃下去不会回体力，只能等自然回复
       const food = foodChoices(R, s, prices)[0]
       if (food && s.en < R.energyMax(s)) {
         if (!push({ a: 'eat', id: food.id, q: food.q })) break
@@ -681,21 +706,13 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     const pen = s.barn[i]
     const stage = R.b12AnimalStage(pen, t)
     if (stage.retired) continue
-    if (t - pen.f >= 8 * 3600) hungry.push(i)
+    // 8 小时只是「下次喂食的最早时间」（R:632 的拒绝条件），真正会断产出的是 24 小时
+    // （animalReady 里 `fed = t - a.f < 86400`）。
+    // 旧版按 8 小时喂一次，等于每天多喂两次：每只 3×150 = 450 D 饲料，
+    // 其中 300 D 是白花的，还多耗 2 点体力——心情（每次 +8）早就满了。
+    // 留 4 小时缓冲，20 小时喂一次。
+    if (t - pen.f >= 20 * 3600) hungry.push(i)
     if (!s.cnt['pet' + i]) { if (push({ a: 'pet', i })) petted++ }
-  }
-  // 退休（产完最后一轮）的动物必须卖掉腾位置，否则永远占着畜栏。
-  // 旧版有一轮只卖一只的写法，重写 v2 时漏了——`if (stage.retired) continue`
-  // 直接把它跳过，于是畜栏满了以后再也买不了新动物。
-  // 先收完最后一轮产物再卖（animalReady 还有货就先别卖）。
-  {
-    const dead = s.barn.findIndex((pen) => {
-      const st = R.b12AnimalStage(pen, t)
-      return st.retired && !R.animalReady(pen, t).ready
-    })
-    if (dead >= 0 && push({ a: 'sellAnimal', i: dead })) {
-      summary.push(`卖掉退休的${R.ANIMALS?.find((a) => a.id === s.barn[dead]?.k)?.name || '动物'}，腾出畜栏`)
-    }
   }
   if (hungry.length) {
     const have = s.inv.feed?.[0] || 0
@@ -704,10 +721,33 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       const n = Math.min(99, lack + 5)
       if (coins >= (R.SHOP.feed.price * n)) push({ a: 'buy', id: 'feed', n })
     }
-    for (const i of hungry) { if (push({ a: 'feed', i })) fed++ }
+    // 喂食要 1 点体力：体力为 0 时服务端直接拒绝，白占动作名额，
+    // 而且下一轮还是 0 —— 整夜一只都喂不上，动物一直饿着不产出。
+    for (const i of hungry) {
+      if (ensureEnergy(R.WORLD.cost.feed || 1) && push({ a: 'feed', i })) fed++
+    }
   }
   if (fed) summary.push(`喂食 ${fed} 只`)
   if (petted) summary.push(`摸摸 ${petted} 只`)
+
+  // 退休（产完最后一轮）的动物必须卖掉腾位置，否则永远占着畜栏。
+  // 旧版有一轮只卖一只的写法，重写 v2 时漏了——`if (stage.retired) continue`
+  // 直接把它跳过，于是畜栏满了以后再也买不了新动物。
+  // 先收完最后一轮产物再卖（animalReady 还有货就先别卖）。
+  //
+  // **必须在喂食之后**：push({a:'sellAnimal'}) 会本地预演并把这只从 s.barn 里删掉，
+  // 之后再用 hungry 里的下标就会错位——把饲料喂给隔壁格子，甚至越界。
+  {
+    const dead = s.barn.findIndex((pen) => {
+      const st = R.b12AnimalStage(pen, t)
+      return st.retired && !R.animalReady(pen, t).ready
+    })
+    if (dead >= 0) {
+      // 名字要在 push 之前取：push 会本地预演，s.barn 里这只已经没了
+      const deadName = R.ANIMALS?.find((a) => a.id === s.barn[dead]?.k)?.name || '动物'
+      if (push({ a: 'sellAnimal', i: dead })) summary.push(`卖掉退休的${deadName}，腾出畜栏`)
+    }
+  }
 
   // ---------- 4. 浇水（没有洒水器的地） ----------
   if (cfg.farm?.water && weather !== 1) {
@@ -717,7 +757,8 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       if (!p || R.sprinkled(s, i)) continue
       const st = R.cropStage(p, t)
       if (st.stage >= 0 && st.stage < 3 && p.w <= st.stage) {
-        if (push({ a: 'water', i })) watered++
+        // 浇水同样要 1 点体力，先补再浇（否则整夜一桶水都打不上）
+        if (ensureEnergy(R.WORLD.cost.water || 1) && push({ a: 'water', i })) watered++
       }
     }
     if (watered) summary.push(`浇水 ${watered} 块`)
@@ -774,7 +815,8 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     {
       const lo = cfg.energy?.reserveE ?? 600
       const hi = Math.max(lo + 1, cfg.energy?.reserveEnergy ?? 2500)
-      const stockE = foodChoices(R, s, prices).reduce((a, f) => a + f.n * f.restore, 0)
+      // 库存折算体力要用 full（整份），不是 restore（被当前缺口截断的）。
+      const stockE = foodChoices(R, s, prices).reduce((a, f) => a + f.n * (f.full ?? f.restore), 0)
       const ratio = Math.max(0, Math.min(1, 1 - (stockE - lo) / (hi - lo)))
       needTotal = Math.max(cfg.farm.foodPlots || 0, Math.ceil(needTotal * ratio))
     }
@@ -839,7 +881,8 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
         planner.add(pick.crop.id, mode)
         // 手动浇水的地：种下后立刻浇一次（旧版 waterAll(i)）。
         // 不浇的话要等下一轮巡视，白白少一次浇水——品质和成熟时间都跟着差。
-        if (mode === 'manual') push({ a: 'water', i })
+        // 种完那 2 点体力已经花掉了，这里要再补 1 点才浇得动（否则一直失败）。
+        if (mode === 'manual' && ensureEnergy(R.WORLD.cost.water || 1)) push({ a: 'water', i })
       })
       if (planted) {
         const parts = Object.entries(plantedNames).map(([n, k]) => `${n}×${k}`).join('、')
@@ -906,13 +949,28 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       let need = cfg.energy?.reserveE ?? 600
       for (const f of foodChoices(R, s, prices)) {
         if (need <= 0) break
-        const take = Math.min(f.n, Math.ceil(need / Math.max(1, f.restore)))
+        // 必须用 full 而不是 restore：restore 被「当前还能吃多少」截断，
+        // 体力一满就是 0，`Math.max(1, 0)` 会让 take=600，把库存全锁成口粮。
+        const per = Math.max(1, f.full ?? f.restore)
+        const take = Math.min(f.n, Math.ceil(need / per))
         ;(foodReserve[f.id] ||= [0, 0, 0])[f.q] = take
-        need -= take * f.restore
+        need -= take * per
       }
     }
     const freeQ = (id, q) => Math.max(0, haveQ(id, q) - (foodReserve[id]?.[q] || 0))
     const have = (id) => freeQ(id, 0) + freeQ(id, 1)
+    // 原料的机会成本要按「实际会扣掉哪个品质」算。
+    //
+    // 服务端扣料是从 q0 开始、用完再扣 q1（R:773 的 for q=0..2 + invTake），
+    // 而 we 只拿 q0/q1 做原料（金星留着卖，见 have()）。洒水器地 w=3 时
+    // 银星概率 0.44、普通只有 0.21 —— 也就是说池子里大半是银星，
+    // 旧版一律按 `prices[id]`（普通价）记账，加工利润被高估 15~20%。
+    const matPrice = (id) => {
+      const n0 = freeQ(id, 0), n1 = freeQ(id, 1), tot = n0 + n1
+      const p0 = prices[id] || 0
+      if (tot <= 0) return p0
+      return (n0 * p0 + n1 * p0 * (R.QUALITY?.[1] ?? 1.25)) / tot
+    }
     // 原料按现价算（今天就要消耗掉），产品按未来均价算（做好要囤到峰值才卖）
     const recipeById = new Map(R.RECIPES.map((r) => [r.id, r]))
     // expand：把配方展开成每件成品的「基础材料需求 + 工序数 + 工序顺序」。
@@ -931,7 +989,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
           for (const [bid, bk] of Object.entries(b.need)) need[bid] = (need[bid] || 0) + bk * k
           for (const st of b.plan) plan.push({ id: st.id, n: st.n * k })
         } else {
-          cost += (prices[id] || 0) * k
+          cost += matPrice(id) * k
           need[id] = (need[id] || 0) + k
         }
       }
@@ -976,8 +1034,10 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
         nStock = Math.max(0, Math.min(capByQuota, capByStock, capByRaw))
       }
       if (nStock > 0) {
+        // 中间品（金锭这类）都是 q0，按市价算机会成本即可；
+        // 原始原料按实际会扣的品质加权（见 matPrice）。
         const costNow = Object.entries(e.r.in)
-          .reduce((a, [id, k]) => a + (prices[id] || 0) * k, 0)
+          .reduce((a, [id, k]) => a + (craftable.has(id) ? (prices[id] || 0) : matPrice(id)) * k, 0)
         const marginNow = (expPrices[e.r.id] || prices[e.r.id] || e.r.price) - costNow
         // 中间品按市场价计机会成本后仍不赚钱 → 这批不做，额度让给下面自造的那批。
         if (marginNow > 0) {
@@ -1211,17 +1271,16 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 以前按「先吃到上限」建模，满体力时最多只能规划 160−keep 点体力，
     // 反而比旧贪心（边花边吃，能多干 2~3 件）做得少。
     const enNow = Math.floor(s.en)
-    // foodChoices 会把每份恢复量钳到「距离上限还差多少」，那是给「现在立刻吃」
-    // 用的。这里算的是整轮能榨出多少体力（边花边吃，吃的时候体力早降下来了），
-    // 所以用一个把 en 压到极低的探针状态，拿未截断的 restore。
-    //
-    // 补体力来源统一排序：口粮按份展开 + 冰美式。咖啡 250 D/点且能突破上限，
-    // 比多数口粮更便宜（番茄 ≈268 D/点），应该一起参与比较。
-    const probe = Object.create(s)
-    probe.en = -1e9
+    // 体力上限附近的口粮本来要先吃几口才腾得出空间，但整轮规划算的是
+    // 「边花边吃」能榨出多少体力——所以这里一律用未截断的 full。
+    // 以前靠 `Object.create(s); probe.en = -1e9` 来绕过截断，
+    // 现在 foodChoices 自带 full，不用再造假状态了。
     const src = []
-    for (const f of foodChoices(R, probe, prices)) {
-      for (let k = 0; k < f.n; k++) src.push({ restore: f.restore, unit: f.unit, act: { a: 'eat', id: f.id, q: f.q } })
+    for (const f of foodChoices(R, s, prices)) {
+      const per = f.full ?? f.restore
+      if (!(per > 0)) continue
+      const usable = Math.min(f.n, f.limit ?? f.n)
+      for (let k = 0; k < usable; k++) src.push({ restore: per, unit: f.unit, act: { a: 'eat', id: f.id, q: f.q } })
     }
     const coffee = R.WORLD.coffee || {}
     const coffeeLeft = Math.max(0, (R.WORLD.daily?.coffee || 0) - (s.cnt?.coffee || 0))
@@ -1438,9 +1497,11 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       let need = cfg.energy?.reserveE ?? 600
       for (const f of foodChoices(R, s, prices)) {
         if (need <= 0) break
-        const take = Math.min(f.n, Math.ceil(need / Math.max(1, f.restore)))
+        // 同 foodReserve：满体力时 restore=0，用 max(1, restore) 会把整仓锁死
+        const per = Math.max(1, f.full ?? f.restore)
+        const take = Math.min(f.n, Math.ceil(need / per))
         ;(foodKeep[f.id] ||= [0, 0, 0])[f.q] = take
-        need -= take * f.restore
+        need -= take * per
       }
     }
     const sellable = (id, q) => Math.max(0, R.b12Available(s, id, q) - (foodKeep[id]?.[q] || 0))
@@ -1477,9 +1538,14 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
         // 否则每天产量远大于全价额度，库存永远清不掉。
         const full = R.cropFullLeft(s, r.id)
         const sold = s.cnt?.['sc_' + r.id] || 0
-        const tier2 = Math.max(full, (R.CROP_TIERS?.[1]?.[0] ?? 450) - sold)
-        const over = totalOf(r.id) > (cfg.sell.tier2Above ?? 450)
-        n = Math.min(n, over ? Math.max(0, tier2) : (full > 0 ? full : 0))
+        const tier2 = Math.max(full, (R.CROP_TIERS?.[1]?.[0] ?? 400) - sold)
+        const over2 = totalOf(r.id) > (cfg.sell.tier2Above ?? 450)
+        // 第三档（70%）是最后的泄洪口。产量长期压过二档额度时库存只会越堆越多，
+        // 钱全压在货里 —— 卖掉 70% 也比烂在仓库强。
+        // 超过 tier3Above（约 2 天的二档量）就放开阶梯上限，让 allocateSale
+        // 自己权衡卖到第几档。旧版最高只放到二档边界，第三档一个都卖不出去。
+        const over3 = totalOf(r.id) > (cfg.sell.tier3Above ?? 900)
+        if (!over3) n = Math.min(n, over2 ? Math.max(0, tier2) : (full > 0 ? full : 0))
         if (n <= 0) continue
       }
       sells.push({ ...r, n })
@@ -1654,7 +1720,12 @@ export function planInvestments(R, s, prices, coins, cfg, t) {
         if (R.cropStage(p, t, R.sprinkled(s, i) || weather === 1).stage < 0) continue
         cp.add(p.c, cp.modeOf(i))
       }
-      const m = cp.pick(cfg.farm?.water ? 'manual' : 'none', false)
+      // 新地块可能已经在洒水器覆盖范围内（sprCover 覆盖的是「前 N 块」，R:17），
+      // 那样它是自动浇水，农务体力比手动地低得多。旧版一律按 manual 估，
+      // 洒水器等级越高，扩地回本被低估得越多（每块每茬少算 2~3 点浇水体力）。
+      const newMode = R.sprinkled(s, s.plotN) || weather === 1 ? 'auto'
+        : (cfg.farm?.water ? 'manual' : 'none')
+      const m = cp.pick(newMode, false)
       if (m && m.value > 0) add(`开垦第 ${s.plotN + 1} 块地`, { a: 'expand', k: 'plot' }, price, m.value)
     } catch { /* 算不出来就不投这项 */ }
   }

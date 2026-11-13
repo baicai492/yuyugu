@@ -239,15 +239,22 @@ export function cropArrivals(R, s, now, fc, { sellShare = 0.7 } = {}) {
     if (!cur || cur.stage < 0 || cur.stage >= 3) continue
     const first = cropMatureAt(R, p, now, sprinkled || rainy)
     if (!(first < Infinity)) continue
-    // w=3：我们每轮都会把能浇的浇满，收获时的浇水数就是 3
+    // w=3：每个生长阶段最多浇一次水（规则 `p.w > st.stage` 就拒，R:555），
+    // 3 个阶段最多 3 次；洒水器覆盖或雨天直接按 3 算（R:571 `const w = auto ? 3 : p.w`）。
+    // 我们每轮巡视都会把能浇的浇满，所以收获时 w 基本就是 3。
     const w = 3
-    const n = (1.3 + 0.08 * w) * sellShare
     const p2 = 0.05 + 0.1 * w, p1 = 0.2 + 0.08 * w
     const qAvg = p2 * 1.5 + p1 * 1.25 + (1 - p1 - p2)
     const cycles = crop.regrow && p.h + 1 < (crop.times || 1) ? (crop.times || 1) - (p.h + 1) : 0
     let at = first
     for (let c = 0; c <= cycles; c++) {
       if (!(at < Infinity)) break
+      // 被串门偷过就少收 1 个（R:578 的 `- (p.sv && p.sv.length ? 1 : 0)`）：
+      // 不管被偷几个都只扣 1，主人至少留 1 个。只影响**当前这一茬**——
+      // 复茬时服务端会重建 plot 对象，sv 就没了。
+      // 旧版完全没扣，正在长且已经被偷过的地，未来到货量一律偏高。
+      const skim = c === 0 && p.sv?.length ? 1 : 0
+      const n = Math.max(1, (1.3 + 0.08 * w) - skim) * sellShare
       const k = at > now ? bucketAt(at) : 0
       if (k >= 0) (out[p.c] ||= []).push({ k, at, n, qAvg })
       // 下一茬：收获后 w/g 归零重新长，时长按那天的天气重算
