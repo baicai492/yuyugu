@@ -13,10 +13,10 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, CAN_MAX, COST, EN_MAX, EN_REGEN, FIGHT_DAILY, FUSIONS,
+  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FIGHT_DAILY, FUSIONS,
   HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS,
   ROOT_GROW, STAGES, STORY_END, TECH_PRICE, TECHS,
-  act as xsAct, cvNeed, fuseKey, plotView, rootMult, tick as xsTick,
+  act as xsAct, canMax, cvNeed, fuseKey, medBonus, rootMult, tick as xsTick,
 } from './xian-rules.mjs'
 
 export {
@@ -170,6 +170,21 @@ function dpUsedToday(x, nowSec) {
   return x.dp?.d === d ? Number(x.dp.n || 0) : 0
 }
 
+/** 回灵丹回多少灵力：30，万毒经主修再加 10（xian-rules.mjs:108）。 */
+function huilingHeal(x) {
+  return 30 + (x?.tech === 'poison' ? 10 : 0)
+}
+
+/** 自然回 1 点灵力的间隔：御风诀主修快 25%（xian-rules.mjs:65）。 */
+function regenSec(x) {
+  return EN_REGEN * (x?.tech === 'wind' ? 0.75 : 1)
+}
+
+/** 一炉最多出几颗：q=2 时 3 颗，火主修良品以上再 +1（xian-rules.mjs:106）。 */
+function brewYieldMax(x) {
+  return 3 + (x?.tech === 'fire' ? 1 : 0)
+}
+
 /**
  * 该不该自动突破。
  * 药园 Lv5 之前优先把培元丹喂给药园（每颗 +40 药园经验），
@@ -216,14 +231,17 @@ function computeDesiredPeiyuanStock(x, nowSec, opts) {
 function computeAlchemyHerbTargets(x, nowSec, opts) {
   const usedDp = dpUsedToday(x, nowSec)
   const targetHuilingPills = (PILL_DAILY - usedDp) + PILL_DAILY
-  const haveHuiling = Number(x.pills?.huiling || 0) + (x.brew?.p === 'huiling' ? 3 : 0)
-  const huilingBatches = Math.min(2, Math.max(0, Math.ceil((targetHuilingPills - haveHuiling) / 3)))
+  // 炉里那炉要出几颗按「可能的最大值」估：q 要出炉才知道，
+  // 火主修下上品能出 4 颗，写死 3 会多炼一炉、白占一次 log 推进的额度。
+  const inBrew = brewYieldMax(x)
+  const haveHuiling = Number(x.pills?.huiling || 0) + (x.brew?.p === 'huiling' ? inBrew : 0)
+  const huilingBatches = Math.min(2, Math.max(0, Math.ceil((targetHuilingPills - haveHuiling) / inBrew)))
 
   const canGrowLinglan = (x.lv || 1) >= 2
   const desiredPeiyuan = computeDesiredPeiyuanStock(x, nowSec, opts)
-  const havePeiyuan = Number(x.pills?.peiyuan || 0) + (x.brew?.p === 'peiyuan' ? 3 : 0)
+  const havePeiyuan = Number(x.pills?.peiyuan || 0) + (x.brew?.p === 'peiyuan' ? inBrew : 0)
   const peiyuanBatches = canGrowLinglan
-    ? Math.min(2, Math.max(0, Math.ceil((desiredPeiyuan - havePeiyuan) / 3)))
+    ? Math.min(2, Math.max(0, Math.ceil((desiredPeiyuan - havePeiyuan) / inBrew)))
     : 0
 
   return {
@@ -296,12 +314,17 @@ function computeUpcomingPlotEnergyNeed(x, nowSec, horizonSec = 1800) {
     else if (p.c && p.g < 3 && !p.w) need += COST.water
     else if (p.s === 'soil' && !p.c) need += COST.plant + COST.water
     else if (p.c && p.g < 3 && p.w) {
-      const v = plotView(p, nowSec)
-      if (v.left <= horizonSec) need += p.g === 2 ? (COST.harvest + COST.plant + COST.water) : COST.water
+      // 木主修作物生长快 20%（xian-rules.mjs:67），和 tick 同口径；
+      // 直接信 plotView 的 left 会把「马上要长下一阶」估晚 20%。
+      const H = HERBS[p.c]
+      const grow = H.grow * (x.tech === 'wood' ? 0.8 : 1)
+      const left = Math.max(0, grow - (nowSec - Number(p.w || 0)))
+      if (left <= horizonSec) need += p.g === 2 ? (COST.harvest + COST.plant + COST.water) : COST.water
     }
   }
+  const regen = regenSec(x)
   const naturalRegenInHorizon = x.en < EN_MAX
-    ? Math.floor((Math.max(0, nowSec - Number(x.enAt || nowSec)) + horizonSec) / EN_REGEN)
+    ? Math.floor((Math.max(0, nowSec - Number(x.enAt || nowSec)) + horizonSec) / regen)
     : 0
   return Math.max(0, need - naturalRegenInHorizon)
 }
@@ -314,6 +337,39 @@ function hasBrewIngredients(x, pillId) {
   const P = PILLS[pillId]
   if (!P) return false
   return Object.entries(P.need).every(([h, n]) => Number(x.bag?.[h] || 0) >= n)
+}
+
+/**
+ * 当天该主修哪一部（TECH_BUFF 见 xian-rules.mjs:45-46）。
+ *
+ * 只按「当前瓶颈」挑一个，不做长线最优——主修每天都能换，错的代价就是一天。
+ * 优先级：
+ *   1) 正缺丹药 → 火（炉炉多 1 颗）/ 毒（培元喂园 +50% 且回灵丹多 10 点）
+ *   2) 灵力长期是负数 → 风（回复快 25%）
+ *   3) 其他情况 → 冰（打坐 +20% 修为，药园满级后修为全靠打坐）
+ */
+function pickMainTech(x, nowSec, opts) {
+  const owned = Array.isArray(x.techs) ? x.techs.filter((el) => TECHS[el]) : []
+  if (!owned.length) return null
+  const has = (el) => owned.includes(el)
+  // 只看「马上就能起炉」的情形：单纯缺药材时换火没有意义（火只影响出炉那一瞬），
+  // 那样会让主修永远锁在火上，冰/风的机会一次都轮不到。
+  const { huilingBatches, peiyuanBatches } = computeAlchemyHerbTargets(x, nowSec, opts)
+  const brewReady = (huilingBatches > 0 && hasBrewIngredients(x, 'huiling')) ||
+    (peiyuanBatches > 0 && hasBrewIngredients(x, 'peiyuan'))
+  if (brewReady) {
+    if (has('fire')) return 'fire'
+    if (has('poison')) return 'poison'
+  }
+  if (has('wind') && computeSurplusEnergy(x, nowSec) < 0) return 'wind'
+  if (has('ice')) return 'ice'
+  if (has('wood') && (x.lv || 1) < 5) return 'wood'
+  // 兜底：保持旧行为（按优先级取第一部），避免每次巡视都换一次把机会用掉
+  return [...owned].sort((a, b) => {
+    const ia = VARIANT_TECH_PRIORITY.indexOf(a)
+    const ib = VARIANT_TECH_PRIORITY.indexOf(b)
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)
+  })[0]
 }
 
 function findLearnableTech(x) {
@@ -342,8 +398,10 @@ function shouldEatHuilingNow(x, nowSec, pendingEnergyNeed = 0) {
   if (dpUsedToday(x, nowSec) >= PILL_DAILY) return false
   const en = Number(x.en || 0)
   if (en >= EN_MAX) return false
-  // en <= 69 时吃不会溢出（+30 ≤ 99），也不打乱 enAt 的自然回复计时
-  if (en <= EN_MAX - 31 && (en < pendingEnergyNeed || cstSecondsUntilMidnight(nowSec) <= 4 * 3600)) return true
+  // 回灵丹回 30 点，万毒经主修再加 10（xian-rules.mjs:108）。以前写死 31，
+  // 毒主修下会把「en=60、吃满不溢出」这种稳赚的场合判成溢出而跳过。
+  const heal = huilingHeal(x)
+  if (en <= EN_MAX - heal - 1 && (en < pendingEnergyNeed || cstSecondsUntilMidnight(nowSec) <= 4 * 3600)) return true
   // 临近午夜：每日 3 颗的额度不用掉就作废，能补就补
   if (cstSecondsUntilMidnight(nowSec) <= 1500 && en <= EN_MAX - 10) return true
   return false
@@ -353,7 +411,10 @@ function projectMeditationAfterRise(x, nowSec) {
   if (!x.med) return null
   const d = Math.min(Math.max(0, nowSec - Number(x.med.t || nowSec)), MED_MAX)
   if (d < MED_MIN) return { d, gainCv: 0, s: x.cv.s, xp: x.cv.xp }
-  const gainCv = Math.floor((d / 60) * 10 * rootMult(x))
+  // 和规则原文（xian-rules.mjs:95）逐字一致：冰主修 ×1.2、medBonus（心境与师父/道侣）。
+  // 漏掉这两项会低估 1.2~1.83 倍，导致「这次收功刚好能满」判不出来，
+  // 白白多打坐一整个 1800 秒周期才突破。
+  const gainCv = Math.floor((d / 60) * 10 * rootMult(x) * (x.tech === 'ice' ? 1.2 : 1) * medBonus(x))
   let s = Number(x.cv?.s || 1)
   let xp = Number(x.cv?.xp || 0) + gainCv
   const r = Number(x.cv?.r || 0)
@@ -460,7 +521,8 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
       const techToLearn = findLearnableTech(sim)
       if (techToLearn) { if (emit({ a: 'learn', el: techToLearn })) continue }
 
-      if (sim.can < CAN_MAX) { if (emit({ a: 'refill' })) continue }
+      // 水壶上限随主修变：水主修 canMax=30，写死 CAN_MAX 会永远停在 20 就往返打水。
+      if (sim.can < canMax(sim)) { if (emit({ a: 'refill' })) continue }
       break
     }
   }
@@ -612,13 +674,13 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     if (!techEl) break
     if (!emit({ a: 'learn', el: techEl })) break
   }
-  if (!sim.tech && Array.isArray(sim.techs) && sim.techs.length > 0 && actions.length < opts.maxActionsPerBatch) {
-    const preferred = [...sim.techs].sort((a, b) => {
-      const ia = VARIANT_TECH_PRIORITY.indexOf(a)
-      const ib = VARIANT_TECH_PRIORITY.indexOf(b)
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)
-    })[0]
-    emit({ a: 'equip', el: preferred })
+  // 主修功法的日常加成（TECH_BUFF）只有「主修那一部」生效，而且每天只能换一次
+  // （xian-rules.mjs:112，x.te 记当日）。旧版只在 sim.tech 为空时 equip 一次，
+  // 学会第一部之后就永久锁死——后面学到的火/冰/毒全成了摆设。
+  // 这里按当前瓶颈每天挑一次；同一天内 sim.te === today，规则会拒绝，所以只在跨日时发。
+  if (Array.isArray(sim.techs) && sim.techs.length > 0 && actions.length < opts.maxActionsPerBatch) {
+    const want = pickMainTech(sim, t, opts)
+    if (want && want !== sim.tech && xsDay(t) !== sim.te) emit({ a: 'equip', el: want })
   }
 
   // 11. 收尾：突破 → 打坐 → 融合
@@ -716,7 +778,9 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
   for (const p of sim.plots || []) {
     if (!p) continue
     if (p.c && p.g < 3 && p.w) {
-      const stageAt = Number(p.w) + HERBS[p.c].grow + 1
+      // 木主修作物生长快 20%（xian-rules.mjs:67），漏乘会每次晚醒 20% 的生长时间。
+      const grow = HERBS[p.c].grow * (sim.tech === 'wood' ? 0.8 : 1)
+      const stageAt = Number(p.w) + grow + 1
       if (stageAt > t) cands.push(stageAt)
     } else if ((p.c && p.g >= 3) || (p.c && p.g < 3 && !p.w)) {
       waitingOnPlotEnergy = true
@@ -727,12 +791,13 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
 
   if (sim.en < EN_MAX) {
     const enBase = Number(sim.enAt || t)
+    const rg = regenSec(sim)
     if (waitingOnPlotEnergy) {
-      const nextTick = enBase + EN_REGEN + 1
-      cands.push(nextTick > t ? nextTick : t + EN_REGEN)
+      const nextTick = enBase + rg + 1
+      cands.push(nextTick > t ? nextTick : t + rg)
     }
     const to88 = Math.max(1, 88 - Number(sim.en || 0))
-    const nearCapAt = enBase + to88 * EN_REGEN + 1
+    const nearCapAt = enBase + to88 * rg + 1
     if (nearCapAt > t) cands.push(nearCapAt)
   }
 
@@ -883,7 +948,8 @@ export function xianSnapshot(world, cfg = {}) {
     energy: Math.floor(Number(sim.en || 0)),
     energyMax: EN_MAX,
     can: Number(sim.can || 0),
-    canMax: CAN_MAX,
+    // 水主修是 30（xian-rules.mjs:51）。显示成 20 会让 GUI 出现 30/20 这种读数。
+    canMax: canMax(sim),
     stone: Number(sim.stone || 0),
     gardenLv: Number(sim.lv || 1),
     gardenXp: Number(sim.xp || 0),

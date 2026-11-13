@@ -218,7 +218,10 @@ export const DEFAULTS = {
     gomokuJitter: 0.5,           // 路线随机扰动幅度
     gomokuMaxGames: 10,          // 每天前 10 局计奖
     practice: false,             // 计奖局用完后是否继续打练习局（无奖励）
-    rps: false, card: false, box: false,   // 期望中性，默认不打
+    // 规则里 pay() 只在胜利时发奖、输和平零成本（平局不计次），
+    // 所以这些小游戏是纯白拿：抽牌 2,730 D/次、石头剪刀布 2,705 D/次。
+    // 五子棋打完前 10 局后，剩下的额度默认全用来抽牌（平局率最低、请求最少）。
+    rps: false, card: true, box: false,
   },
 
   // 擂台

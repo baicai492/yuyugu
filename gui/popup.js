@@ -524,12 +524,18 @@ const FIELD_GROUPS = [
     hints: { 'cargo.minMargin': '预期能加价多少才买（0.08 = 8%）' },
   },
   {
-    title: '52弟 · 五子棋',
-    fields: ['npc.enabled', 'npc.gomoku', 'npc.gomokuLevel', 'npc.gomokuBudgetMs'],
-    labels: { 'npc.enabled': '启用 52弟', 'npc.gomoku': '打五子棋', 'npc.gomokuLevel': '难度档位', 'npc.gomokuBudgetMs': '每局思考上限' },
+    title: '52弟',
+    fields: ['npc.enabled', 'npc.gomoku', 'npc.gomokuLevel', 'npc.gomokuBudgetMs', 'npc.card', 'npc.rps', 'npc.box'],
+    labels: {
+      'npc.enabled': '启用 52弟', 'npc.gomoku': '打五子棋', 'npc.gomokuLevel': '难度档位',
+      'npc.gomokuBudgetMs': '每局思考上限', 'npc.card': '剩余额度抽牌', 'npc.rps': '剩余额度猜拳', 'npc.box': '剩余额度盲盒',
+    },
     hints: {
       'npc.gomokuLevel': '1 简单×0.8 / 2 普通×1.2 / 3 困难×1.5',
       'npc.gomokuBudgetMs': '超过这个时间还没搜到必胜棋谱就跳过重开（毫秒）',
+      'npc.card': '五子棋打完 10 局计奖后，剩下的额度用来抽牌（每次约 2,730 D，零成本）',
+      'npc.rps': '抽牌未开时才会用；胜率 33%，每次计次约 2,705 D',
+      'npc.box': '3 个请求一局，效率最低，默认关',
     },
   },
   {

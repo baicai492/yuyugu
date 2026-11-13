@@ -205,9 +205,13 @@ export function nextRipe(R, world, cfg = {}) {
  * 落在里面的话，成熟后没人收，超过保护期就被偷（被偷过的地每次只收 1 个）。
  * 返回 true 表示「该换一种成熟更快/更慢的作物」。只在离线时段开启时检查。
  */
-export function ripensWhileOffline(cfg, now, growSec, regrow = 0) {
+export function ripensWhileOffline(cfg, now, growSec, regrow = 0, auto = false) {
   if (!cfg.offline?.enabled) return false
-  const ripeAt = now + (regrow || growSec) * 60
+  // 首茬用 grow，不是 regrow；岛日时代新种的一律 ×0.8（R:477 的 fast 系数），
+  // 洒水器/雨天再 ×0.6（R:478）。旧版这里拿 regrow 当首茬时间、又漏了 0.8，
+  // 复茬作物会低估 6%、单茬作物会高估 25%，避让判断跟着偏。
+  const total = (growSec || 0) * 60 * 0.8 * (auto ? 0.6 : 1)
+  const ripeAt = now + total
   return !!offlineWindow(cfg, ripeAt + 60)
 }
 
@@ -772,7 +776,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
           : planner.pick(mode, wantFood)
         if (!pick || (!wantFood && !(pick.value > 0))) return
         // 离线时段避让：成熟时刻落在没人收菜的时段里就会被偷，换一种或干脆空着
-        if (!wantFood && cfg.offline?.enabled && ripensWhileOffline(cfg, t, pick.crop.grow, pick.crop.regrow)) {
+        if (!wantFood && cfg.offline?.enabled && ripensWhileOffline(cfg, t, pick.crop.grow, pick.crop.regrow, mode === 'auto')) {
           const alt = planner.pick(mode, false)
           if (!alt || alt.crop.id === pick.crop.id) { skippedOffline++; return }
           pick = alt

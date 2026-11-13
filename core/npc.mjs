@@ -105,31 +105,86 @@ export async function playGomoku(world, cfg, log = () => {}) {
   return { games, wins, coins, items, fails }
 }
 
-/** 其他小游戏（期望中性，默认不打） */
+/**
+ * 其他小游戏（剪刀石头布 / 抽牌 / 盲盒）。
+ *
+ * 旧注释写「期望中性，默认不打」——这是错的。规则原文 `pay()`（R:795）只在
+ * `res==='win'` 时发奖，**输和平都不扣任何东西**（平局连次数都不消耗），
+ * 所以每次「计次」的期望 = 胜率 × 单胜奖励，是纯粹的白拿：
+ *   - 抽牌胜率 46.8%，每次计次约 2,730 D
+ *   - 石头剪刀布胜率 33.2%，每次计次约 2,705 D
+ * （2026-11-13 用线上规则 400×200 局实测。）
+ *
+ * 五子棋前 10 局有 1.5 倍率且近全胜，所以先打五子棋；剩下约 42 次额度
+ * 全部拿来抽牌，一天多 10 万 D 上下，零体力零成本。
+ */
 export async function playOther(world, cfg, log = () => {}) {
   const R = world.R
-  const games = []
-  if (cfg.npc?.rps) games.push('rps')
-  if (cfg.npc?.card) games.push('card')
-  if (cfg.npc?.box) games.push('box')
-  if (!games.length) return { games: 0 }
+  // 抽牌平局率最低（1/13），同样的额度需要最少的请求次数，所以优先。
+  const order = ['card', 'rps', 'box'].filter((g) => cfg.npc?.[g])
+  if (!order.length) return { games: 0, wins: 0, coins: 0, items: {} }
 
-  const day = R.worldDay(world.now)
-  const s = world.state
-  const used = (s.enDay === day ? (s.cnt?.npc || 0) : 0)
-  const left = Math.max(0, R.NPC.daily - used)
-  let n = 0
-  for (let k = 0; k < left; k++) {
-    const g = games[k % games.length]
-    const action = g === 'box' ? { a: 'npc', g, k: 'start' } : { a: 'npc', g }
-    if (g === 'rps') action.m = Math.floor(Math.random() * 3)
-    try {
-      const j = await world.act([action], { silent: true })
-      const o = j.out?.[0]
-      if (!o?.ok) break
-      n++
-    } catch { break }
+  const dayOf = () => R.worldDay(world.now)
+  const leftOf = () => {
+    const s = world.state
+    const used = (s.enDay === dayOf() ? (s.cnt?.npc || 0) : 0)
+    return Math.max(0, R.NPC.daily - used)
   }
-  if (n) log(`其他小游戏 ${n} 局`)
-  return { games: n }
+
+  let attempts = 0, wins = 0, coins = 0
+  const items = {}
+  const tally = (o) => {
+    if (!o) return
+    attempts++
+    if (o.res !== 'win') return
+    wins++
+    coins += o.earn || 0
+    for (const g of o.got || []) {
+      const name = R.ITEM_NAME[g.id] || g.id
+      items[name] = (items[name] || 0) + g.n
+    }
+  }
+
+  const g = order[0]
+  if (g === 'box') {
+    // 盲盒必须 start → 3 次 pick，且 pick 不能选系统已移除的盒子，
+    // 只能一步一步读回包（3 个请求一局，所以默认不开）。
+    for (let guard = 0; guard < 60 && leftOf() > 0; guard++) {
+      let o = (await world.act([{ a: 'npc', g: 'box', k: 'start' }], { silent: true }))?.out?.[0]
+      if (!o?.ok) break
+      let ok = true
+      for (let pick = 0; pick < 3; pick++) {
+        const pk = o.box?.pk || [], left = o.box?.left || []
+        const i = [0, 1, 2, 3, 4, 5, 6, 7, 8].find((x) => !pk.includes(x) && left.length > 0)
+        if (i == null) { ok = false; break }
+        o = (await world.act([{ a: 'npc', g: 'box', i }], { silent: true }))?.out?.[0]
+        if (!o?.ok) { ok = false; break }
+      }
+      if (!ok) break
+      tally(o)
+    }
+  } else {
+    // 抽牌 / 石头剪刀布：每次互相独立，可以整批提交（服务端按顺序各自取随机数）。
+    for (let guard = 0; guard < 20; guard++) {
+      const before = leftOf()
+      if (before <= 0) break
+      const acts = []
+      for (let i = 0; i < Math.min(before, R.WORLD.maxActions); i++) {
+        acts.push(g === 'rps'
+          ? { a: 'npc', g, m: Math.floor(Math.random() * 3) }
+          : { a: 'npc', g })
+      }
+      const outs = (await world.act(acts, { silent: true }))?.out || []
+      for (const o of outs) tally(o)
+      if (!outs.length || leftOf() >= before) break
+    }
+  }
+
+  if (attempts) {
+    const itemStr = Object.entries(items).map(([k, n]) => `${k}×${n}`).join('  ')
+    const name = g === 'card' ? '抽牌' : g === 'rps' ? '石头剪刀布' : '盲盒'
+    log(`52弟${name} ${wins}/${attempts} 胜｜奖励 +${Math.round(coins).toLocaleString('en-US')} D` +
+      (itemStr ? `｜掉落 ${itemStr}` : ''))
+  }
+  return { games: attempts, wins, coins, items }
 }

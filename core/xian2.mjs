@@ -14,7 +14,7 @@
 // 也绝不给 rgo 传 n=1（那会进入手动斗法并写 xsFight）。
 
 import * as A from './xian-rules.mjs'
-import { toWireXsAction, xsDay } from './xian.mjs'
+import { assertSafeXianBatch, toWireXsAction, xsDay } from './xian.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -50,6 +50,12 @@ function bagValue(x) {
   for (const [id, n] of Object.entries(x.bag || {})) v += n * VAL.herb
   for (const [id, n] of Object.entries(x.mat || {})) v += n * VAL.mat
   for (const [id, n] of Object.entries(x.seeds || {})) v += n * VAL.seed
+  // 好感和关系也是资产（和 effectValue 同一口径：好感 2/点、关系 20/层）。
+  // 往事的选项常常只给 fav/rel 不给物资，不折进来就会一律判成「没收益」而永远不选，
+  // 章节推进跟着卡死。
+  for (const row of Object.values(x.npc || {})) {
+    v += Number(row?.[0] || 0) * VAL.fav + Number(row?.[1] || 0) * 20
+  }
   return v
 }
 
@@ -86,7 +92,10 @@ function chooseLoadout(x, opts) {
     const area = Object.keys(A.AREAS).filter((k) => (x.cv?.r || 0) >= A.AREAS[k].need).pop()
     if (area) {
       const a = A.AREAS[area]
-      opps.push(A.mobFighter(area, 'elite', 1.4, 777))
+      // MOBS 里根本没有 'elite' 这个键（AREAS 只维护普通怪和 boss），
+      // 以前写 mobFighter(area, 'elite', …) 会抛 TypeError，而它和 boss 取样
+      // 在同一个 try 里，连 boss 样本一起被吞掉——配招搜索等于从来没见过的秘境敌人。
+      opps.push(A.mobFighter(area, a.mobs[0], 1.4, 777))
       opps.push(A.mobFighter(area, a.boss, 1.7, 778))
     }
   } catch { /* 拿不到样本就用空集 */ }
@@ -225,6 +234,11 @@ export function planXian2Actions(world, now, opts = {}) {
   const raw = world?.state?.xs
   if (!raw) return { actions: [], reason: 'no-xs-state' }
   const t = Math.floor(now || world.now || 0)
+  // 有人在网页端斗法（xsFight 落盘后 30 分钟内）：1.0 的 planXianActions 有这道闸，
+  // 2.0 以前漏了——会一边有人在打弹幕，一边自动拉秘境/对战把状态搅乱。
+  if (raw.fight && t - Number(raw.fight.t || 0) < 1800) {
+    return { actions: [], reason: 'manual-fight-in-progress' }
+  }
   const sim = structuredClone(raw)
   try { A.tick(sim, t) } catch { }
   const d = xsDay(t)
@@ -348,12 +362,15 @@ export function planXian2Actions(world, now, opts = {}) {
   {
     let n = sim.df?.d === d ? (sim.df.n || 0) : 0
     const wonToday = sim.dd?.d === d ? (sim.dd.w || []) : []
-    const cands = Object.entries(A.NPC_FIGHT)
+    const all = Object.entries(A.NPC_FIGHT)
       .map(([id]) => ({ id, f: A.npcFighter(id) }))
-      .filter((c) => c.f && !wonToday.includes(c.id))
-    // 先打「今天还没赢过」的：第一胜给灵石
-    cands.sort((p, q) => p.f.hp - q.f.hp)
-    for (const c of cands) {
+      .filter((c) => c.f)
+      // 先打「今天还没赢过」的：第一胜给灵石。
+      // 赢过的不是没收益：规则里再赢一次仍然 +3 好感、+1 功法熟练
+      //（熟练推进 techLayer，层数直接加战力），所以次数没用完就继续打——
+      // 旧版把已胜的永久排除，8 场额度通常只用到 3~4 场。
+      .sort((p, q) => (wonToday.includes(p.id) ? 1 : 0) - (wonToday.includes(q.id) ? 1 : 0) || p.f.hp - q.f.hp)
+    for (const c of all) {
       if (n >= A.FIGHT_DAILY) break
       if (acts.length >= maxN) break
       if ((sim.en || 0) < 10) break
@@ -395,8 +412,10 @@ export function planXian2Actions(world, now, opts = {}) {
         })
         if (best && best.v > -5) emit({ a: 'evpick', i: best.i })
       }
-    } else if ((ev?.d !== d || (ev?.n || 0) < A.EV_DAILY) && t - (ev?.last || 0) >= A.EV_GAP && acts.length < maxN) {
-      // 服务端随机，抽到什么只能等回执；本地按固定 rand 预演只为推进 x.log
+    } else if ((ev?.d !== d || (ev?.n || 0) < A.EV_DAILY) && t - (ev?.d === d ? (ev.last || 0) : 0) >= A.EV_GAP && acts.length < maxN) {
+      // 服务端随机，抽到什么只能等回执；本地按固定 rand 预演只为推进 x.log。
+      // last 按自然日归零：规则里跨日会把 ev 整个重置成 {d,n:0,last:0,cur:null}
+      // （xian-rules.mjs:212），拿昨天的 last 会让「刚过 0 点」白等一个冷却。
       emit({ a: 'evroll' })
     }
   }
@@ -426,14 +445,22 @@ export function nextXian2WakeSec(world, now) {
     const left = x.rd?.d === d ? A.RLM_DAILY - (x.rd.n || 0) : A.RLM_DAILY
     if (left > 0) {
       const need = Math.max(0, A.RLM_EN - (x.en || 0))
-      cands.push(t + (need > 0 ? need * A.EN_REGEN : 20))
+      // 灵力是「每隔 RG 秒 +1」，起点是 enAt（上次结算时刻），不是 now。
+      // 写成 t + need*RG 会把已经走了的那半格丢掉，每次都晚醒半格到一格。
+      if (need > 0) {
+        const rg = A.EN_REGEN * (x.tech === 'wind' ? 0.75 : 1)
+        const at = Number(x.enAt || t) + need * rg
+        cands.push(at > t ? at : t + 20)
+      } else cands.push(t + 20)
     }
   }
 
   // 斗法：今天还有名额且灵力不够时，等灵力回到 10
   const duels = x.df?.d === d ? (x.df.n || 0) : 0
   if (duels < A.FIGHT_DAILY && (x.en || 0) < A.FIGHT_COST) {
-    cands.push(t + (A.FIGHT_COST - (x.en || 0)) * A.EN_REGEN)
+    const rg = A.EN_REGEN * (x.tech === 'wind' ? 0.75 : 1)
+    const at = Number(x.enAt || t) + (A.FIGHT_COST - (x.en || 0)) * rg
+    cands.push(at > t ? at : t + 20)
   }
 
   const next = cands.length ? Math.min(...cands) : Infinity
@@ -474,10 +501,18 @@ export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
   let total = 0
   let plan = first
   let okNames = []
+  // 提交前过一遍和 1.0 同一道闸：禁手动斗法、只许 xs*、长度不超限、融合/突破的开关。
+  // 2.0 的动作来源多（束搜索 + 逐个 emit），加一道独立校验比信任上游便宜得多。
+  const guard = {
+    maxActionsPerBatch: opts.maxActionsPerBatch,
+    autoFuse: Boolean(xc.autoFuse),
+    breakMode: xc.breakMode || 'smart',
+  }
   for (let i = 0; i < maxBatches; i++) {
     if (!plan.actions.length) break
     let res
     try {
+      assertSafeXianBatch(plan.actions, guard)
       res = await world.act(plan.actions, { silent: true })
     } catch (e) {
       log(`修仙2.0提交被拒：${e.message}`, 'warn')

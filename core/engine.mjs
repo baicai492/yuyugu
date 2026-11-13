@@ -593,7 +593,9 @@ export class Engine {
         }
         if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) {
           this.setStep('52弟 · 小游戏')
-          await playOther(w, cfg, this.log.bind(this))
+          const r = await playOther(w, cfg, this.log.bind(this))
+          totalEarn += r.coins || 0
+          this.credit(r.coins || 0)
         }
       } catch (e) { this.log('52弟出错：' + e.message, 'err') }
     }
