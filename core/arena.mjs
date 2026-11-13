@@ -11,6 +11,8 @@ import {
   scoreGearItem,
   executeWithTacticalLoadout,
   recordBattleSnapshot,
+  noteBattleOutcome,
+  battleOutcomeOf,
   syncHomeHistoryProfiles,
   syncGuardLogProfiles,
   defaultProfileStorePath,
@@ -268,6 +270,7 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
   let battles = 0
   let wins = 0
   let losses = 0
+  let draws = 0
   // 打对手，直到拿满当天掉落场次
   const today = gear.daily?.battles ?? 0
   // 分成几批打（旧版 perVisit）：一次打 30 场要 4 分钟，期间不能巡检/偷菜。
@@ -342,11 +345,27 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
         if (r.battle) {
           battles++
           // 服务端战报里带胜负，统计一下胜率
-          const wr = r.battle.win ?? r.battle.result === 'win' ?? r.battle.winner === 'me'
-          if (wr === true) wins++
-          else if (wr === false) losses++
+          const outcome = battleOutcomeOf(r.battle)
+          if (outcome === 'win') wins++
+          else if (outcome === 'lose') losses++
+          else if (outcome === 'draw') draws++
           // 战报就是对手档案的直接来源：双方的面板、技能、装备都在里面。
           try { recordBattleSnapshot(r.battle, 'arena', { storePath }) } catch {}
+          // 真实战绩按 mode=arena 记一笔，并附上赛前模拟的三率。
+          // 榜一也不因此改变选对手策略，只用于复盘「模拟是否偏乐观」，
+          // 以及给以后的后验混合提供样本。
+          if (outcome) {
+            try {
+              noteBattleOutcome(o.id, outcome, {
+                mode: 'arena',
+                storePath,
+                predicted: Number.isFinite(decision?.winRate)
+                  ? { winRate: decision.winRate, drawRate: Math.max(0, 1 - decision.winRate - (decision.lossRate || 0)), lossRate: decision.lossRate || 0 }
+                  : null,
+                atSec: world.now,
+              })
+            } catch {}
+          }
         }
         if (r.gear) gear = r.gear
         onBattle?.(battles, need)
@@ -358,8 +377,9 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
       if (k < need - 1) await sleep(8500)
     }
     if (battles) {
+      const decided = wins + losses
       log(`擂台打 ${battles} 场（本次 ${need} 场）` +
-        (wins + losses ? `｜胜 ${wins} 负 ${losses}（胜率 ${Math.round(wins / (wins + losses) * 100)}%）` : ''))
+        (decided ? `｜胜 ${wins} 负 ${losses}${draws ? ` 平 ${draws}` : ''}（胜率 ${Math.round(wins / decided * 100)}%）` : ''))
     }
   }
 

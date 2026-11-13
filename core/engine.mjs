@@ -65,10 +65,26 @@ export class Engine {
     // 不持久化的话每次重启都会退化成「假设没人卖」——峰值被高估，
     // 货就全部压着不卖（线上重启后 20 种货全部 sellNow=false 就是这个原因）。
     if (st.externalSold && typeof st.externalSold === 'object') this.externalSoldRatio = st.externalSold
-    // 打输过的岛：一小时之内不再去，重启后也该继续记着
-    if (st.stealLoseAt && typeof st.stealLoseAt === 'object') this.memo.stealLoseAt = st.stealLoseAt
-    // 负期望的守家岛：模拟出来打不过就冷 10 分钟，不必每次重启都重算重跑
-    if (st.stealBlockAt && typeof st.stealBlockAt === 'object') this.memo.stealBlockAt = st.stealBlockAt
+    // 偷菜守家线的按岛状态（打输计数 / 冷却 / 待补守家日志 / 负期望封禁）。
+    // 旧版是两个平行的 map（stealLoseAt / stealBlockAt），这里做一次性迁移。
+    if (st.stealState && typeof st.stealState === 'object') {
+      this.memo.stealState = st.stealState
+    } else {
+      const legacy = {}
+      const now = Math.floor(Date.now() / 1000)
+      for (const [id, at] of Object.entries(st.stealLoseAt || {})) {
+        legacy[id] = { lossCount: 1, lastLossAt: Number(at) || 0, needSync: false, cooldownUntil: 0, blockedUntil: 0, blockedReason: '' }
+      }
+      for (const [id, at] of Object.entries(st.stealBlockAt || {})) {
+        const s = legacy[id] || { lossCount: 0, lastLossAt: 0, needSync: false, cooldownUntil: 0, blockedUntil: 0, blockedReason: '' }
+        // 旧记录存的是「封禁开始的时刻」，按默认 10 分钟折算成结束时刻。
+        s.blockedUntil = Math.max(s.blockedUntil || 0, (Number(at) || 0) + (this.cfg?.battle?.guardBlockSec ?? 600))
+        s.blockedReason = 'legacy-negative-ev'
+        legacy[id] = s
+        if (s.blockedUntil < now) delete legacy[id]
+      }
+      if (Object.keys(legacy).length) this.memo.stealState = legacy
+    }
     // 资产曲线（从 ledger.csv 恢复，GUI 的走势图不会因为重启断掉）
     try { this.history = readLedger(this.logDir, 240) } catch {}
     // 今日累计收支：只恢复「收支累计」，不恢复 day/起点——
@@ -118,10 +134,8 @@ export class Engine {
         arenaCost: this.memo.arenaCost || 0,
         // 全站销量学习值：重启后立刻能继续按真实供需估峰值，不会退化成「没人卖」
         externalSold: this.externalSoldRatio || {},
-        // 打输过的岛（id → 时刻），一小时内不再去
-        stealLoseAt: this.memo.stealLoseAt || {},
-        // 负期望的守家岛（id → 时刻），冷却时间见 battle.guardBlockSec
-        stealBlockAt: this.memo.stealBlockAt || {},
+        // 偷菜守家线的按岛状态（打输计数/冷却/待补日志/负期望封禁）
+        stealState: this.memo.stealState || {},
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)

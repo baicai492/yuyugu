@@ -234,6 +234,15 @@ export const DEFAULTS = {
     minGain: 0.005,              // 换装至少提高 0.5% 期望效用
     zThreshold: 2.0,             // 且配对检验 z > 2（避免为噪音换装）
     guardBlockSec: 600,          // 打输/负期望后多久不再碰这座岛（秒）
+    // 打输后先只冷几秒：等新战报进档案、重算一次 EV，仍为负才升级成 guardBlockSec。
+    // 以前是「打输就封 10 分钟」，但对手可能刚换了装、我们也可能刚变强，
+    // 无条件封禁会错过很快就能打赢的岛（榜一 lose 分支也是先重算再决定）。
+    lossCooldownSec: 5,
+    drawCooldownSec: 4,          // 打平后的冷却（没有收益也没有罚款，代价低）
+    // 真实战绩（w/d/l）在守家后验里的分量，单位「场」：后验 =
+    // (模拟 × recordPrior + 真实战绩) / (recordPrior + n)。
+    // 模拟规则不可能完全复刻服务端，打几场就能校准；设 0 可关掉混合。
+    recordPrior: 4,
     gearCacheSec: 600,           // 装备页缓存（秒）
     homeHpMult: 1.1,             // 守家方 HP 加成（arena 快照回退到 guard 时补乘）
   },

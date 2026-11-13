@@ -206,5 +206,41 @@ console.log('\n[6] 重启后的「今日」口径')
   }
 }
 
+console.log('\n[7] 守家战绩与后验混合')
+{
+  const {
+    noteBattleOutcome, getBattleRecord, blendBattleRecord, battleOutcomeOf,
+  } = await import('../core/battle.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'yuyugu-rec-'))
+  const storePath = join(dir, 'profiles.json')
+  try {
+    ok('战报胜负解析：win', battleOutcomeOf({ win: true }) === 'win')
+    ok('战报胜负解析：result=lose', battleOutcomeOf({ result: 'lose' }) === 'lose')
+    ok('战报胜负解析：winner=me', battleOutcomeOf({ winner: 'me' }) === 'win')
+    ok('战报胜负解析：无法判断', battleOutcomeOf({}) === null)
+
+    noteBattleOutcome(9001, 'lose', { mode: 'guard', storePath, predicted: { winRate: 0.7, lossRate: 0.2 } })
+    noteBattleOutcome(9001, 'win', { mode: 'guard', storePath })
+    noteBattleOutcome(9001, 'lose', { mode: 'guard', storePath })
+    const rec = getBattleRecord(9001, 'guard', { storePath })
+    ok('按 mode 记录 w/d/l', rec?.w === 1 && rec?.d === 0 && rec?.l === 2, `w${rec?.w} d${rec?.d} l${rec?.l}`)
+    ok('保存赛前预测', rec?.pred?.win === 0.7 && rec?.pred?.loss === 0.2)
+    ok('另一模式互不干扰', getBattleRecord(9001, 'arena', { storePath }) === null)
+
+    // 模拟 80% 胜、10% 平、10% 负；真实 1 胜 2 负；prior=4
+    // 期望：win=(0.8×4+1)/7≈0.6，loss=(0.1×4+2)/7≈0.343，draw=0.4/7≈0.057
+    const blended = blendBattleRecord(
+      { winRateMid: 0.8, lossRateMid: 0.1, drawRate: 0.1 },
+      rec, { prior: 4 },
+    )
+    ok('混合后胜率被经验拉低', blended.winRateMid > 0.59 && blended.winRateMid < 0.61,
+      blended.winRateMid.toFixed(3))
+    ok('混合后三率归一', Math.abs(blended.winRateMid + blended.lossRateMid + blended.drawRate - 1) < 1e-9)
+    ok('保留原始模拟值', blended.simulatedWinRateMid === 0.8)
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)

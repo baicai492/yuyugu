@@ -561,11 +561,26 @@ ev = (1−发现率) × 货值
    − 体力 × 体力机会成本
 ```
 
-- 有对手档案：`pWin/pDraw/pLoss` 来自模拟（默认 400 局，静态装 + 换装后的较优者）。
+- 有对手档案：`pWin/pDraw/pLoss` 来自模拟（默认 400 局，静态装 + 换装后的较优者），
+  再与真实战绩混合：`(模拟 × recordPrior + w/d/l) / (recordPrior + n)`（默认 prior=4）。
+  战绩按 mode（`arena` / `guard`）记在 `logs/battle-profiles.json` 的 `record`，
+  同时保存赛前预测三率，用于复盘模拟偏差。
 - 无档案：退回 `pWin = clamp(0.5 + (我的等级 − 对方等级)×0.15, 0.03, 0.95)`。
 - 偷菜的 `visit` 响应带 `battle` 时直接 `recordBattleSnapshot(...,'guard')`，
   所以打过一次的邻居，下次偷之前就知道该不该去、该穿什么。
-- 打输或算出负期望 → 该岛进 `stealBlockAt`，默认 600 秒内不再排（旧版是 1 小时）。
+- 打赢 → 清零该岛的打输计数；打平 → 冷 4 秒；
+- 打输 → 先只冷 5 秒，**立即用新战报重算 EV**：
+  - 重算后仍低于 `steal.minEV` → 该岛封 `battle.guardBlockSec`（默认 600 秒），
+    原因为 `negative-ev-after-loss`；
+  - 重算后为正 → 冷却结束即可再试（对手换装/我们变强都可能让期望反转）；
+  - 战报没带对方面板（`battle` 为空）→ 标记 `needSync`，下次动手前先增量
+    `syncGuardLogProfiles` 再模拟；
+  - 算不出面板（没开模拟/装备页失败）→ 保守地按 `guardBlockSec` 封禁。
+- 按岛状态统一存在 `memo.stealState`（engine 持久化），巡逻与偷菜主路径读同一份，
+  不再有 `stealLoseAt` / `stealBlockAt` 两套口径。
+- 离线复盘：`node scripts/battle-review.mjs`（只读）打印每个对手的 w/d/l、
+  经验胜率的 Wilson 区间、赛前预测 vs 实际（模拟偏乐观/偏悲观）、
+  以及当前仍被封禁/冷却的岛和原因。
 - 掐点路径在**等待解禁的间隙**完成换装（提前量里已计入 3×2.2 秒），
   偷完在 `finally` 穿回静止防守装。
 

@@ -60,6 +60,116 @@ export function wilsonInterval(wins, total, z = 1.28) {
   return [Math.max(0, Number((center - half).toFixed(4))), Math.min(1, Number((center + half).toFixed(4)))]
 }
 
+// ---------- 战绩（w/d/l）：经验胜率与模拟胜率混合 ----------
+//
+// 模拟是对「面板 + 规则」的估计，规则细节（先手、随机数、守家加成）不可能
+// 完全复刻；真打出来的结果才是最终裁判。榜一 combat-engine / shadow-daemon
+// 也把真实战绩（含 Wilson 区间）作为后验的一部分。只信模拟的话，一旦模拟
+// 系统性偏乐观，就会对同一座岛反复送罚款。
+//
+// 这里把战绩按 mode（arena / guard）分开记，叠在模拟后验上：
+//   后验 = (模拟 × prior + 真实战绩) / (prior + n)
+// prior 相当于「模拟值有几场的分量」，默认 4：打 1 输 1 不会立刻把胜率拉到 0，
+// 但连输 3~4 场就会明显压过模拟。
+export function battleOutcomeOf(battle) {
+  if (!battle) return null
+  if (battle.win === true) return 'win'
+  if (battle.win === false) return 'lose'
+  const r = battle.result ?? battle.outcome
+  if (r === 'win' || r === 'won') return 'win'
+  if (r === 'lose' || r === 'lost' || r === 'defeat') return 'lose'
+  if (r === 'draw' || r === 'tie') return 'draw'
+  if (battle.winner === 'me' || battle.winner === 'a' || battle.winner === 1) return 'win'
+  if (battle.winner === 'foe' || battle.winner === 'b' || battle.winner === 2) return 'lose'
+  return null
+}
+
+export function emptyBattleRecord() {
+  return { w: 0, d: 0, l: 0, lastAt: 0, lastOutcome: '', pred: null }
+}
+
+function normalizeBattleOutcome(o) {
+  const s = String(o || '').toLowerCase()
+  if (s === 'win' || s === 'won') return 'win'
+  if (s === 'lose' || s === 'lost' || s === 'defeat') return 'lose'
+  if (s === 'draw' || s === 'tie') return 'draw'
+  return null
+}
+
+/**
+ * 记一场真实战绩。predicted 是**赛前**模拟出的三率，存下来用于复盘
+ * 「模拟说 80% 赢，实际连输」这种系统性偏差（榜一 audit 的 hindsight gap）。
+ * 返回更新后的记录；参数不合法返回 null。
+ */
+export function noteBattleOutcome(opponentId, outcome, {
+  mode = 'arena',
+  storePath = defaultProfileStorePath(),
+  predicted = null,
+  atSec = null,
+} = {}) {
+  const id = Number(opponentId)
+  const out = normalizeBattleOutcome(outcome)
+  if (!Number.isFinite(id) || !out || !storePath) return null
+  const store = loadProfileStore(storePath)
+  const key = String(id)
+  const entry = store.profiles[key] || (store.profiles[key] = { id, name: '' })
+  entry.record ||= {}
+  const rec = entry.record[mode] || (entry.record[mode] = emptyBattleRecord())
+  if (out === 'win') rec.w = (rec.w || 0) + 1
+  else if (out === 'draw') rec.d = (rec.d || 0) + 1
+  else rec.l = (rec.l || 0) + 1
+  rec.lastAt = Number(atSec) || Math.floor(Date.now() / 1000)
+  rec.lastOutcome = out
+  const pw = Number(predicted?.winRate)
+  if (Number.isFinite(pw)) {
+    const num = (v) => Number((Number(v) || 0).toFixed(4))
+    rec.pred = {
+      win: num(pw),
+      draw: num(predicted.drawRate),
+      loss: num(predicted.lossRate),
+      at: rec.lastAt,
+    }
+  }
+  saveProfileStore(store, storePath)
+  return rec
+}
+
+/** 取某座岛 / 某个擂台对手的战绩；没打过返回 null。 */
+export function getBattleRecord(opponentId, mode = 'guard', { storePath = defaultProfileStorePath() } = {}) {
+  if (!storePath) return null
+  const rec = loadProfileStore(storePath).profiles?.[String(opponentId)]?.record?.[mode]
+  if (!rec) return null
+  return ((rec.w || 0) + (rec.d || 0) + (rec.l || 0)) > 0 ? rec : null
+}
+
+/** 把真实战绩混进模拟后验（三率归一化，不改决策/换装结果）。 */
+export function blendBattleRecord(posterior, record, { prior = 4 } = {}) {
+  if (!posterior || !record) return posterior
+  const w = Number(record.w) || 0
+  const d = Number(record.d) || 0
+  const l = Number(record.l) || 0
+  const n = w + d + l
+  if (n <= 0) return posterior
+  const p = Math.max(0, Number(prior) || 0)
+  const denom = p + n
+  const mix = (sim, real) => ((Number(sim) || 0) * p + real) / denom
+  let win = mix(posterior.winRateMid, w)
+  let loss = mix(posterior.lossRateMid, l)
+  let draw = mix(posterior.drawRate, d)
+  const sum = win + loss + draw
+  if (sum > 0) { win /= sum; loss /= sum; draw /= sum }
+  return {
+    ...posterior,
+    simulatedWinRateMid: posterior.winRateMid,
+    simulatedLossRateMid: posterior.lossRateMid,
+    simulatedDrawRate: posterior.drawRate,
+    winRateMid: win,
+    lossRateMid: loss,
+    drawRate: draw,
+    record: { w, d, l, n, winRate: w / n, lastOutcome: record.lastOutcome || '', lastAt: record.lastAt || 0, pred: record.pred || null },
+  }
+}
+
 // ---------- 单场战斗 ----------
 function pickSkill(f, meS, foeS, rng) {
   const ws = f.wskill ? WEAPON_SKILLS[f.wskill] : null
@@ -1040,6 +1150,7 @@ export function computeGuardPosteriorForTarget(gearData, targetId, {
   trials = 800,
   minGain = 0.005,
   zThreshold = 2.0,
+  recordPrior = 4,
 } = {}) {
   if (!gearData || !storePath) return null
   const opp = getOpponentSnap(targetId, 'guard', { storePath, knownOpponentLevel })
@@ -1073,7 +1184,7 @@ export function computeGuardPosteriorForTarget(gearData, targetId, {
   if (dec.winRate == null || dec.lossRate == null) return null
 
   const drawRate = Math.max(0, 1 - dec.winRate - dec.lossRate)
-  return {
+  const base = {
     simulated: true,
     trials,
     winInterval: [dec.winRate, dec.winRate],
@@ -1088,6 +1199,10 @@ export function computeGuardPosteriorForTarget(gearData, targetId, {
     planGearSig: dec.planGearSig,
     decision: dec,
   }
+  // 模拟缓存只覆盖「面板/装备不变」的纯模拟结果；真实战绩随时在变，
+  // 所以混合放在缓存之外，每次调用都按最新战报算。
+  const rec = getBattleRecord(targetId, 'guard', { storePath })
+  return blendBattleRecord(base, rec, { prior: recordPrior })
 }
 
 // ---------- 战前换装 ----------

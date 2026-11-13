@@ -12,6 +12,7 @@ import { energyActions } from './planner.mjs'
 import {
   computeGuardPosteriorForTarget, executeWithTacticalLoadout, recordBattleSnapshot,
   fetchGear, loadObservedPanels, defaultProfileStorePath, defaultLockRoot,
+  noteBattleOutcome, syncGuardLogProfiles, battleOutcomeOf,
 } from './battle.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -21,6 +22,39 @@ async function wget(world, path) {
 }
 async function wpost(world, path, body) {
   return world.client.post('/api/pet/world/' + path, body)
+}
+
+/**
+ * 偷菜守家线的「按岛状态」。
+ *
+ * 以前是 stealLoseAt / stealBlockAt 两个平行的 map：前者记打输时刻、后者记
+ * 负期望封禁时刻，冷却时间还都读同一个 blockSec，语义重叠；而且没有胜场
+ * 计数，没法做「打输后立刻用新战报重算」。这里统一成一份状态，由 engine
+ * 负责持久化：
+ *   lossCount    连续打输次数（赢一场清零）
+ *   lastLossAt   上一次打输的时刻
+ *   needSync     战报里没带对方面板，下次动手前要补一次守家日志
+ *   cooldownUntil 短暂冷却（打输后几秒 / 打平后几秒）
+ *   blockedUntil  主动放弃：重算后 EV 仍为负，按 guardBlockSec 封禁
+ *   blockedReason 放弃原因（日志/复盘用）
+ */
+function stealStateOf(memo, id, create = false) {
+  const key = String(id)
+  const map = memo.stealState || (memo.stealState = {})
+  if (!map[key] && create) {
+    map[key] = {
+      lossCount: 0, lastLossAt: 0, needSync: false,
+      cooldownUntil: 0, blockedUntil: 0, blockedReason: '',
+    }
+  }
+  return map[key] || null
+}
+
+/** 这座岛此刻还该不该跳过；返回解禁时刻（0 = 可以去）。 */
+function stealBlockedUntil(memo, id) {
+  const s = memo.stealState?.[String(id)]
+  if (!s) return 0
+  return Math.max(Number(s.blockedUntil) || 0, Number(s.cooldownUntil) || 0)
 }
 
 /** 拉邻居目录（分页） */
@@ -476,7 +510,7 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
  * 选择规则（旧版 v1 的 `check` 队列）：
  *   · 记录里 checkAt <= now 的岛优先，按 checkAt 升序
  *   · 没有记录的岛也排队（checkAt 视为 0），保证每座岛至少被看一次
- *   · 冷却期内打输过的岛跳过（battle.guardBlockSec，默认 10 分钟）
+ *   · 冷却期 / 负期望封禁期内的岛跳过（memo.stealState，封禁时长 battle.guardBlockSec）
  * 每轮最多 visitsPerScan 家。访问过程中一旦发现「现在能偷且值得偷」的，
  * 立刻停止巡逻、返回这一家——巡逻剩下的岛不花体力，但会错过偷菜窗口。
  *
@@ -497,16 +531,12 @@ export async function watchRound(world, cfg, log = () => {}, memo = {}) {
   const schedule = memo.stealSchedule || (memo.stealSchedule = {})
   const per = st.visitsPerScan ?? 12
   const maxAge = st.checkEvery ?? 1800   // 多久没看过就值得再看一眼
-  const loseAt = memo.stealLoseAt || {}
-  // 打输过的岛冷却多久：和偷菜主路径一致，用 battle.guardBlockSec（默认 10 分钟）。
-  // 以前这里写死一小时，而主路径日志说的是 10 分钟——两处对不上。
-  const loseCoolSec = cfg.battle?.guardBlockSec ?? 600
 
   // 按「下次该访问的时刻」排队。没有记录的岛 checkAt=0，最先被看。
   // 同一时刻的用目录 hint（有货的地块数）做 tiebreak，好岛排前面。
   const queue = []
   for (const id of ids) {
-    if (now - (loseAt[id] || 0) < loseCoolSec) continue  // 打输过，冷却期内不去
+    if (stealBlockedUntil(memo, id) > now) continue  // 打输冷却 / 负期望封禁期内不去
     const rec = schedule[id]
     const checkAt = Number(rec?.checkAt) || 0
     const stale = !rec?.seenAt || now - rec.seenAt >= maxAge
@@ -672,6 +702,12 @@ function stealBattleCtx(cfg) {
     minGain: b.minGain ?? 0.005,
     zThreshold: b.zThreshold ?? 2.0,
     blockSec: b.guardBlockSec ?? 600,
+    // 打输后的「观察冷却」：只等几秒，够用新战报重算一次 EV；重算后仍为负
+    // 才升级成 blockSec 封禁（榜一 recordSnipeReceipt 的 outcome 分支）。
+    lossCooldownSec: b.lossCooldownSec ?? 5,
+    drawCooldownSec: b.drawCooldownSec ?? 4,
+    // 真实战绩在守家后验里的分量（相当于几场模拟），见 battle.mjs。
+    recordPrior: b.recordPrior ?? 4,
   }
 }
 
@@ -690,6 +726,18 @@ const equipSlotFnFor = (world) => async (slot, item) => {
 async function prepareStealBattle(world, cfg, memo, targets) {
   const bc = stealBattleCtx(cfg)
   if (!bc.on) return null
+  // 上一场打输且战报里没带对方面板（battle 为空）时，先增量补一次守家日志，
+  // 否则这次模拟用的还是旧面板，会对着同一个强敌反复送罚款
+  // （榜一 snipe-scheduler 的 needsGuardLogSync）。
+  const pending = targets.filter((t) => stealStateOf(memo, t.id)?.needSync)
+  if (pending.length) {
+    try {
+      await syncGuardLogProfiles(world.client, bc.accountKey, {
+        storePath: bc.storePath, maxFetch: cfg.battle?.guardSyncMax ?? 8,
+      })
+      for (const t of pending) stealStateOf(memo, t.id).needSync = false
+    } catch { /* 拿不到就按旧面板算，下一轮再补 */ }
+  }
   let gear
   try {
     gear = await fetchGear(world, memo, { maxAge: cfg.battle?.gearCacheSec ?? 600 })
@@ -707,6 +755,7 @@ async function prepareStealBattle(world, cfg, memo, targets) {
         trials: bc.trials,
         minGain: bc.minGain,
         zThreshold: bc.zThreshold,
+        recordPrior: bc.recordPrior,
       })
       if (post) {
         t.pWin = post.winRateMid
@@ -1029,22 +1078,21 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
     let skippedEV = 0
     for (const { t: tg, ev } of ranked) {
       if (tried >= (st.visitsPerScan ?? 8)) break
-      // 负期望的守家岛：模拟结果十分钟内不会反转，先排掉，省得每轮重算重跑。
-      const blockAt = memo.stealBlockAt?.[tg.id] || 0
-      if (world.now - blockAt < blockSec) continue
+      // 冷却 / 负期望封禁期内跳过。打输后只冷却几秒——下一轮会用刚拿到的
+      // 战报重算后验，打不过才升级成 blockSec 的长期封禁。
+      if (stealBlockedUntil(memo, tg.id) > world.now) continue
       const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
-      // 打输过的岛按 blockSec 冷却（默认 10 分钟）。守家鱼强度不会因为我们
-      // 多去几次改变，反复去只是反复赔罚款；但一小时太长——有了对手档案，
-      // 养成/换装变强后可能很快就能打过（旧版写死 3600，和日志口径不符）。
-      const loseAt = memo.stealLoseAt?.[tg.id] || 0
-      if (world.now - loseAt < blockSec) continue
       // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
       // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
       // 只比货值是不够的——守家比我们强时，去一趟就是白送罚金。
       // ev 在排序时已经算过一次，这里直接复用。
       if (ev < minEV) {
         skippedEV++
-        if (ev < 0 && tg.guard) (memo.stealBlockAt ||= {})[tg.id] = world.now
+        if (ev < 0 && tg.guard) {
+          const s = stealStateOf(memo, tg.id, true)
+          s.blockedUntil = world.now + blockSec
+          s.blockedReason = 'negative-ev'
+        }
         continue
       }
       // 体力不够这一家：现场补。这是旧版 energyActions 的用法——
@@ -1087,17 +1135,15 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
           log(`偷 ${tg.name}（Lv${tg.level}${tg.guard ? '·有守家' : ''}）成功：扫 ${spots} 处 → ${detail || `共 ${res.n || 1} 件`}｜合计 ${Math.round(thisValue).toLocaleString('en-US')} D`)
           if (r.battle) {
             const b = r.battle
-            const win = b.win ?? b.result === 'win' ?? res.outcome === 'win'
-            log(`  守家战${win ? '打赢了' : '打完'}：${b.log?.slice?.(-1)?.[0] || ''}${res.xp ? `，+${res.xp} 擂台经验` : ''}`.trim())
+            const won = battleOutcomeOf(b) === 'win' || res.outcome === 'win'
+            log(`  守家战${won ? '打赢了' : '打完'}：${b.log?.slice?.(-1)?.[0] || ''}${res.xp ? `，+${res.xp} 擂台经验` : ''}`.trim())
           }
         } else if (res.outcome === 'lose') {
           const spots = res.spots || 1
-          // 打不过的岛先冷 10 分钟（旧版是一小时）。有了对手档案之后，
-          // 等我们养成/换装变强，这座岛的期望可能重新变正——一小时太长。
-          ;(memo.stealLoseAt ||= {})[tg.id] = world.now
+          // 真正要不要封禁由下面的「重算」决定：先按刚拿到的战报重算 EV，
+          // 仍为负才冷 blockSec，否则过几秒还能再试（榜一 lose 分支）。
           log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
-            (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）') +
-            `，${Math.round(blockSec / 60)} 分钟内不再去`)
+            (res.fine ? `，按市价 1.2 倍赔 ${Math.round(res.fine).toLocaleString('en-US')} D` : '（主人今天罚款已到上限，这次没赔钱）'))
         } else {
           log(`偷 ${tg.name}（Lv${tg.level}）打平：${res.spots || 1} 处，谁也没占便宜`)
         }
@@ -1105,6 +1151,94 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
         // 下次偷这家之前就能先模拟，而不是再来一次盲打。
         if (r.battle && bc?.storePath) {
           try { recordBattleSnapshot(r.battle, 'guard', { storePath: bc.storePath }) } catch {}
+        }
+        // 战绩 + 冷却：真实胜负按 guard 模式记进档案（下次后验会混合经验胜率），
+        // 并按结果更新这座岛的状态。结果优先用服务端的 res.outcome；
+        // 没带就按「拿到货 / 赔了罚款」推断（榜一 recordReconciledVisit 的
+        // reconcile 思路）。战报里的 win 视角不确定（攻方/守方），不用来推断，
+        // 推断不出来就不猜。
+        let outcome = (res.outcome === 'win' || res.outcome === 'lose' || res.outcome === 'draw')
+          ? res.outcome
+          : null
+        let reconciled = false
+        if (!outcome) {
+          if (Number(res.fine) > 0) outcome = 'lose'
+          else if (res.items?.length || res.item) outcome = 'win'
+          reconciled = Boolean(outcome)
+        }
+        if (reconciled) log(`  （结果未明，按${outcome === 'win' ? '战利品' : outcome === 'lose' ? '罚款' : '战报'}推断为 ${outcome}）`)
+        if (outcome && (tg.guard || r.battle)) {
+          const os = stealStateOf(memo, tg.id, true)
+          if (bc?.storePath) {
+            try {
+              noteBattleOutcome(tg.id, outcome, {
+                mode: 'guard',
+                storePath: bc.storePath,
+                // 没有守家目标时 prepareStealBattle 会把 pWin 填成 1（占位），
+                // 那不是模拟结果，不能当赛前预测存进档案。
+                predicted: tg.guard && Number.isFinite(tg.pWin)
+                  ? { winRate: tg.pWin, drawRate: tg.pDraw, lossRate: tg.pLoss }
+                  : null,
+                atSec: world.now,
+              })
+            } catch { /* 档案写失败不影响这一轮偷菜 */ }
+          }
+          if (outcome === 'win') {
+            // 打赢就完全清零并删掉这条：状态本身没有信息量了（战绩在档案里），
+            // 留着只会让 state.json 随着访问过的岛越堆越大。
+            os.lossCount = 0
+            os.lastLossAt = 0
+            os.needSync = false
+            os.cooldownUntil = 0
+            os.blockedUntil = 0
+            os.blockedReason = ''
+            delete memo.stealState?.[String(tg.id)]
+          } else if (outcome === 'lose') {
+            os.lossCount = (os.lossCount || 0) + 1
+            os.lastLossAt = world.now
+            // 战报没带对方面板 → 下次动手前先补一次守家日志再模拟。
+            os.needSync = !r.battle
+            os.cooldownUntil = world.now + (bc?.lossCooldownSec ?? 5)
+            // 立即用新面板重算。recordBattleSnapshot 已经写进了新的 updatedAt，
+            // 模拟缓存 key 变了，这里拿到的是真·新结果而不是复用的旧决策。
+            let rePost = null
+            if (bc?.gear) {
+              try {
+                rePost = computeGuardPosteriorForTarget(bc.gear, tg.id, {
+                  knownOpponentLevel: tg.level || null,
+                  storePath: bc.storePath,
+                  trials: bc.trials,
+                  minGain: bc.minGain,
+                  zThreshold: bc.zThreshold,
+                  recordPrior: bc.recordPrior,
+                })
+              } catch { /* 单条档案坏了不影响冷却逻辑 */ }
+            }
+            if (rePost) {
+              const oldWin = tg.pWin
+              tg.pWin = rePost.winRateMid
+              tg.pLoss = rePost.lossRateMid
+              tg.pDraw = rePost.drawRate
+              tg._post = rePost
+              const reEv = stealEV(tg, myLevel, energyValue)
+              const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`
+              if (reEv < minEV) {
+                os.blockedUntil = world.now + blockSec
+                os.blockedReason = 'negative-ev-after-loss'
+                log(`  重算：胜率 ${pct(oldWin)} → ${pct(rePost.winRateMid)}，` +
+                  `EV ${Math.round(reEv).toLocaleString('en-US')} D 仍不划算，${Math.round(blockSec / 60)} 分钟内不再来`)
+              } else {
+                log(`  重算：胜率 ${pct(oldWin)} → ${pct(rePost.winRateMid)}，` +
+                  `EV ${Math.round(reEv).toLocaleString('en-US')} D 仍为正，${Math.round(bc?.lossCooldownSec ?? 5)} 秒后可再试`)
+              }
+            } else {
+              // 拿不到面板就没法判断，保守地沿用旧的封禁逻辑。
+              os.blockedUntil = world.now + blockSec
+              os.blockedReason = 'loss-no-panel'
+            }
+          } else {
+            os.cooldownUntil = world.now + (bc?.drawCooldownSec ?? 4)
+          }
         }
         if (r.energy != null) {
           const spent = (world.state.en || 0) - r.energy
