@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const call = async (path, body) => { const r = await fetch(base + '/api/pet/world/' + path, { method: body ? 'POST' : 'GET', headers: { cookie, referer: base + '/pets', ...(body ? { 'content-type': 'application/json', origin: base } : {}) }, body: body ? JSON.stringify(body) : undefined }); return { status: r.status, json: await r.json().catch(() => ({})) } }
 const nb = (await call('neighbors?limit=20&q=')).json
 console.log('neighbors keys', Object.keys(nb), 'count', nb.neighbors.length, 'nextCursor', nb.nextCursor, 'canHelp', nb.neighbors.filter((o) => o.canHelp).length, 'canSteal', nb.neighbors.filter((o) => o.canSteal).length)

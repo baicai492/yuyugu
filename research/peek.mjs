@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import * as R from '../cache/rules-4be1c2b4.mjs'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const get = async (p) => (await fetch(base + p, { headers: { cookie, referer: base + '/pets' } })).json()
 const w = await get('/api/pet/world'); R.b12ConfigureClock(w.clockStart)
 const s = w.state, t = w.now, names = Object.fromEntries((JSON.parse(readFileSync(new URL('./live-scan.json', import.meta.url), 'utf8')).neighbors).map((o) => [o.id, o.name]))

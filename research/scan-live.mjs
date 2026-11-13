@@ -1,6 +1,6 @@
 // 只读采集：榜单、全服小岛目录、可偷岛的访问数据、自己的大肥鱼。结果存 research/live-*.json
 import { readFileSync, writeFileSync } from 'node:fs'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms))
 const get = async (path) => { for (let i = 0; i < 3; i++) { try { const r = await fetch(base + path, { headers: { cookie, referer: base + '/pets' }, signal: AbortSignal.timeout(30000) }); return { status: r.status, json: await r.json().catch(() => ({})) } } catch (e) { await sleep(2000) } } return { status: 0, json: {} } }
 const out = { at: Date.now() }

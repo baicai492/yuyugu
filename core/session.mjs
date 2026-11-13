@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const ROOT = resolve(HERE, '..')
 
-export function readSession(file = process.env.YYG_COOKIE || resolve(ROOT, '../messages/cookie.txt')) {
+// 默认读项目根目录的 cookie.txt（不进 git，见 .gitignore）。
+// 以前默认是仓库外的 ../messages/cookie.txt，项目搬走或单独拷给别人就跑不起来。
+export function readSession(file = process.env.YYG_COOKIE || resolve(ROOT, 'cookie.txt')) {
   if (!existsSync(file)) throw new Error(`找不到 cookie 文件：${file}`)
   const raw = readFileSync(file, 'utf8').trim()
   if (!raw) throw new Error('cookie 文件是空的')

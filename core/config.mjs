@@ -10,7 +10,8 @@ export const DEFAULTS = {
 
   // 站点
   baseUrl: 'https://52dmeme.com',
-  cookieFile: '../messages/cookie.txt',
+  // 项目内相对路径（相对仓库根）。cookie 不再引用仓库外的 ../messages/。
+  cookieFile: 'cookie.txt',
   minGap: 2.15,                  // 两次 POST 最小间隔（秒）
 
   // 调度

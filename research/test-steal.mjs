@@ -1,7 +1,7 @@
 // 一次性验证偷菜接口的返回格式。只挑「已经被别人偷过」的地（主人每块地最多少收 1 个，再偷不会让主人多损失）。
 import { readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const call = async (path, body) => { const r = await fetch(base + '/api/pet/world/' + path, { method: body ? 'POST' : 'GET', headers: { cookie, referer: base + '/pets', ...(body ? { 'content-type': 'application/json', origin: base } : {}) }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000) }); return { status: r.status, json: await r.json().catch(() => ({})) } }
 let target = null
 for (let page = 0, cursor = null; page < 3 && !target; page++) {

@@ -1,7 +1,7 @@
 // 一次性验证擂台的宝箱 / 装备 / 加点接口（都不花 D币）。
 import { readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms))
 const call = async (path, body) => { const r = await fetch(base + '/api' + path, { method: body ? 'POST' : 'GET', headers: { cookie, referer: base + '/pets', ...(body ? { 'content-type': 'application/json', origin: base } : {}) }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000) }); return { status: r.status, json: await r.json().catch(() => ({})) } }
 const brief = (j) => { const o = { ...j }; delete o.catalog; delete o.skills; delete o.allSkills; if (o.battle) o.battle = { winner: o.battle.winner, xp: o.battle.xp, drop: o.battle.drop, rounds: o.battle.rounds }; return JSON.stringify(o).slice(0, 700) }

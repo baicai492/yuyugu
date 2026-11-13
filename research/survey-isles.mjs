@@ -1,7 +1,7 @@
 // 只读：访问最近活跃的小岛，验证「成熟后 30 分钟保护期」的判定，并统计大家的配置。结果存 research/live-survey.json
 import { readFileSync, writeFileSync } from 'node:fs'
 import * as R from '../cache/rules-4be1c2b4.mjs'
-const cookie = readFileSync(new URL('../../messages/cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
+const cookie = readFileSync(new URL('../cookie.txt', import.meta.url), 'utf8').trim(), base = 'https://52dmeme.com'
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms))
 const get = async (path) => { const r = await fetch(base + path, { headers: { cookie, referer: base + '/pets' }, signal: AbortSignal.timeout(30000) }); return { status: r.status, json: await r.json().catch(() => ({})) } }
 const scan = JSON.parse(readFileSync(new URL('./live-scan.json', import.meta.url), 'utf8'))

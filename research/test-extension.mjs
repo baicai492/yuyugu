@@ -6,7 +6,7 @@ import path from 'node:path'
 const require = createRequire(import.meta.url)
 const { chromium } = require(process.env.LOCALAPPDATA + '/npm-cache/_npx/9833c18b2d85bc59/node_modules/playwright-core')
 const ext = path.resolve('extension'), channel = process.argv[2] || 'msedge', patch = JSON.parse(process.argv[3] || '{"enabled":true,"dry":true}')
-const sid = readFileSync('../messages/cookie.txt', 'utf8').trim().replace(/^sid=/, '')
+const sid = readFileSync('../cookie.txt', 'utf8').trim().replace(/^sid=/, '')
 const ctx = await chromium.launchPersistentContext(mkdtempSync(path.join(tmpdir(), 'yyg-')), { channel, headless: false, args: ['--headless=new', `--disable-extensions-except=${ext}`, `--load-extension=${ext}`] })
 await ctx.addCookies([{ name: 'sid', value: sid, domain: '52dmeme.com', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }])
 let sw = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker', { timeout: 15000 }).catch(() => null)
