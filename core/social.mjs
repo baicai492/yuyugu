@@ -70,6 +70,29 @@ export async function neighbors(world, { q = '', cursor = null, limit = 20, mark
 export async function visitInfo(world, id) { return wget(world, 'visit/' + id) }
 
 /**
+ * 便宜地探一下「这一刻有没有能偷的岛」——一次 GET，不访问任何岛。
+ *
+ * 榜一 shouldBlockBackgroundWork 的前半条：只要现在有能偷的，后台模块
+ * （五子棋/擂台/帮忙/修仙）全部让路。我们的调度表只记「未来解禁」，
+ * 看不到「此刻已经可偷」——那类目标在 updateIsleSchedule 里被排除
+ * （pl.steal=true 的行交给 targetFromVisit 直接处理），所以必须单独探一次。
+ *
+ * 用服务端的 stealable=1 筛选，一页就够。失败当作「没有」，
+ * 不能因为探测失败就跳过正常流程。
+ *
+ * @returns {Array<{id,name,level}>} 此刻列出为可偷的岛（已过滤新手/标记）
+ */
+export async function probeStealable(world, cfg = {}, { limit = 20 } = {}) {
+  const st = cfg.social?.steal || {}
+  try {
+    const d = await neighbors(world, { limit, stealable: true })
+    return (d.neighbors || [])
+      .filter((o) => o && !o.newbie && !(st.skipMarked && o.marked))
+      .map((o) => ({ id: o.id, name: o.name, level: o.level }))
+  } catch { return [] }
+}
+
+/**
  * 帮忙：去某座岛一键帮忙。
  * 返回 { coins, xp, energy, aff, done }
  */
@@ -819,7 +842,13 @@ function pickSwapTarget(ranked) {
   return null
 }
 
-export async function stealRound(world, cfg, log = () => {}, memo = {}) {
+/**
+ * 跑一轮偷菜：掐点优先，其次巡逻/扫描。
+ *
+ * forceScan=true 时绕过 scanEvery 直接扫目录——engine 用可偷筛选探到
+ * 「此刻有货」时会传它，避免被「半小时才扫一次」的间隔挡住。
+ */
+export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceScan = false } = {}) {
   const st = cfg.social?.steal
   if (!st?.enabled) return { stolen: 0, value: 0 }
   // 掐点判断依赖「此刻」，而 world.now 只在上次 accept 时更新。
@@ -908,7 +937,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}) {
   const overdue = wakeReady && Object.values(memo.stealSchedule || {})
     .some((rec) => (rec.upcoming || []).some((u) => u.unlockAt < world.now - 10 && u.unlockAt > world.now - WAKE_GRACE_SEC))
 
-  if (world.now - lastScan < every && !snipeReady && !overdue) {
+  if (!forceScan && world.now - lastScan < every && !snipeReady && !overdue) {
     // 还没到全量扫描的时候，但可以顺手巡逻几家 watchlist：
     // 服务端的「可偷」筛选只看得到「此刻已经被别人漏掉的」，
     // 真正的好货是解禁瞬间就被抢的，必须提前记下解禁时刻才能掐到。

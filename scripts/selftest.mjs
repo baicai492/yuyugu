@@ -9,6 +9,7 @@ import {
   prepLeadSec, prepActLeadSec, physicalPrepLeadSec, stealGearSwaps,
   snipeStaminaReservation, snipeWindowOpen,
 } from '../core/steal-schedule.mjs'
+import { probeStealable } from '../core/social.mjs'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -305,6 +306,25 @@ console.log('\n[偷菜掐点]')
     !!snipeWindowOpen({ 42: { upcoming: [{ unlockAt: now - 5, kind: 'plot', i: 0 }] } }, now, { leadSec: 8 }))
   ok('解禁已过 60 秒不算窗口',
     !snipeWindowOpen({ 42: { upcoming: [{ unlockAt: now - 60, kind: 'plot', i: 0 }] } }, now, { leadSec: 8 }))
+
+  // 「此刻有货」探测：一次 GET，过滤新手保护和已标记的岛
+  const fakeWorld = {
+    client: {
+      get: async () => ({
+        neighbors: [
+          { id: 1, name: '甲' },
+          { id: 2, name: '乙', newbie: true },
+          { id: 3, name: '丙', marked: true },
+        ],
+      }),
+    },
+  }
+  const found = await probeStealable(fakeWorld, { social: { steal: { skipMarked: true } } })
+  ok('可偷探测过滤新手/标记', found.length === 1 && found[0].id === 1, `${found.length} 家`)
+  const noFilter = await probeStealable(fakeWorld, {})
+  ok('关掉 skipMarked 时保留标记岛', noFilter.length === 2, `${noFilter.length} 家`)
+  const errWorld = { client: { get: async () => { throw new Error('boom') } } }
+  ok('探测失败当作没有', (await probeStealable(errWorld, {})).length === 0)
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)

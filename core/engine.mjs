@@ -10,7 +10,7 @@ import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfi
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
-import { helpDaily, stealRound } from './social.mjs'
+import { helpDaily, stealRound, probeStealable } from './social.mjs'
 import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
 import * as M from './market.mjs'
@@ -512,6 +512,40 @@ export class Engine {
       } catch (e) { this.log('偷菜（掐点）出错：' + e.message, 'err') }
     }
 
+    // ---------- 「此刻有货」优先 ----------
+    //
+    // 榜一 shouldBlockBackgroundWork 的另一半：只要现在有能偷的，后台模块
+    // 全部让路。调度表只记「未来解禁」，看不到此刻已经可偷的岛
+    // （那类行在 updateIsleSchedule 里被排除），所以用服务端的可偷筛选探一次——
+    // 一条 GET，不访问任何岛。
+    //
+    // 不这么做的话，突然可偷的货要等五子棋（约 1 分钟）+ 擂台（约 4 分钟）
+    // 跑完才轮到下面的偷菜，早被抢光了。
+    // 探到就 forceScan 跳过 scanEvery 直接扫；扫完没偷到就把探测间隔翻倍，
+    // 避免「全是低价值目标」时每轮都全量扫一遍目录。
+    let stealNowDone = false
+    if (cfg.social?.steal?.enabled && !cfg.dry && !stealSnipeDone) {
+      const gap = Math.max(30, this.memo.stealProbeGap || 60)
+      if (w.now - (this.memo.stealProbeAt || 0) >= gap) {
+        this.memo.stealProbeAt = w.now
+        let found = []
+        try { found = await probeStealable(w, cfg) } catch { found = [] }
+        if (found.length) {
+          const names = found.slice(0, 3).map((x) => x.name || x.id).join('、')
+          this.log(`偷菜：现在有 ${found.length} 家可偷（${names}${found.length > 3 ? ' 等' : ''}），先偷再跑后台任务`)
+          this.setStep('串门 · 偷菜（此刻可偷）')
+          try {
+            const r = await stealRound(w, cfg, this.log.bind(this), this.memo, { forceScan: true })
+            totalEarn += r.value || 0
+            this.credit(r.value || 0, 0, 0, { cash: false })
+            if ((r.stolen || 0) > 0) this.memo.stealProbeGap = 60
+            else this.memo.stealProbeGap = Math.min(900, gap * 2)
+            stealNowDone = true
+          } catch (e) { this.log('偷菜（此刻可偷）出错：' + e.message, 'err') }
+        }
+      }
+    }
+
     // 掐点偷菜走的是 visit 接口：响应里的 state 是对方岛的、rev 也已作废。
     // 紧接着的五子棋要用自家 cnt.gomokuPaid 判断计奖额度，必须先把自家快照换回来，
     // 否则会拿邻居的计数去发 start，被服务端 409「小岛状态已变化」打回。
@@ -606,7 +640,7 @@ export class Engine {
 
     // ---------- 偷菜 ----------
     // 掐点那一块已经跑过就跳过：否则会紧接着再全量扫一遍目录，白花几十秒。
-    if (cfg.social?.steal?.enabled && !cfg.dry && !stealSnipeDone) {
+    if (cfg.social?.steal?.enabled && !cfg.dry && !stealSnipeDone && !stealNowDone) {
       try {
         this.setStep('串门 · 偷菜')
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
