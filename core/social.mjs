@@ -1157,6 +1157,10 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
   const st = cfg.social?.steal
   const R = world.R
   let stolen = 0, value = 0, tried = 0
+  // 打输要按市价 1.2 倍赔（单次上限 fineMax、每日上限由服务端管）。
+  // 以前只把金额打进日志，账本里完全不记，GUI 的「今日收支」会高估净收益，
+  // 严重时（单次 5,000、每日 20,000）能差出好几万。
+  let fine = 0
   // 有目标但一个都偷不了时，说明是体力不够。要说明白，
   // 否则日志里只有「找到 N 家可偷」然后什么都没发生，看不出原因。
   let starved = 0
@@ -1260,6 +1264,7 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
           }
         } else if (res.outcome === 'lose') {
           const spots = res.spots || 1
+          fine += Number(res.fine) || 0
           // 真正要不要封禁由下面的「重算」决定：先按刚拿到的战报重算 EV，
           // 仍为负才冷 blockSec，否则过几秒还能再试（榜一 lose 分支）。
           log(`偷 ${tg.name}（Lv${tg.level}）被守家鱼打跑：${spots} 处一个没拿到` +
@@ -1388,7 +1393,7 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
       }
       await sleep(1500)
     }
-    return { skippedEV }
+    return { stolen, value, fine, skippedEV }
   }
 
   // 全量扫描/巡逻发现的目标通常「现在就能偷」，换装时间来得及。
@@ -1447,5 +1452,5 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
   } else if (skippedEV) {
     log(`偷菜：${skippedEV} 家有货但期望收益不够（发现率/守家胜率/体力成本折算后 < ${minEV} D），不去`)
   }
-  return { stolen, value }
+  return { stolen, value, fine, skippedEV }
 }
