@@ -734,11 +734,17 @@ state.arc = {v:1, d:'YYYY-MM-DD', n:{bounce,pool,bowl}, best:{}, db:{}, cur:null
 - `arcEnd {g,shots}`：
   - 逐个校验 `validShot`；
   - `ctx.t - cur.t >= MIN_PLAY[g]`，否则「太快了，这局不计分」，**次数不退**；
+    这里的 `ctx.t` / `cur.t` 都是**服务端处理请求的时刻**，不是客户端时间。
   - 服务端用 `replay(g, seed, shots, BOUNCE_DIMS)` 重放，必须 `over(w)` 为真，
     否则「这局没有打完，不计分」；
   - 写 `arc.best[g]`（历史最高）与 `arc.db[g]`（当日最高）、`b9Rank.daily/total[g]`；
   - **不发 D 币**，只有榜单与个人纪录。
 - 失败/放弃也会消耗次数，所以求解器必须在 `arcStart` 之前就准备好 shots。
+- **计时陷阱（2026-11-13 实测）**：客户端 POST 有 2.15 秒串行节流（`core/http.mjs` minGap），
+  `arcStart` 可能先在本地排队两秒才发出去。如果把本地计时起点取在**发请求之前**，
+  本地「等了 5.8 秒」到服务端只剩 4 秒 → MIN_PLAY=5 的弹弹乐十连全判「太快了」，
+  保龄（8 秒）也随机失败一半。正确做法：计时起点取在 **arcStart 回执到达之后**，
+  并留 1.2 秒余量；「太快了」并不清 `arc.cur`，还可以重新提交 `arcEnd` 补救。
 
 ### 三种游戏的计分
 

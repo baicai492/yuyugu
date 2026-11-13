@@ -238,13 +238,20 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
   for (const g of order) {
     let left = arcLeft(R, A, world.state, g, world.now)
     for (let k = 0; k < left && results.length < perTick; k++) {
-      const startedAt = Date.now()
+      // 计时起点必须是 **arcStart 回执到达本地之后**，不能是发请求之前。
+      // 服务端 arcAct 记的是自己的处理时刻 c.t，而我们的 POST 有 2.15 秒串行节流
+      // （core/http.mjs minGap），arcStart 可能先在本地排队 2 秒才发出去。
+      // 以前 startedAt 取在发请求之前，于是本地「等了 5.8 秒」到服务端只剩 4.5 秒：
+      // 弹弹乐 MIN_PLAY=5 全军覆没（2026-11-13 17:43 十连「太快了」），
+      // 保龄 MIN_PLAY=8 也随机失败一半。
+      let startedAt = 0
       let seed = 0, startOk = false
       try {
         const r1 = await world.act([{ a: 'arcStart', g }], { silent: true })
         const o = (r1.out || [])[0]
         if (!o?.ok) { log(`游乐馆 · ${A.GAMES[g].name}：开局失败 ${o?.msg || '（无回执）'}`); break }
         seed = o.seed
+        startedAt = Date.now()
         startOk = true
       } catch (e) {
         log(`游乐馆 · ${A.GAMES[g].name}：开局出错 ${e.message}`)
@@ -265,23 +272,39 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
         local = verifyShots(A, g, seed, shots)
       }
 
-      // MIN_PLAY：从服务端收到 arcStart 那一刻算起。本地 t0 早于服务端几百毫秒，
-      // 阈值多留 0.8 秒，宁慢勿快（太快不计分且次数不退）。
-      const needMs = (MIN_PLAY[g] + 0.8) * 1000
-      const waitMs = needMs - (Date.now() - startedAt)
-      if (waitMs > 0) await sleep(waitMs)
-
-      try {
-        const r2 = await world.act([{ a: 'arcEnd', g, shots }], { silent: true })
-        const o = (r2.out || [])[0]
-        if (o?.ok) {
-          results.push({ g, score: o.score, best: o.best, dayBest: o.dayBest, newBest: !!o.newBest, left: o.left })
-          log(`游乐馆 · ${A.GAMES[g].name}：${o.score} 分${o.newBest ? '（刷新个人纪录）' : ''}｜今日剩 ${o.left} 次`)
-        } else {
-          log(`游乐馆 · ${A.GAMES[g].name}：未计分 ${o?.msg || '（无回执）'}`)
+      // MIN_PLAY：规则原文判定的是 ctx.t − c.t（两次服务端处理时刻之差）。
+      // c.t 一定早于本地 startedAt，所以从回执之后等 MIN_PLAY + 1.2 秒，
+      // 到服务端那里只会更长，不会被判「太快」。
+      const needMs = (MIN_PLAY[g] + 1.2) * 1000
+      let counted = null
+      let lastFail = ''
+      // 「太快了」时服务端并不清 x.cur（arcade-05a5c445.mjs 第 144 行），
+      // 说明这一局还能救：等够时间重新 arcEnd 即可，不用白烧次数。
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const waitMs = needMs - (Date.now() - startedAt)
+        if (waitMs > 0) await sleep(waitMs)
+        try {
+          const r2 = await world.act([{ a: 'arcEnd', g, shots }], { silent: true })
+          const o = (r2.out || [])[0]
+          if (o?.ok) { counted = o; break }
+          lastFail = o?.msg || '（无回执）'
+          if (/太快了/.test(lastFail)) {
+            if (attempt < 2) log(`游乐馆 · ${A.GAMES[g].name}：服务端判定太快，再等一轮重试`)
+            continue
+          }
+          break
+        } catch (e) {
+          lastFail = e.message
+          break
         }
-      } catch (e) {
-        log(`游乐馆 · ${A.GAMES[g].name}：提交出错 ${e.message}`)
+      }
+      if (counted) {
+        results.push({ g, score: counted.score, best: counted.best, dayBest: counted.dayBest, newBest: !!counted.newBest, left: counted.left })
+        log(`游乐馆 · ${A.GAMES[g].name}：${counted.score} 分${counted.newBest ? '（刷新个人纪录）' : ''}｜今日剩 ${counted.left} 次`)
+      } else {
+        log(`游乐馆 · ${A.GAMES[g].name}：未计分 ${lastFail}`, 'warn')
+        // 连着失败多半是规则/时钟对不上，别把剩余次数一轮全烧光
+        break
       }
       void local
       void left
