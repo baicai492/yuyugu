@@ -15,9 +15,51 @@ cookie 重新下载后与本地缓存 `diff` 逐字节一致（2026-11-13 17:4x�
 入口链：`/pets`（HTML）→ `/app.js?v=05a5c445`（站点主程序）→ 动态 `import('/pets.js?v=05a5c445')`
 → 小岛各模块；修仙走 `/xs/entry.js?v=20b20a0e` → `xs/game.js`。
 
+### 覆盖是怎么证明的（不是靠肉眼数）
+
+脚本从 `/pets` 的 HTML 出发，把 `<script src>` / `<link href>` 全部抓下来，
+再对每个 JS **递归解析 `import` / `export ... from` / `import()`**（包含压缩成一行的
+`;import{a}from'...'` 写法），直到收敛。结果落成依赖图：
+
+```
+/pets  →  /app.js  →  /pets.js  ┬→ /pet-isle.js ─→ /pet-isle-{ui,art,food,rank,visit}.js
+                                │                 └→ /pet-arena.js、/pet-player.js
+                                ├→ /pet-float.js → /pet-battle.js → /pet-store.js → /pet-state.js
+                                ├→ /pet-refund.js、/pet-fullscreen.js、/pet-whale-friends.js
+                                ├→ /isle-arcade.js  → /arcade-rules.js      ← 🎪 游乐馆（小岛）
+                                ├→ /isle-warehouse.js                        ← 📦 囤货仓库（小岛）
+                                ├→ /pet-isle-fun.js → /pet-isle-scratch.js   ← 52弟 + 刮刮乐
+                                └→ /xs/entry.js → /xs/game.js → /xs/{engine,farm,alchemy,
+                                     danmaku,story,ui,content,content2,net,rules,xs2,xs3}.js
+```
+
+**鱼鱼谷 + 修仙共 36 个模块，一个不漏**（外加一个孤儿文件 `pet-arena-ui.js`，
+线上文件还在但全站没有任何模块 import 它 —— 旧版擂台面板的残留，已确认 `app.js`、
+`pets.js`、`pet-isle.js`、`pet-battle.js`、`pet-arena.js`、`pet-float.js`、`pet-isle-ui.js`
+里都没有引用）。
+
+### ⚠️ 游乐馆属于小岛，不属于修仙
+
+`pets.js` 的菜单分派原文：
+
+```js
+if (what === 'bag')      return ui.openBag(...)
+if (what === 'fun')      return import('/pet-isle-fun.js')...     // 52弟玩具摊
+if (what === 'arcade')   return import('/isle-arcade.js')...      // 🎪 游乐馆
+if (what === 'warehouse') return import('/isle-warehouse.js')...  // 📦 囤货仓库
+if (what === 'visit')    return import('/pet-isle-visit.js')...   // 串门
+```
+
+游乐馆和背包、集市、52弟、仓库、串门是**同一级的小岛菜单项**，走的是小岛的
+`state.arc` 存档、消耗小岛的每日次数；修仙是从小岛菜单另开的一个入口
+（`xs/entry.js` → `xs/game.js`），两边存档完全独立（`state.xs` / `state.arc`）。
+
+> **所以 GUI 之前把游乐馆画在「修仙」页是分类错误，已改到「概览」页**
+> （和「本岛日额度」挨着，都是每日配额性质）。
+
 ---
 
-## 一、前端模块全清单（33 个，全部逐个读过）
+## 一、前端模块全清单（36 个，全部逐个读过）
 
 「托管」一栏说明这个模块里的**协议动作**由谁处理；纯渲染模块没有动作，自然不需要托管。
 
@@ -35,7 +77,7 @@ cookie 重新下载后与本地缓存 `diff` 逐字节一致（2026-11-13 17:4x�
 | `pet-isle-rank.js` | 3 KB | 排行榜面板 | 只读 ✅ |
 | `pet-isle-art.js` | 43 KB | 像素美术（运行时绘制） | 纯渲染 |
 | `pet-arena.js` | 34 KB | 擂台回放：场景/打击停顿/连击/终结慢动作 | 渲染；协议在 `arena.mjs` ✅ |
-| `pet-arena-ui.js` | 7 KB | 擂台面板 | 渲染 ✅ |
+| `pet-arena-ui.js` | 7 KB | 擂台面板（**孤儿文件**：线上还在，但依赖图里没有任何模块 import 它） | 无需 ✅ |
 | `pet-battle.js` | 36 KB | 战斗界面与战报 | 渲染；决策在 `battle.mjs` ✅ |
 | `pet-store.js` | 24 KB | 站宠存档、等级、每日经验上限 | 只读 ✅ |
 | `pet-state.js` | 1 KB | 站宠状态默认值/校验 | 只读 |
