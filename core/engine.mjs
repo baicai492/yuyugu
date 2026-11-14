@@ -10,6 +10,7 @@ import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfi
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
+import { petCareRound } from './pet-care.mjs'
 import { helpDaily, stealRound, probeStealable } from './social.mjs'
 import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
@@ -657,6 +658,18 @@ export class Engine {
       } catch (e) { this.log('52弟出错：' + e.message, 'err') }
     }
 
+    // ---------- 站宠护理 ----------
+    // 必须在擂台之前：站宠等级就是擂台等级，升级带来的面板成长和自由属性点
+    // 要先在服务端生效，紧接着的换装/加点才算得对（参考实现的 syncPetCareFirst
+    // 也是这个因果顺序）。不花 D 币和小岛体力，只刷每日经验。
+    if (cfg.petCare?.enabled !== false && !cfg.dry && !snipeWindow) {
+      try {
+        this.setStep('站宠护理')
+        const r = await petCareRound(w, cfg, this.log.bind(this), this.memo)
+        if (r?.pet) this.status.pet = r.pet
+      } catch (e) { this.log('站宠护理出错：' + e.message, 'err') }
+    }
+
     // ---------- 擂台 ----------
     if (cfg.arena?.enabled && !cfg.dry && !snipeWindow) {
       try {
@@ -1184,6 +1197,8 @@ export class Engine {
       sleep: this.status.sleep || 0,
       lastError: this.status.lastError || '',
       lastRun: this.status.lastRun || 0,
+      // 站宠：最近一次护理后的等级/经验/三围（GUI 可展示等级进度）
+      pet: this.status.pet || null,
       world: w.ready ? {
         now: w.now,
         isleDay: w.isleDay,

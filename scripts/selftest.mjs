@@ -521,5 +521,92 @@ console.log('\n[新] 多波次偷菜')
   }
 }
 
+console.log('\n[新] 站宠护理')
+{
+  const { petDay, levelOfTotal, totalOfState, applyPetDecay, planPetCare } = await import('../core/pet-care.mjs')
+  const now = 1794643200
+
+  // 1) 北京时间自然日：UTC 16:00 = 北京次日 00:00
+  ok('petDay 按北京时间切日', petDay(Date.UTC(2026, 10, 13, 16, 0, 0) / 1000) === '2026-11-14')
+  ok('petDay 切日前一小时仍是当天', petDay(Date.UTC(2026, 10, 13, 15, 0, 0) / 1000) === '2026-11-13')
+
+  // 2) 等级换算：升到 L+1 需要 L×100（线上 levelOf/totalOf 原文）
+  ok('Lv1→Lv2 需要 100 经验', levelOfTotal(99).level === 1 && levelOfTotal(100).level === 2)
+  ok('Lv2→Lv3 需要 200 经验', levelOfTotal(299).level === 2 && levelOfTotal(300).level === 3)
+  ok('levelOfTotal 与 totalOfState 互逆', totalOfState(levelOfTotal(11694)) === 11694,
+    `${JSON.stringify(levelOfTotal(11694))}`)
+
+  // 3) 衰减分档：低等级每小时 饱食2/精力1/清洁1；Lv10 以上减半
+  {
+    const lo = applyPetDecay({ level: 1, hunger: 50, energy: 50, cleanliness: 50, lastTick: now - 36000 }, now)
+    ok('Lv1 十小时衰减 20/10/10', lo.hunger === 30 && lo.energy === 40 && lo.cleanliness === 40,
+      `${lo.hunger}/${lo.energy}/${lo.cleanliness}`)
+    const hi = applyPetDecay({ level: 10, hunger: 50, energy: 50, cleanliness: 50, lastTick: now - 36000 }, now)
+    ok('Lv10 十小时衰减 10/5/5', hi.hunger === 40 && hi.energy === 45 && hi.cleanliness === 45,
+      `${hi.hunger}/${hi.energy}/${hi.cleanliness}`)
+    ok('不足一小时不结算', applyPetDecay({ level: 1, hunger: 50, energy: 50, cleanliness: 50, lastTick: now - 1800 }, now).hunger === 50)
+  }
+
+  const mkPet = (over = {}, prog = {}) => ({
+    user_id: 'u1',
+    revision: 7,
+    state: {
+      level: 1, xp: 0, hunger: 50, energy: 50, cleanliness: 50, affection: 10,
+      lastTick: now, daily: { day: petDay(now), xp: 0, met: false }, ...over,
+    },
+    progress: { level: 1, xp: 0, day_xp: 0, cap: 1000, total: 0, ...prog },
+  })
+
+  // 4) 没有存档
+  ok('无存档时返回 ok:false', planPetCare({}, now).ok === false)
+  ok('无存档时零动作', planPetCare({}, now).actions.length === 0)
+
+  // 5) 每日上限已满 → 零动作（不能空发请求）
+  {
+    const p = planPetCare(mkPet({}, { day_xp: 1000, cap: 1000 }), now)
+    ok('经验满时零动作', p.ok && p.actions.length === 0 && p.remaining === 0, `actions=${p.actions.length}`)
+  }
+
+  // 6) 服务端 day_xp 是权威：本地 daily.xp 落后也不能超发
+  {
+    const p = planPetCare(mkPet({ daily: { day: petDay(now), xp: 0, met: true } }, { day_xp: 990 }), now)
+    ok('按服务端 day_xp 计算剩余额度', p.remaining === 0 && p.xpGained === 10, `gained=${p.xpGained} left=${p.remaining}`)
+  }
+
+  // 7) 正常规划：动作合法、三围不越界、经验不超上限、动作数受限
+  {
+    const p = planPetCare(mkPet(), now, { maxActions: 60 })
+    const s = p.state
+    ok('动作数不超过 maxActions', p.actions.length <= 60 && p.actions.length > 0, `n=${p.actions.length}`)
+    ok('经验不超每日上限', p.dayXpAfter <= p.cap && p.dayXpAfter === p.dayXpBefore + p.xpGained,
+      `${p.dayXpBefore}+${p.xpGained}/${p.cap}`)
+    ok('三围始终在 0..100', [s.hunger, s.energy, s.cleanliness].every((v) => v >= 0 && v <= 100),
+      `${s.hunger}/${s.energy}/${s.cleanliness}`)
+    ok('首见只发生一次', p.actions.filter((a) => a.kind === 'meet').length === 1)
+    ok('每步经验都在动作表里', p.actions.every((a) => [20, 12, 8, 4].includes(a.xp)), p.actions.map((a) => a.xp).join(','))
+    // 合法性：play 需要精力 >=12，feed 需要饱食 <95，rest 需要精力 <95，clean 需要清洁 <95
+    let energy = 50, hunger = 50, clean = 50, legal = true
+    for (const a of p.actions) {
+      if (a.kind === 'play' && energy < 12) legal = false
+      if (a.kind === 'feed' && hunger >= 95) legal = false
+      if (a.kind === 'rest' && energy >= 95) legal = false
+      if (a.kind === 'clean' && clean >= 95) legal = false
+      if (a.kind === 'play') { energy = Math.max(0, energy - 10); hunger = Math.max(0, hunger - 4) }
+      if (a.kind === 'feed') hunger = Math.min(100, hunger + 18)
+      if (a.kind === 'rest') energy = Math.min(100, energy + 22)
+      if (a.kind === 'clean') clean = Math.min(100, clean + 28)
+    }
+    ok('回放的每个动作在当时都合法', legal)
+  }
+
+  // 8) 清洁保底：纯经验最大化会让 clean 永远排在最后，脏到 60 以下必须先清一次
+  {
+    const p = planPetCare(mkPet({ cleanliness: 10 }), now, { maxActions: 60 })
+    const firstCare = p.actions.find((a) => a.kind !== 'meet')
+    ok('清洁度过低时先清洁', firstCare?.kind === 'clean', `first=${firstCare?.kind}`)
+  }
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
+
 process.exit(fail ? 1 : 0)
