@@ -324,6 +324,7 @@ function slotHint(slots) {
       if (s.shield) nums.push(`护盾 ${s.shield}`)
       if (s.heal) nums.push(`回血 ${s.heal}`)
       if (s.cd) nums.push(`冷却 ${s.cd}s`)
+      if (s.cast) nums.push(`吟唱 ${s.cast}s`)
       return `· ${s.name}（${s.element}）${nums.length ? '　' + nums.join(' · ') : ''}`
     }).join('\n')
 }
@@ -393,8 +394,10 @@ function renderXianDetail(D) {
     xRow('心境 / 气运', `${c.mind ?? 0} / ${c.luck ?? 0}`),
     // 突破成功时规则会把本层修为清零（xian-rules.mjs:97 的 c.xp=0），
     // 这是境界提升的代价，不是数据丢了。把规矩写在面板上。
+    // 9 层时 layerNeed 就是 breakNeed，不必重复显示「满线」。
     xRow('本层修为', `${fmt(cv.xp ?? 0)} / ${fmt(cv.layerNeed ?? 0)}` +
-      (cv.canBreak ? ' · 已满' : ''), '突破成功后境界 +1、本层修为从 0 重算（站点规则）；超出的部分也会一并清零'),
+      (cv.canBreak ? ' · 已满' : (cv.breakNeed !== cv.layerNeed ? `（满线 ${fmt(cv.breakNeed ?? 0)}）` : '')),
+      '突破成功后境界 +1、本层修为从 0 重算（站点规则）；超出的部分也会一并清零。满线 = 该境界 9 层的突破线'),
     xRow('突破所需', `培元丹 ×${cv.pillsNeed ?? 0}（现有 ${cv.pillsHave ?? 0}）`,
       '修为到 9 层满线后，突破要吃掉 (境界+1) 颗培元丹'),
     xRow('今日斗法胜场', String(D.duelWins ?? 0)),
@@ -408,6 +411,7 @@ function renderXianDetail(D) {
       [
         { text: t.name, bold: true },
         ...(t.main ? [{ text: ' 主修', cls: 'tag' }] : []),
+        ...(t.main && D.equipToday ? [{ text: ' 今日已换（明日可再改）', cls: 'dim' }] : []),
         { text: `  ${t.element} · 第 ${t.layer}/${t.maxLayer} 层`, cls: 'dim' },
       ],
       [
@@ -415,6 +419,10 @@ function renderXianDetail(D) {
         { text: full ? ' · 已满层' : ` · 再 ${t.nextIn} 到下一层`, cls: full ? 'ok' : 'dim' },
         { text: `  ·  被动：${t.buff}`, cls: 'dim' },
       ],
+      // 这部功法自带的两个技能（配招就是从所有已学功法的技能里挑 4 个）
+      ...((t.spells || []).length
+        ? [[{ text: `附带：${t.spells.join(' / ')}`, cls: 'dim' }]]
+        : []),
     ]))
   }
   if (!(D.techs || []).length) techList.append(xItem([[{ text: '还没学功法（去藏经阁学一部）', cls: 'dim' }]]))
@@ -426,6 +434,9 @@ function renderXianDetail(D) {
     xRow('基础灵根', (R.elements || []).map((e) => e.name).join(' ') || '—'),
     xRow('变异灵根', (R.variants || []).map((e) => e.name).join(' ') || '无'),
     xRow('根数', `${R.count ?? 0} 根`, '融合会减一根，且不可逆'),
+    // 融合失败会让灵根震荡，24 小时内不能再试（xian-rules.mjs:101）
+    xRow('融合冷却', R.fuseCdIn > 0 ? fmtSec(R.fuseCdIn) + '后可再试' : '无',
+      '融合失败会掉 20% 修为并进入 24 小时冷却'),
   ]
   const fuseList = document.createElement('div')
   fuseList.className = 'xlist'
@@ -524,7 +535,7 @@ function renderXian() {
   if (!x || !x.exists) {
     $('xStatus').textContent = x?.error ? '读取失败：' + x.error : '读取中…'
     for (const id of ['xRealm', 'xCv', 'xStone', 'xGarden', 'xEnergy', 'xCan', 'xPlots', 'xGround', 'xPlotDetail', 'xBag', 'xBrew', 'xMed', 'xTech', 'xWake',
-      'xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
+      'xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetMats', 'xAssetHist', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
     renderXianDetail(null)   // 会同时清掉资料卡和 lastDetailKey 缓存
     return
   }
@@ -567,11 +578,26 @@ function renderXian() {
       ` + 丹药 ${fmt(a.pillValue)}（参考价） + 成熟作物 ${fmt(a.groundValue)}`
     $('xAssetHerbs').textContent = `药材 ${a.bagQty} 件（可卖 ${fmt(a.bagValue)}）· 种子 ${a.seedQty} 包（成本 ${fmt(a.seedValue)}）`
     $('xAssetPills').textContent = `丹药 ${a.pillQty} 颗（参考 ${fmt(a.pillValue)}）· 地里 ${a.groundQty} 株 / 熟 ${a.groundMature}（可收 ${fmt(a.groundValue)}）`
+    // 材料（玄铁/灵玉/妖丹）只在秘境掉，没有消耗途径，所以不进家底估值。
+    // 2.0 卡片也有一行材料，这里再列一次是为了让「资源统计」自成一张完整清单。
+    const mats = x.detail?.mats || {}
+    $('xAssetMats').textContent = countList(mats, MAT_NAMES) || '—'
+    $('xAssetMats').title = '秘境掉落的材料，等站点的「法宝炼器」开放后才用得上；现在只进不出，不算资产'
+    const h = x.history || {}
+    // h.actions 缺失说明主程序还是旧版（没重启），别假装是 0 次
+    $('xAssetHist').textContent = h.actions == null ? '—' : `收获 ${fmt(h.harvests)} 次 · 动作 ${fmt(h.actions)} 次`
+    // log 每成功一个动作 +1，收获时 log%4===3 多给 1 株（xian-rules.mjs:90）。
+    $('xAssetHist').title = h.actions == null ? '' : h.bonusIn
+      ? `累计值。规则里每 4 个动作的那次收获多给 1 株，再 ${h.bonusIn} 个动作进入双倍窗口`
+      : '累计值。规则里每 4 个动作的那次收获多给 1 株，现在收获正好多 1 株'
     const d = x.daily || {}
-    $('xAssetDaily').textContent = `${d.pillUse || 0}/${d.pillMax || 0} · ${d.fightUse || 0}/${d.fightMax || 0}`
-    $('xAssetClears').textContent = `${d.cleared || 0}/${d.stageTotal || 0}`
+    $('xAssetDaily').textContent = `${d.pillUse || 0}/${d.pillMax || 0} · ${d.fightUse || 0}/${d.fightMax || 0}` +
+      (d.duelPrize ? `｜首胜奖励 ${d.duelPrize} 人` : '')
+    $('xAssetDaily').title = '回灵丹每日 3 颗上限（丹毒）· 斗法每日场次上限；同门斗法每人每天只有首胜给灵石' +
+      (d.duelPrizeNames?.length ? `\n今日已领：${d.duelPrizeNames.join('、')}` : '')
+    $('xAssetClears').textContent = `${d.cleared || 0}/${d.stageTotal || 0} · 剧情 ${x.story || 0}/${x.storyTotal ?? '—'}`
   } else {
-    for (const id of ['xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
+    for (const id of ['xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetMats', 'xAssetHist', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
   }
 
   // 资料卡：战力/功法、灵根/融合、试炼、人脉、丹方、地里作物
@@ -606,10 +632,13 @@ function renderXian2() {
   const s = status?.xian2
   const ids = ['x2Sect', 'x2Stipend', 'x2Tasks', 'x2Talk', 'x2Ev', 'x2Duel', 'x2Realm', 'x2Areas', 'x2Slots', 'x2Mats']
   if (!s || s.error) { for (const id of ids) $(id).textContent = '—'; return }
-  $('x2Sect').textContent = `${s.sect || '未入门'} · 心境 ${s.mind} · 气运 ${s.luck} · 声望 ${s.rep}`
+  $('x2Sect').textContent = `${s.sect || '未入门'} · 心境 ${s.mind} · 气运 ${s.luck} · 声望 ${s.rep} · 贡献 ${s.ctb || 0}`
   $('x2Stipend').textContent = s.stipendDone ? '已领' : '待领'
   const tk = s.tasks || []
   $('x2Tasks').textContent = tk.length ? `${tk.filter((v) => v.done).length}/${tk.length} 已交` : '今天还没刷新'
+  $('x2Tasks').title = tk.length
+    ? '今日委托：\n' + tk.map((t) => `${t.done ? '✓' : '·'} ${t.label || '委托'}`).join('\n')
+    : ''
   $('x2Talk').textContent = `${s.talks || 0}/${s.talksMax || 30} 位`
   const ev = s.ev || {}
   $('x2Ev').textContent = ev.pending
@@ -617,7 +646,7 @@ function renderXian2() {
     : `${ev.n || 0}/${ev.max || 3} 次` + (ev.gapIn > 0 ? ` · ${fmtSec(ev.gapIn)}后可再抽` : '')
   $('x2Duel').textContent = `${s.duels || 0}/${s.duelsMax || 8} 场`
   $('x2Realm').textContent = s.inRealm
-    ? `探索中：${s.inRealm.area}（气血 ${Math.round(s.inRealm.hp)}/${s.inRealm.mx}）`
+    ? `探索中：${s.inRealm.area} 第 ${s.inRealm.floor || 1} 层（气血 ${Math.round(s.inRealm.hp)}/${s.inRealm.mx}）`
     : `${s.realms || 0}/${s.realmsMax || 3} 次`
   const areas = Object.values(s.areas || {})
   $('x2Areas').textContent = areas.length

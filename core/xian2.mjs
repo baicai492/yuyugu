@@ -583,7 +583,15 @@ export function xian2Snapshot(world) {
     ctb: x.ctb || 0,
     sect: A.SECT_RANK[A.sectRank(x)]?.[1] || '',
     stipendDone: x.sp === d,
-    tasks: x.tk?.d === d ? (x.tk.list || []).map((v) => ({ done: !!v[1] })) : [],
+    // 委托带上内容，GUI 的悬停能看到今天具体要交什么
+    tasks: x.tk?.d === d ? (x.tk.list || []).map((v) => {
+      const [kind, key, n] = A.TASK_KINDS[v[0]] || []
+      const label = kind === 'herb' ? `交 ${A.HERBS[key]?.name || key}×${n}`
+        : kind === 'pill' ? `交 ${A.PILLS[key]?.name || key}×${n}`
+        : kind === 'win' ? `斗法胜 ${n} 场`
+        : `委托 #${v[0]}`
+      return { done: !!v[1], label }
+    }) : [],
     talks: x.ch?.d === d ? (x.ch.ids || []).length : 0,
     // 规则里写死的上限是 30，但全服只有 29 个 NPC——显示 29/30 会让人以为
     // 「还差一个没做」，其实是当天全部叙完了。按实际人数封顶。
@@ -599,7 +607,11 @@ export function xian2Snapshot(world) {
     duelsMax: A.FIGHT_DAILY,
     realms: x.rd?.d === d ? x.rd.n || 0 : 0,
     realmsMax: A.RLM_DAILY,
-    inRealm: x.rlm ? { area: A.AREAS[x.rlm.a]?.n || x.rlm.a, hp: x.rlm.hp, mx: x.rlm.mx } : null,
+    inRealm: x.rlm ? {
+      area: A.AREAS[x.rlm.a]?.n || x.rlm.a,
+      hp: x.rlm.hp, mx: x.rlm.mx,
+      floor: (Number(x.rlm.L) || 0) + 1,              // 地图是从第 1 层往下走的
+    } : null,
     areas,
     mats: x.mat || {},
     slots: Array.isArray(x.sl) ? x.sl.slice() : null,

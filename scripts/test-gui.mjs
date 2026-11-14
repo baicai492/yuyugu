@@ -112,6 +112,13 @@ try {
       realm: txt('xRealm'), stone: txt('xStone'), plotDetail: txt('xPlotDetail'),
       combatRows: count('xCombat'), rootsRows: count('xRoots'),
       stages: count('xStages'), npc: count('xNpc'), recipes: count('xRecipes'),
+      // 资源统计：材料 / 累计 / 每日 / 首通都要有值（主程序提供 detail.mats、history、daily）
+      assets: txt('xAssets'), assetMats: txt('xAssetMats'), assetHist: txt('xAssetHist'),
+      assetDaily: txt('xAssetDaily'), assetClears: txt('xAssetClears'),
+      assetMatsHint: document.getElementById('xAssetMats')?.title,
+      assetDailyHint: document.getElementById('xAssetDaily')?.title,
+      // 2.0：宗门贡献 + 委托内容（悬停）
+      sect2: txt('x2Sect'), tasks2: txt('x2Tasks'), tasks2Hint: document.getElementById('x2Tasks')?.title,
       combat: txt('xCombat'),
       slotRow: [...document.querySelectorAll('#xCombat .card-row')]
         .map((r) => r.textContent).find((t) => t.startsWith('技能槽')) || null,

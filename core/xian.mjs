@@ -1033,6 +1033,13 @@ export function xianSnapshot(world, cfg = {}) {
   const today = xsDay(t)
   const pillUse = sim.dp?.d === today ? Number(sim.dp.n || 0) : 0
   const fightUse = sim.df?.d === today ? Number(sim.df.n || 0) : 0
+  // 今日同门斗法的「首胜奖励」名单：每人每天只给一次灵石（xian-rules.mjs:334-336），
+  // x.dd.w 记的就是这批人，和总胜场 x.tw.n 是两个口径。
+  const ddWon = sim.dd?.d === today && Array.isArray(sim.dd.w) ? sim.dd.w : []
+  // 累计动作数 x.log：每成功一个动作 +1；收获时 log%4===3 会多给 1 株
+  // （xian-rules.mjs:90），所以「再几个动作进入双倍窗口」是可以算出来的。
+  const actLog = Number(sim.log || 0)
+  const bonusIn = (3 - (actLog % 4) + 4) % 4          // 0 表示下一次收获就多 1 株
 
   // ---------- 明细：战力、功法、灵根、试炼、人脉、丹方、田亩 ----------
   // 全部从本地存档按规则算，不为面板额外发请求。GUI 的「资料」卡片会全量展示。
@@ -1103,6 +1110,8 @@ export function xianSnapshot(world, cfg = {}) {
     }).filter((f) => f.possible),
     fusionReady: Number(sim.cv?.r || 0) >= 1,                   // 筑基之后才能融合
     fusionCost: { peiyuan: 2, stone: 200, rate: 0.55 },
+    // 融合失败会让灵根震荡，24 小时内不能再试（xian-rules.mjs:101）
+    fuseCdIn: Math.max(0, Math.round(Number(sim.fuseCd || 0) - t)),
   }
 
   // 试炼（STAGES）：首通给培元丹，但战斗是弹幕小游戏，只能真人点——
@@ -1163,6 +1172,7 @@ export function xianSnapshot(world, cfg = {}) {
     autoFuse: opts.autoFuse,
     breakMode: opts.breakMode,
     story: Number(sim.st || 0),
+    storyTotal: STORY_END,
     storyDone: Number(sim.st || 0) >= STORY_END,
     roots: sim.roots ? [...(sim.roots.e || []), ...(sim.roots.v || [])] : [],
     rootNames: sim.roots ? [...(sim.roots.e || []), ...(sim.roots.v || [])].map(rootName) : [],
@@ -1197,9 +1207,21 @@ export function xianSnapshot(world, cfg = {}) {
     daily: {
       pillUse, pillMax: PILL_DAILY,
       fightUse, fightMax: FIGHT_DAILY,
+      // 今日已拿过首胜灵石的同门（每人每天一次）；总胜场是 fightUse，两个口径分开显示
+      duelPrize: ddWon.length,
+      duelPrizeNames: ddWon.map(npcName),
       cleared: Object.keys(sim.clear || {}).length,
       stageTotal: Object.keys(STAGES).length,
     },
+    // 累计值（纯展示）：hv 是从头开始的收获次数，log 是成功动作总数。
+    // 规则里每 4 个动作的那次收获多给 1 株，bonusIn=0 表示下一次收获就能多拿。
+    history: {
+      harvests: Number(sim.hv || 0),
+      actions: actLog,
+      bonusIn,
+    },
+    // 今天是否已经换过主修（每天只能换一次，xian-rules.mjs:112）
+    equipToday: sim.te === today,
     brew: sim.brew ? { pill: sim.brew.p, readyIn: Math.max(0, Number(sim.brew.t || 0) + BREW_READY_SEC - t) } : null,
     meditate: sim.med ? { elapsed: Math.max(0, t - Number(sim.med.t || 0)), cap: MED_MAX } : null,
     techs: [...(sim.techs || [])],
@@ -1220,6 +1242,8 @@ export function xianSnapshot(world, cfg = {}) {
       mats: { ...(sim.mat || {}) },
       // 今日同门斗法（xsAb）胜场，和试炼/秘境分开统计
       duelWins: sim.tw?.d === today ? Number(sim.tw.n || 0) : 0,
+      // 今天已经换过主修（detail 里再带一份，GUI 的缓存键才会跟着它变）
+      equipToday: sim.te === today,
     },
   }
 }
