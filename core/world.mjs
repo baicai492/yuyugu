@@ -22,7 +22,7 @@ export class World {
     this.prices = {}
     this.now = 0
     this.snapshotNow = 0   // 最近一次快照里的服务端时间
-    this.clockOffset = 0   // 服务端时间 − 本地时间（秒），每次 accept 校准
+    this.clockOffset = 0   // 兜底用：客户端没有区间校准时退回单次估计（见 clockNowMs）
     this.clockStart = 0
     this.fetchedAt = 0
     this.lastOut = []
@@ -104,6 +104,7 @@ export class World {
       // 服务端时间与本地时钟的偏移。之后 tickClock() 用它把 now 往前推，
       // 不必等下一次网络往返——偷菜掐点依赖「此刻」而不是「上次拉取时」。
       // 误差约一个 RTT，秒级决策可以接受。
+      // 兜底：客户端会用区间校准（core/http.mjs），这里只在没有 client 时被读到。
       this.clockOffset = j.now - Date.now() / 1000
     }
     this.fetchedAt = Date.now()
@@ -205,7 +206,7 @@ export class World {
 
   logActions(batch, out) {
     const R = this.R
-    const names = { plant: '种植', water: '浇水', harvest: '收获', clear: '清理', feed: '喂食', pet: '摸摸', collect: '收产物', trap: '收蟹笼', fish: '钓鱼', mine: '挖矿', bomb: '炸矿', craft: '加工', sell: '卖出', buy: '购买', upgrade: '升级', expand: '扩建', buyTrap: '买蟹笼', buyAnimal: '买动物', sellAnimal: '卖动物', goal: '领目标', coffee: '喝咖啡', eat: '进食', stockBuy: '货船进货', npc: '52弟', scratch: '刮刮乐', lotto: '彩票', warehouse: '囤货', nightClaim: '夜潮', storyRead: '纪事', guardRefund: '守家补偿',
+    const names = { plant: '种植', water: '浇水', harvest: '收获', clear: '清理', feed: '喂食', pet: '摸摸', collect: '收产物', trap: '收蟹笼', fish: '钓鱼', mine: '挖矿', bomb: '炸矿', craft: '加工', sell: '卖出', buy: '购买', upgrade: '升级', expand: '扩建', buyTrap: '买蟹笼', buyAnimal: '买动物', sellAnimal: '卖动物', goal: '领目标', coffee: '喝咖啡', eat: '进食', stockBuy: '货船进货', npc: '52弟', scratch: '刮刮乐', lotto: '彩票', lottoClaim: '彩票兑奖', warehouse: '囤货', nightClaim: '夜潮', storyRead: '纪事', guardRefund: '守家补偿',
       // 囤货仓库 b26
       whUp: '仓库升级', whOrder: '到价出售', whAlert: '到价提醒',
       // 游乐馆

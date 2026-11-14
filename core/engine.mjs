@@ -16,7 +16,7 @@ import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snip
 import { xianRound, xianSnapshot } from './xian.mjs'
 import { xian2Round, xian2Snapshot } from './xian2.mjs'
 import { arcadeRound, arcadeSummary } from './arcade.mjs'
-import { planVaultUpgrade, vaultSummary, vaultCapacity } from './warehouse.mjs'
+import { planVaultUpgrade, vaultSummary, vaultCapacity, disableAuto } from './warehouse.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -404,6 +404,14 @@ export class Engine {
         this.log('领取新人礼')
         await w.refresh()
       } catch { /* 领不了就算了，不影响托管 */ }
+    }
+    // 站内挂机管家：它每 2 小时自己巡视一轮、最多补算 24 轮，和托管抢同一池体力。
+    // 站点默认就是关的（AUTO_DEFAULT.on=false），发现被打开就关掉——
+    // 旧代码只是在 autoLog 有补算时提醒一句，那时体力已经被烧掉了。
+    if (!cfg.dry && w.state?.auto?.on) {
+      try {
+        if (await disableAuto(w)) this.log('已关闭站内挂机管家（它会和托管抢体力）')
+      } catch (e) { this.log('关闭站内管家失败：' + e.message, 'warn') }
     }
     this.ensureLedger()
     await this.recoverBookFromServer()

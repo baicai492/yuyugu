@@ -771,6 +771,39 @@ console.log('\n[新] 站宠护理')
   }
 }
 
+console.log('\n[新] 站内管家自动关闭')
+{
+  const { disableAuto } = await import('../core/warehouse.mjs')
+  const mkWorld = (auto) => {
+    const w = {
+      state: { auto },
+      rev: 42,
+      posted: [],
+      client: {
+        post: async (path, body) => {
+          w.posted.push({ path, body })
+          // world/auto 返回完整世界快照（前端同样走 accept(j)）
+          return { state: { auto: { on: false } }, rev: 43, now: 1794600000 }
+        },
+      },
+      accept(j) { this.state = j.state; if (j.rev != null) this.rev = j.rev },
+    }
+    return w
+  }
+  // 1) 没开管家：不打扰服务端（每轮都发一次 POST 会把 rev 推着走）
+  const off = mkWorld(undefined)
+  ok('没开管家时零请求', (await disableAuto(off)) === false && off.posted.length === 0)
+  // 2) 开着：发一次带 config.on=false 的 POST，并用回执更新快照
+  const on = mkWorld({ on: true, t: 1794500000 })
+  const did = await disableAuto(on)
+  ok('开着时发一次关闭请求', did === true && on.posted.length === 1 && on.posted[0].path === '/api/pet/world/auto')
+  const b = on.posted[0]?.body || {}
+  ok('关闭请求带 rev / operation / config.on=false',
+    b.rev === 42 && typeof b.operation === 'string' && b.operation.length >= 8 && b.config?.on === false,
+    `rev=${b.rev} config=${JSON.stringify(b.config)}`)
+  ok('回执快照已生效', on.state.auto.on === false && on.rev === 43)
+}
+
 console.log('\n[新] HTTP 重试边界')
 {
   const { createClient } = await import('../core/http.mjs')

@@ -8,6 +8,7 @@
 // 我们的用法：卖货规划里判定「等峰值更划算」的货，就把它全额锁进 vault；
 // 判定「现在该卖」的货，先解锁（n=0）再卖，避免 includeWarehouse 的副作用。
 
+import { randomUUID } from 'node:crypto'
 import * as M from './market.mjs'
 
 /** 当前仓库等级与容量（05a5c445 的 b26 规则；拿不到规则时按 Lv1 处理） */
@@ -144,22 +145,24 @@ export function vaultSummary(R, world) {
   return { rows, totalValue: Math.round(totalValue), lv: cap.lv, used: Object.keys(vault).length, slots: cap.slots, unit: cap.unit }
 }
 
-/** 把管家配置成「只做我们不在线时的兜底」 */
-export function butlerConfig(cfg) {
-  // AUTO_DEFAULT: {on, crop, water, feed, fishPct, keep, sell, minPct, budget, craft, bomb, goals, guard}
-  return {
-    on: true,
-    crop: 'best',
-    water: true,
-    feed: true,
-    fishPct: 50,
-    keep: 20,              // 保留 20 体力给玩家/程序
-    sell: true,
-    minPct: 92,            // 只在 ≥92% 基础价时卖（比默认 90 更保守）
-    budget: 200000,
-    craft: true,
-    bomb: true,
-    goals: true,
-    guard: 0,
-  }
+/**
+ * 关掉站内挂机管家。
+ *
+ * 站点 AUTO_DEFAULT.on = false（默认关），前端设置面板用 POST /api/pet/world/auto
+ * 保存 config。管家每 2 小时自动巡视一轮、最多补算 24 轮——和托管抢同一池体力
+ * （线上 11-13 实测一次 autoLog 补算了十几轮）。autoConfig 对缺失字段沿用 prev，
+ * 所以只传 { on: false } 就能关掉，不会清空其它策略。
+ *
+ * 调用方要保证 rev 是新鲜的（world/auto 走乐观锁）。
+ * @returns {Promise<boolean>} 是否真的发起了关闭（原本就关着返回 false）
+ */
+export async function disableAuto(world) {
+  if (!world.state?.auto?.on) return false
+  const j = await world.client.post('/api/pet/world/auto', {
+    rev: world.rev,
+    operation: randomUUID(),
+    config: { on: false },
+  })
+  world.accept(j)
+  return true
 }
