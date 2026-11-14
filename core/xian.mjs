@@ -264,11 +264,21 @@ function shouldAllowBreakPolicy(x, opts) {
 function computeHeldPeiyuanFloorWhileSubLv5(x, nowSec, opts) {
   if ((x.lv || 1) >= 5) return Infinity
   let hold = 0
-  if (shouldAllowBreakPolicy(x, opts) && Number(x.cv?.s || 1) >= 9) {
+  // 炼气 8 层起就留出突破用的培元丹（r+1 颗）：满修后随时能破。
+  // 等 9 层才开始留，碰到刚吃完一炉就要多等一次炼丹（参考实现同口径）。
+  if (shouldAllowBreakPolicy(x, opts) && Number(x.cv?.s || 1) >= 8) {
     hold = Math.max(hold, Number(x.cv?.r || 0) + 1)
   }
-  if (opts.autoFuse && Number(x.cv?.r || 0) >= 1 && !(Number(x.fuseCd || 0) > nowSec)) {
-    if (selectOptimalFusionPair(x.roots, opts.fuseTarget)) hold = Math.max(hold, 2)
+  if (opts.autoFuse && !(Number(x.fuseCd || 0) > nowSec)) {
+    if (selectOptimalFusionPair(x.roots, opts.fuseTarget)) {
+      if (Number(x.cv?.r || 0) >= 1) {
+        hold = Math.max(hold, 2)
+      } else if (Number(x.cv?.s || 1) >= 8 && shouldAllowBreakPolicy(x, opts)) {
+        // 炼气 8~9 层：1 颗突破 + 2 颗融合 = 3。突破进入筑基 1 层时 xp=0，
+        // 正好在同一个零修为损失窗口里立刻融合——少留一颗就要等下一炉。
+        hold = Math.max(hold, 3)
+      }
+    }
   }
   return hold
 }
@@ -391,6 +401,14 @@ function chooseCropForEmptyPlot(x, nowSec, opts) {
   if (projected('jingu') < needHerbs.jingu && canUse('jingu')) return 'jingu'
   if (projected('lingcao') < needHerbs.lingcao && canUse('lingcao')) return 'lingcao'
   if ((x.lv || 1) >= 2 && projected('linglan') < needHerbs.linglan && canUse('linglan')) return 'linglan'
+  // 其余任意缺口的药材：今天的宗门委托要赤芝/冰莲（不炼丹的纯现金药材）时，
+  // 上面的固定顺序会去种灵兰，委托永远凑不齐——参考实现同样有这一段兜底。
+  // 顺序按 HERB_ENTRIES_DESC（等级高→低），和「种最值钱的」方向一致。
+  for (const [herbId] of HERB_ENTRIES_DESC) {
+    if (Number(needHerbs[herbId] || 0) > 0 && projected(herbId) < needHerbs[herbId] && canUse(herbId)) {
+      return herbId
+    }
+  }
 
   const unlocked = HERB_ENTRIES_DESC.filter(([, H]) => H.lv <= (x.lv || 1))
   const topHerbId = unlocked[0]?.[0] || 'lingcao'
@@ -652,7 +670,9 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
         const nextCrop = chooseCropForEmptyPlot(sim, t, opts)
         if (nextCrop) {
           const { empty } = countOpenSoilPlots(sim)
-          if (Number(sim.seeds?.[nextCrop] || 0) < empty + upcomingHarvestCount && sim.stone >= HERBS[nextCrop].seed) {
+          // 多备 2 颗：下一批收获后要立刻补种，现场买种子会让那一轮多花动作；
+          // 种子不占田、不过期，多买两颗是纯保险（参考实现同样 +2）。
+          if (Number(sim.seeds?.[nextCrop] || 0) < empty + upcomingHarvestCount + 2 && sim.stone >= HERBS[nextCrop].seed) {
             if (emit({ a: 'buy', herb: nextCrop, n: 1 })) continue
           }
         }

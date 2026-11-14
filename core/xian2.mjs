@@ -168,6 +168,54 @@ function chooseLoadout(x, opts) {
 
 // ---------------- 秘境 ----------------
 
+/**
+ * 候选配招组合：当前配招 + 一组按「输出/控制/续航」搭配的模板。
+ *
+ * 用途只有一个：秘境束搜索找不到通关路径时，换几套配招再搜一遍。
+ * 参考实现的 buildCandidateSlotSets 也是这个思路——配招决定战力和
+ * 技能顺序，同一张图换个顺序可能刚好过得了首领，而我们的 chooseLoadout
+ * 是拿同门/怪的平均分选出来的，不一定适合当前这张图的 Boss。
+ * 只保留能学到的技能；凑不满 4 个的模板直接丢弃。
+ */
+function candidateSlotSets(x) {
+  const ok = new Set(A.skillsOf(x))
+  const sets = []
+  const seen = new Set()
+  const add = (arr) => {
+    if (!Array.isArray(arr)) return
+    const uniq = [...new Set(arr.filter((id) => ok.has(id)))]
+    if (uniq.length !== 4) return
+    const key = uniq.join(',')
+    if (seen.has(key)) return
+    seen.add(key)
+    sets.push(uniq)
+  }
+  if (Array.isArray(x.sl) && x.sl.length === 4) add(x.sl)
+  const nuke = ['wind1', 'thunder1', 'metal1', 'ice1', 'poison1', 'lava1', 'fire1', 'water1', 'wood1', 'earth1']
+    .filter((id) => ok.has(id))
+  const own1 = x.tech && ok.has(`${x.tech}1`) ? `${x.tech}1` : nuke[0]
+  const top1 = nuke[0]
+  const alt1 = nuke.find((id) => id !== top1)
+  const cc = ['wood2', 'thunder2', 'wind2', 'poison2', 'metal2', 'ice2', 'lava2', 'fire2', 'bolt']
+    .filter((id) => ok.has(id))
+  const templates = [
+    [own1, 'wood2', 'water2', 'thunder2'],
+    [own1, 'wood2', 'wind2', 'water2'],
+    [top1, 'wood2', 'thunder2', 'wind2'],
+    [top1, 'water2', 'earth2', 'wood2'],
+    [top1, 'water2', 'guard', cc[0]],
+    [top1, cc[0], cc[1], 'water2'],
+    [top1, alt1, 'water2', 'wood2'],
+    [top1, alt1, 'thunder2', 'wind2'],
+    [top1, 'poison2', 'wood2', 'water2'],
+    [top1, 'metal2', 'wind2', 'bolt'],
+    [own1, `${x.tech}2`, 'water2', 'guard'],
+    [own1, `${x.tech}2`, 'bolt', 'guard'],
+  ]
+  for (const tpl of templates) add(tpl.filter(Boolean))
+  return sets
+}
+
 function planRealm(A_, x, now, opts) {
   // 已在秘境里：接着走；否则先选一处进（优先没通关过的、越靠后越好）
   let acts = []
@@ -195,7 +243,7 @@ function planRealm(A_, x, now, opts) {
   // 剩余步数：每层 4 行（3 个普通节点 + 1 个精英/首领），共 3 层；
   // 从 (L,R) 出发刚好是 (2−L)×4 + (3−R) 步，不必拿固定 18 硬跑到底。
   const maxSteps = Math.max(1, (2 - (Number(z0.L) || 0)) * 4 + (3 - (Number(z0.R) || 0)))
-  const width = Math.max(1, Math.min(24, Number(opts.beam) || 6))
+  const width = Math.max(1, Math.min(24, Number(opts.beam) || 12))
   let beam = [{ x: sim, acts, val: 0 }]
   const wins = []
   for (let step = 0; step < maxSteps && beam.length; step++) {
@@ -397,7 +445,36 @@ export function planXian2Actions(world, now, opts = {}) {
   if (opts.realm !== false) {
     for (let round = 0; round < 3; round++) {
       const before = acts.length
-      const runActs = planRealm(A, sim, t, opts)
+      let runActs = planRealm(A, sim, t, opts)
+      // 当前配招找不到通关路径时，换几套候选配招再搜一遍。
+      // 只在「还没进秘境」时试：已经在图里换配招没有意义（秘境途中受伤/路径都定了），
+      // 这时 planRealm 会给出 rout 而不是 null。
+      if (!runActs && !sim.rlm) {
+        let picked = null
+        // 每批最多试 3 套、总共 1.2 秒——束搜索本身不便宜，不能让它拖住整轮巡视。
+        const tTry = Date.now()
+        let tries = 0
+        for (const slots of candidateSlotSets(sim)) {
+          if (tries >= 3 || Date.now() - tTry > 1200) break
+          if (Array.isArray(sim.sl) && slots.join(',') === sim.sl.join(',')) continue
+          tries++
+          const cw = structuredClone(sim)
+          if (!A.act(cw, { a: 'slots', herb: slots.join(',') }, t, () => 0.99)?.ok) continue
+          const tryActs = planRealm(A, cw, t, opts)
+          if (tryActs?.length) { picked = { slots, acts: tryActs }; break }
+        }
+        if (picked) {
+          if (emit({ a: 'slots', herb: picked.slots.join(',') })) {
+            // 配招缓存一起更新：否则下一批第 4 步会按旧的 chooseLoadout 结果换回去，
+            // 于是每批都在「换过去 → 换回来」之间来回白烧两次 slots。
+            if (opts.memo) {
+              opts.memo.xian2SlotKey = `${sim.tech}|${(sim.techs || []).join(',')}`
+              opts.memo.xian2SlotVal = picked.slots.join(',')
+            }
+            runActs = picked.acts
+          }
+        }
+      }
       if (!runActs?.length) break
       // 把整条路径重放到 acts/sim 上（planRealm 已经在副本上验证过）
       let okAll = true
