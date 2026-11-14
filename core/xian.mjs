@@ -638,19 +638,28 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
   // 作物不会烂，晚收只是占着田。
   const manualReserve = opts.reserveManual || 0
   if (manualReserve > 0 && Number(sim.en || 0) < manualReserve) {
-    // 收功不耗灵力，但打坐超过 MED_MAX（30 分钟）的部分站点直接丢弃
-    // （xsrules 的 rise：d = Math.min(now - med.t, MED_MAX)）。
-    // 不在这里收，灵力补齐前会一直挂着打坐，超时的部分全白打——
-    // 2026-11-15 线上：灵力 8 < 预留 30，打坐挂了 41 分钟，后 11 分钟白扔。
+    // 打坐不耗灵力，所以「攒灵力」和「修炼」不冲突：该坐就坐，灵力照常回。
+    //
+    // 以前这里只在「已经在打坐且超时」时收功，没在打坐就干等——
+    // 灵力从 4 攒到预留 30 要两个多小时，这段时间一炉都不坐
+    // （2026-11-15 线上：灵力 4/100、打坐「没在打坐」，下次唤醒排到 45 分钟后）。
     // 预留的本意是「攒灵力别乱花」，不是「不许修炼」。
-    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) {
-      const rose = emit({ a: 'rise' })
-      // 收完立刻续上一炉：打坐不耗灵力，停下来等灵力纯属白等两个多小时。
-      // 例外和主流程一致——修为已满层且够突破时不再续坐，多打的修为会被
-      // 突破清零（xian-rules 的 c.xp=0），等于白扔。
-      const curR = Number(sim.cv?.r || 0)
-      const cvReady = Number(sim.cv?.s || 1) >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(curR, 9)
-      if (rose && !cvReady) emit({ a: 'sit' })
+    //
+    // 例外和主流程一致——修为已满层且够突破时不再打坐：突破成功会把本层
+    // 修为清零（xian-rules 的 c.xp=0），多打的修为在突破那一刻全部作废。
+    const curR = Number(sim.cv?.r || 0)
+    const cvReady = Number(sim.cv?.s || 1) >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(curR, 9)
+    if (sim.med) {
+      // 到 MED_MAX（30 分钟）就收功：超过的部分站点直接丢弃
+      // （xsrules 的 rise：d = Math.min(now - med.t, MED_MAX)）。
+      // 收完立刻续上一炉——打坐不耗灵力，停下来等灵力纯属白等。
+      if (t - Number(sim.med.t || 0) >= MED_MAX) {
+        const rose = emit({ a: 'rise' })
+        if (rose && !cvReady) emit({ a: 'sit' })
+      }
+    } else if (!cvReady) {
+      // 没在打坐就直接开一炉，别把这两个多小时空着
+      emit({ a: 'sit' })
     }
     const heal = huilingHeal(sim)
     const canEat = Number(sim.pills?.huiling || 0) >= 1 && dpUsedToday(sim, t) < PILL_DAILY

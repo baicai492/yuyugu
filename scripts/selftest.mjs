@@ -815,6 +815,28 @@ console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
         return { state: { xs: y }, now }
       }
       const ro = normalizeXianOptions({ enabled: true, reserveEnergy: 30, reserveManual: 30 })
+      // 没在打坐、灵力只有 4：必须直接开一炉，不能干等灵力回满。
+      // 打坐不耗灵力，等两个多小时等于这段时间完全不修炼
+      // （2026-11-15 线上：灵力 4/100、打坐「没在打坐」，唤醒排到 45 分钟后）。
+      const mkIdle = (en, cv = { r: 2, s: 3, xp: 0 }) => {
+        const y = A.newXs(now)
+        Object.assign(y, {
+          v: 1, st: 4, roots: { e: ['fire'], v: [] }, root: 'fire', tech: 'fire', techs: ['fire'],
+          lv: 5, en, enAt: now, cv, med: null,
+          pills: { peiyuan: 3, huiling: 0 }, plots: [], plotN: 0, seeds: {}, bag: {}, stone: 0, log: 0,
+        })
+        return { state: { xs: y }, now }
+      }
+      const idle = planXianActions(mkIdle(4), now, ro)
+      ok('预留生效 + 灵力 4 + 没在打坐 → 直接开一炉',
+        idle.actions.map((a) => a.a).join(',') === 'xsSit', idle.actions.map((a) => a.a).join(','))
+      const idleWake = nextXianWakeSec(mkIdle(4), now, {}, ro)
+      ok('…唤醒点也在 3 秒后（不是灵力回满的两个多小时后）',
+        idleWake - now <= 3, `${idleWake - now} 秒`)
+      // 满层且修为够突破时不开新炉：突破会把本层修为清零
+      const idleReady = planXianActions(mkIdle(4, { r: 2, s: 9, xp: 999999 }), now, ro)
+      ok('预留生效 + 修为已满够突破 → 不打坐（打了也白打）',
+        !idleReady.actions.some((a) => a.a === 'xsSit'), idleReady.actions.map((a) => a.a).join(','))
       const over = planXianActions(mkMed(41 * 60), now, ro)
       ok('预留生效 + 打坐 41 分钟 → 发出收功', over.actions.some((a) => a.a === 'xsRise'),
         over.actions.map((a) => a.a).join(','))
