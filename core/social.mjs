@@ -1513,14 +1513,19 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
           os.blockedReason = 'server-daily-cap'
           const rec = memo.stealSchedule?.[tg.id]
           if (rec) { rec.upcoming = []; rec.waves = []; rec.nextAt = 0 }
+          log(`偷菜：服务端说今日额度已用完，封到 ${new Date((k.until + 8 * 3600) * 1000).toISOString().slice(5, 16).replace('T', ' ')}（北京时间）`)
         } else if (k.kind === 'boundary-retry') {
           os.earlyRetry = 1
           os.cooldownUntil = Math.max(os.cooldownUntil || 0, clock + 1)
           skipAdvance = true
           if (memo.stealSchedule?.[tg.id]) memo.stealSchedule[tg.id].nextAt = k.retryAt
+          log(`偷菜：卡在解禁时刻上（409），1 秒后对同一波再试一次`)
         } else {
           os.cooldownUntil = Math.max(os.cooldownUntil || 0, k.until)
           os.blockedReason = 'rejected'
+          // 已经离开那个解禁边界了：清掉重试标记，下一波的 409 还能再试一次。
+          // 不清的话「卡过一次边界」会永久生效，之后的波次全都不再重试。
+          if (os.earlyRetry) os.earlyRetry = 0
         }
       }
       // 这座岛已经处理过了：推进到排好的下一波（多波次），没有就清空。
