@@ -34,6 +34,12 @@ export const BREW_READY_SEC = Math.max(BREW_MIN + 4, 19)
 // 自动化提交它们要么被拒、要么破坏存档，一律不碰。
 const FORBIDDEN_XIAN_ACTIONS = new Set(['xsRoot', 'xsStory', 'xsFight', 'xsWin', 'xsLose'])
 
+// 变异灵根（冰/雷/风/熔/毒）不在 ROOTS 里——ROOTS 只有五行。
+// 面板和日志要是直接回落到 id，就会显示成 wind/ice 这种英文（用户已反馈过 wind）。
+const VAR_ROOT_NAMES = Object.fromEntries(Object.values(FUSIONS).map((f) => [f.id, f.name]))
+const rootName = (id) => ROOTS[id] || VAR_ROOT_NAMES[id] || id
+
+
 // 会被「2.0 门票预留」拦下的动作：纯扩张类，属于「有余力才做」的事。
 // 收获不在里面——它是田块周转的保底，每块只吃 2 点；
 // 炼丹也不在——回灵丹是唯一能把灵力「变多」的东西（5 点换 30 点），
@@ -770,14 +776,28 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     }
   }
 
-  // 例行打坐循环：30 分钟一收一坐（即使满层也继续攒修为，给突破失败的损耗留缓冲）
-  if (!emittedStochastic) {
+  // 例行打坐循环：30 分钟一收一坐。
+  //
+  // 但「满层且修为已过突破线」之后不再打坐：突破成功会把本层修为清零
+  // （xian-rules.mjs:97 的 c.xp=0），多攒的部分除了给突破失败留缓冲，
+  // 其余全是白扔。smart 策略为了喂药园会压好几天不突破，这段时间打坐
+  // 攒的修为在突破那一刻全部作废——线上 2026-11-14 就是这么没的。
+  // 正在打坐的把它收掉（结算后不再重开），让状态干净。
+  const cvReady = Number(sim.cv?.s || 1) >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(curR, 9)
+  if (!emittedStochastic && cvReady) {
+    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX && actions.length < opts.maxActionsPerBatch) {
+      emit({ a: 'rise' })
+    }
+  }
+  if (!emittedStochastic && !cvReady) {
     if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX && actions.length + 1 <= opts.maxActionsPerBatch) {
       if (emit({ a: 'rise' }) && actions.length < opts.maxActionsPerBatch) emit({ a: 'sit' })
     } else if (!sim.med && actions.length < opts.maxActionsPerBatch) {
       emit({ a: 'sit' })
     }
+  }
 
+  if (!emittedStochastic) {
     // 灵根融合（默认关：融合是不可逆的），只在修为损耗最小的窗口做
     if (opts.autoFuse && Number(sim.cv?.r || 0) >= 1 && !(Number(sim.fuseCd || 0) > t) &&
       Number(sim.pills?.peiyuan || 0) >= 2 && Number(sim.stone || 0) >= 200 &&
@@ -896,6 +916,18 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
   if (xc.enabled === false) return { ran: false, actions: 0, reason: 'disabled', nextWakeAt: 0 }
 
   const t = Math.floor(world.now || 0)
+
+  // 灵根变动检测：托管自己从不融合（autoFuse 默认 false，规划器还有一层硬门控）。
+  // 如果两轮之间灵根变了，而我们上一轮没发过 xsFuse，那就是别的客户端在用同一登录态
+  // （网页端手动点、旧插件、另一台设备）。线上 2026-11-14 就丢过一次：
+  // 木+水被合成风灵根，全部日志零记录，只能从存档反推。这里在变化后的第一轮就喊出来。
+  const rootsNow = JSON.stringify(world.state?.xs?.roots || null)
+  if (memo.xsRoots != null && memo.xsRoots !== rootsNow) {
+    log(`修仙：灵根在托管之外被改动（${memo.xsRoots} → ${rootsNow}）。托管不会自动融合，` +
+      '请检查是否有别的客户端在用同一登录态', 'warn')
+  }
+  memo.xsRoots = rootsNow
+
   const opts = normalizeXianOptions({
     ...xc,
     enabled: true,
@@ -952,6 +984,9 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
   memo.xianReason = plan.reason
   memo.xianLastAt = world.now
   memo.xianLastOk = total
+  // 本轮可能自己融合过（autoFuse 开着时），把提交后的灵根记下来，
+  // 免得下一轮把「我们干的事」当成外部改动报警。
+  memo.xsRoots = JSON.stringify(world.state?.xs?.roots || null)
   return { ran: true, actions: total, reason: plan.reason, nextWakeAt: memo.xianWakeAt, summary: summarizeXs(first.actions) }
 }
 
@@ -1011,7 +1046,28 @@ export function xianSnapshot(world, cfg = {}) {
     mind: xsMind(sim),
     luck: xsLuck(sim),
     breakRate: Number(breakRate(sim).toFixed(2)),              // 突破成功率
-    slots: slotIds.map((id) => ({ id, name: skill(id)?.n || id })),
+    // 配招就是修仙里的「装备」：4 个技能槽。带上伤害/冷却等数值，
+    // 否则面板只有技能名，看不出这套配招强在哪。
+    slots: slotIds.map((id) => {
+      const k = skill(id) || {}
+      return {
+        id, name: k.n || id,
+        element: k.el ? rootName(k.el) : '通用',
+        dmg: Number(k.dmg || 0), cd: Number(k.cd || 0), cast: Number(k.cast || 0),
+        shield: Number(k.shield || 0), heal: Number(k.heal || 0),
+      }
+    }),
+  }
+
+  // 本层修为 / 突破线。突破成功时规则会把本层修为清零（xian-rules.mjs:97），
+  // 面板要把这条说清楚，否则看起来像「数据丢了」。
+  const cv = {
+    xp: Number(sim.cv?.xp || 0),
+    layerNeed: cvNeed(r, s),
+    breakNeed: cvNeed(r, 9),
+    canBreak: s >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(r, 9),
+    pillsNeed: r + 1,
+    pillsHave: Number(sim.pills?.peiyuan || 0),
   }
 
   const techDetail = (sim.techs || []).map((el) => {
@@ -1021,7 +1077,7 @@ export function xianSnapshot(world, cfg = {}) {
     return {
       id: el,
       name: TECHS[el]?.name || el,
-      element: ROOTS[TECHS[el]?.el || el] || '',
+      element: rootName(TECHS[el]?.el || el),
       layer: L, maxLayer: 9,
       mastery: m, nextNeed: need, nextIn: Math.max(0, need - m),
       buff: TECH_BUFF[el] || '',
@@ -1031,14 +1087,14 @@ export function xianSnapshot(world, cfg = {}) {
   })
 
   const rootDetail = {
-    elements: (sim.roots?.e || []).map((id) => ({ id, name: ROOTS[id] || id })),
-    variants: (sim.roots?.v || []).map((id) => ({ id, name: ROOTS[id] || id })),
+    elements: (sim.roots?.e || []).map((id) => ({ id, name: rootName(id) })),
+    variants: (sim.roots?.v || []).map((id) => ({ id, name: rootName(id) })),
     count: allRootEls.length,
     // 融合只能拿基础灵根两两配（变异灵根不参与组合）。
     fusion: Object.entries(FUSIONS).map(([key, F]) => {
       const [a, b] = key.split('+')
       return {
-        key, a, b, aName: ROOTS[a] || a, bName: ROOTS[b] || b,
+        key, a, b, aName: rootName(a), bName: rootName(b),
         id: F.id, name: F.name,
         possible: (sim.roots?.e || []).includes(a) && (sim.roots?.e || []).includes(b),
       }
@@ -1105,6 +1161,7 @@ export function xianSnapshot(world, cfg = {}) {
     story: Number(sim.st || 0),
     storyDone: Number(sim.st || 0) >= STORY_END,
     roots: sim.roots ? [...(sim.roots.e || []), ...(sim.roots.v || [])] : [],
+    rootNames: sim.roots ? [...(sim.roots.e || []), ...(sim.roots.v || [])].map(rootName) : [],
     realm: REALMS[r] || REALMS[0],
     realmIndex: r,
     stage: s,
@@ -1149,6 +1206,7 @@ export function xianSnapshot(world, cfg = {}) {
     // 全量明细（GUI「资料」卡片）。字段都是纯展示，托管决策不读它们。
     detail: {
       combat,
+      cv,
       techs: techDetail,
       roots: rootDetail,
       stages,

@@ -113,6 +113,7 @@ try {
       combatRows: count('xCombat'), rootsRows: count('xRoots'),
       stages: count('xStages'), npc: count('xNpc'), recipes: count('xRecipes'),
       combat: txt('xCombat'),
+      rootsText: txt('xRoots'),
       stagesText: [...(document.querySelectorAll('#xStages > *') || [])].map((e) => e.textContent),
       npcFirst: document.querySelector('#xNpc > *')?.textContent,
       recipesText: [...(document.querySelectorAll('#xRecipes > *') || [])].map((e) => e.textContent),
@@ -121,6 +122,22 @@ try {
   console.log('\n=== 修仙页 ===')
   console.log(JSON.stringify(xianProbe, null, 2))
   await page.screenshot({ path: path.join(ROOT, 'research', 'gui-xian.png'), fullPage: true })
+
+  // 人脉列表的滚动位置必须能保持住：每一轮 1.5 秒的轮询都会重渲染，
+  // 以前每次 replaceChildren 都把 scrollTop 打回 0，表现就是「一下拉就锁回去」。
+  const scrollProbe = await page.evaluate(async () => {
+    const list = document.querySelector('#xNpc > .xlist')
+    if (!list) return { ok: false, reason: '找不到人脉列表' }
+    const before = { h: list.scrollHeight, vh: list.clientHeight }
+    list.scrollTop = 80
+    const set = list.scrollTop
+    // 等两轮自动刷新（1.5s × 2）
+    await new Promise((r) => setTimeout(r, 3400))
+    const after = document.querySelector('#xNpc > .xlist')?.scrollTop
+    return { ok: after >= 60, set, after, ...before }
+  })
+  console.log('\n=== 人脉列表滚动保持 ===')
+  console.log(JSON.stringify(scrollProbe, null, 2))
 
   // 切到设置页
   await page.click('button[data-tab="settings"]')

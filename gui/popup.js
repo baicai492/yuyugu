@@ -331,26 +331,51 @@ function xItem(lines) {
 
 // 修仙资料卡：战力/功法、灵根/融合、试炼、人脉、丹方、地里作物。
 // 数据来自 xianSnapshot 的 detail 字段（全部按本地规则算，不额外发请求）。
+// 修仙资料卡的缓存键。修仙页每 1.5 秒刷一次，每次重建列表都会把滚动位置
+// 打回顶部（用户反馈「人脉一下拉就锁回去」）。detail 是纯展示数据，
+// 内容没变就整个跳过重建。minLeft 是「还剩几秒」，每刷新一次都变，
+// 但它只影响主卡片那行文字，不该触发列表重建。
+let lastDetailKey = ''
+
 function renderXianDetail(D) {
   const ids = ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes']
   if (!D) {
-    for (const id of ids) $(id).replaceChildren()
     $('xPlotDetail').textContent = '—'
+    if (lastDetailKey === '') return
+    lastDetailKey = ''
+    for (const id of ids) $(id).replaceChildren()
     return
+  }
+  const key = JSON.stringify(D, (k, v) => (k === 'minLeft' ? undefined : v))
+  if (key === lastDetailKey) return
+  lastDetailKey = key
+
+  // 真要重建时，也把每个列表的滚动位置带回去（按「父容器 id + 在父里的序号」定位）
+  const scrolls = new Map()
+  for (const el of document.querySelectorAll('#tab-xian .xlist')) {
+    const p = el.parentElement
+    if (!p?.id) continue
+    scrolls.set(p.id + ':' + [...p.children].indexOf(el), el.scrollTop)
   }
 
   // ---------- 战力与功法 ----------
   const c = D.combat || {}
+  const cv = D.cv || {}
   const combatRows = [
     xRow('战力', Number(c.power || 0).toFixed(2), '（境界 + 层数）× 灵根效率 × 功法倍率，和战斗模拟同一套'),
     xRow('气血', fmt(c.hp || 0)),
     xRow('灵根效率', '×' + (c.rootEffect ?? 1), '单灵根 ×1.5；多灵根 ×1'),
     xRow('修炼倍率', '×' + (c.cultivateMul ?? 1), '根数越少前期越快、越多后期越强；变异灵根每个再 +12%'),
     xRow('打坐加成', '×' + (c.meditateMul ?? 1), '心境越高、结为师父/道侣的人越多，打坐收益越高'),
-    xRow('突破成功率', Math.round((c.breakRate ?? 0) * 100) + '%', '失败会掉修为，心境/气运越高越稳'),
+    xRow('突破成功率', Math.round((c.breakRate ?? 0) * 100) + '%', '失败会掉 30% 修为、心境 −8；心情/气运越高越稳'),
     xRow('心境 / 气运', `${c.mind ?? 0} / ${c.luck ?? 0}`),
+    // 突破成功时规则会把本层修为清零（xian-rules.mjs:97 的 c.xp=0），
+    // 这是境界提升的代价，不是数据丢了。把规矩写在面板上。
+    xRow('本层修为', `${fmt(cv.xp ?? 0)} / ${fmt(cv.layerNeed ?? 0)}` +
+      (cv.canBreak ? ' · 已满' : ''), '突破成功后境界 +1、本层修为从 0 重算（站点规则）；超出的部分也会一并清零'),
+    xRow('突破所需', `培元丹 ×${cv.pillsNeed ?? 0}（现有 ${cv.pillsHave ?? 0}）`,
+      '修为到 9 层满线后，突破要吃掉 (境界+1) 颗培元丹'),
     xRow('今日斗法胜场', String(D.duelWins ?? 0)),
-    xRow('技能槽', (c.slots || []).map((s) => s.name).join(' → ') || '—'),
   ]
   const techList = document.createElement('div')
   techList.className = 'xlist'
@@ -370,7 +395,24 @@ function renderXianDetail(D) {
     ]))
   }
   if (!(D.techs || []).length) techList.append(xItem([[{ text: '还没学功法（去藏经阁学一部）', cls: 'dim' }]]))
-  $('xCombat').replaceChildren(...combatRows, techList)
+
+  // 技能槽 = 修仙里的「装备」：4 个，同门切磋和秘境战斗共用这一套。
+  const slotList = document.createElement('div')
+  slotList.className = 'xlist'
+  for (const s of c.slots || []) {
+    const nums = []
+    if (s.dmg) nums.push(`伤害 ${s.dmg}`)
+    if (s.shield) nums.push(`护盾 ${s.shield}`)
+    if (s.heal) nums.push(`回血 ${s.heal}`)
+    if (s.cd) nums.push(`冷却 ${s.cd}s`)
+    slotList.append(xItem([[
+      { text: s.name, bold: true },
+      { text: `  ${s.element}`, cls: 'dim' },
+      { text: nums.length ? `  ${nums.join(' · ')}` : '', cls: 'dim' },
+    ]]))
+  }
+  if (!(c.slots || []).length) slotList.append(xItem([[{ text: '还没配招', cls: 'dim' }]]))
+  $('xCombat').replaceChildren(...combatRows, techList, slotList)
 
   // ---------- 灵根与融合 ----------
   const R = D.roots || {}
@@ -459,6 +501,13 @@ function renderXianDetail(D) {
         (e.dry ? `（待浇 ${e.dry}）` : '') +
         (e.minLeft != null ? `（最早 ${fmtSec(e.minLeft)}）` : '')).join(' · ')
     : '—'
+
+  for (const el of document.querySelectorAll('#tab-xian .xlist')) {
+    const p = el.parentElement
+    if (!p?.id) continue
+    const top = scrolls.get(p.id + ':' + [...p.children].indexOf(el))
+    if (top) el.scrollTop = top
+  }
 }
 
 function renderXian() {
@@ -469,12 +518,14 @@ function renderXian() {
     $('xStatus').textContent = x?.error ? '读取失败：' + x.error : '读取中…'
     for (const id of ['xRealm', 'xCv', 'xStone', 'xGarden', 'xEnergy', 'xCan', 'xPlots', 'xGround', 'xPlotDetail', 'xBag', 'xBrew', 'xMed', 'xTech', 'xWake',
       'xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
-    for (const id of ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes']) $(id).replaceChildren()
+    renderXianDetail(null)   // 会同时清掉资料卡和 lastDetailKey 缓存
     return
   }
   $('xRealm').textContent = `${x.realm}${x.stage ? x.stage + ' 层' : ''}`
   const rootTxt = (x.roots || []).map((r) => nm(ROOT_NAMES, r)).join('')
   $('xCv').textContent = `修为 ${fmt(x.cvXp)}/${fmt(x.cvNeed)}｜${rootTxt || '无灵根'}灵根`
+  $('xCv').title = '修为按「本境界本层」计。突破成功后境界 +1、本层修为从 0 重算（站点规则），不是数据丢了；' +
+    '所以托管在修为攒满后会立刻突破，避免溢出部分被清零。'
   $('xStone').textContent = fmt(x.stone)
   $('xGarden').textContent = `药园 Lv${x.gardenLv} · ${fmt(x.gardenXp)}/${fmt(x.gardenNeed)}`
   $('xEnergy').textContent = `${x.energy}/${x.energyMax}`
@@ -567,6 +618,8 @@ function renderXian2() {
     : '—'
   $('x2Slots').textContent = (s.slots || []).map((id) => nm(SPELL_NAMES, id)).join(' → ') || '默认（主修两式 + 灵弹 + 护体）'
   $('x2Mats').textContent = countList(s.mats, MAT_NAMES) || '—'
+  // 材料现在还没有消耗途径：xs3.js 的说明写的是「秘境掉落，下一批『法宝』开放后用来炼器」。
+  $('x2Mats').title = '秘境掉落的材料，等站点的「法宝炼器」开放后才用得上；现在只进不出，不算资产'
 }
 
 function renderArcade() {
