@@ -333,6 +333,10 @@ export class Engine {
         this.ledger.spend = spend
       }
     }
+    // 余额税单独留一份给 GUI：它每天 08:00 按那一刻的现金扣 0.1%/0.3%，
+    // 是「钱放着不动」的日成本。用户看到这个数才会决定要不要把现金花掉。
+    const balTax = hist.filter((h) => h.kind === 'pet-world-balance-tax').reduce((x, h) => x - h.delta, 0)
+    this.memo.srvTax = { day, saleTax, balanceTax: balTax, at: bal?.created_at || 0 }
     this.memo.srvBook = { day }
     this.savePersist()
   }
@@ -1257,6 +1261,29 @@ export class Engine {
       xian2: this.xian2View(),
       arcade: this.arcadeView(),
       vault: this.vaultView(),
+      tax: this.taxView(),
+    }
+  }
+
+  /**
+   * 税务快照：余额税是「持有现金的日成本」——每天 08:00 按那一刻钱包余额扣，
+   * 300 万以内免、300 万~1000 万 0.1%、超出 1000 万的部分 0.3%（不扣穿 300 万）。
+   * 账号 2600 万现金时日成本约 5.6 万 D，比大多数投资的日收益都高。
+   */
+  taxView() {
+    const w = this.world
+    if (!w.ready) return null
+    const R = w.R
+    let next = 0
+    try { next = Number(R.b12BalanceTax?.(w.coins)) || 0 } catch { next = 0 }
+    const today = this.memo?.srvTax?.day === R.worldDay(w.now)
+    return {
+      free: R.B12_TAX?.free ?? 3000000,
+      high: R.B12_TAX?.high ?? 10000000,
+      saleToday: this.ledger.tax || 0,
+      balancePaidToday: today ? Number(this.memo.srvTax.balanceTax) || 0 : 0,
+      balanceNext: next,
+      paidAt: today ? Number(this.memo.srvTax.at) || 0 : 0,
     }
   }
 
