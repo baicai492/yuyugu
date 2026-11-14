@@ -18,6 +18,7 @@ import {
   assertSafeXianBatch, computeAlchemyHerbTargets, computeDesiredPeiyuanStock,
   dpUsedToday, normalizeXianOptions, toWireXsAction, xsDay,
 } from './xian.mjs'
+import { EN_MAX } from './xian-rules.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -381,8 +382,27 @@ export function planXian2Actions(world, now, opts = {}) {
   const d = xsDay(t)
   const acts = []
   const maxN = Math.max(1, Math.min(30, opts.maxActionsPerBatch ?? 30))
+  // 用户在「修仙 → 策略」里设的预留灵力：严格保底，2.0 也受它约束。
+  //
+  // 以前这道约束只接在 1.0 的规划器上，2.0 一行都没读——于是线上 2026-11-15
+  // 出现「设了预留 30，灵力还是掉到 8」：1.0 的农事确实在 30 停手了，但
+  // 00:27:47 的 xsRin×2（两次秘境 −30）和 00:29:05 的 xsRin×1 + xsAb×1
+  // （−15、−10）把剩下的全吃光，最后靠自然回复才回到 8。
+  const reserve = Math.max(0, Math.min(EN_MAX, Math.floor(Number(opts.reserveManual) || 0)))
+  // 2.0 里确定扣灵力的只有两个动作：进秘境（15）、同门斗法（10）。
+  // 秘境里 walk/撤出不耗灵力，其余动作（俸禄/委托/对话/赠礼/配招）也不耗。
+  const energyCost2 = (a) => {
+    if (!a) return 0
+    if (a.a === 'rin') return A.RLM_EN
+    if (a.a === 'ab') return A.FIGHT_COST
+    return 0
+  }
   const emit = (a) => {
     if (acts.length >= maxN) return false
+    if (reserve > 0) {
+      const cost = energyCost2(a)
+      if (cost > 0 && Math.max(0, Number(sim.en || 0) - cost) < reserve) return false
+    }
     let r
     try { r = A.act(sim, a, t, () => 0.99) } catch { return false }
     if (!r?.ok) return false
@@ -518,6 +538,9 @@ export function planXian2Actions(world, now, opts = {}) {
         const cw = structuredClone(sim)
         const r = A.act(cw, { a: 'chap', el: id, n, i }, t, () => 0.99)
         if (!r?.ok) continue
+        // 严格保底：章节选项可能带确定的灵力消耗（如 lafish 第一章 −10），
+        // 扣完低于预留就不选这个选项。
+        if (reserve > 0 && Number(cw.en || 0) < reserve && Number(cw.en || 0) < Number(sim.en || 0)) continue
         const v = bagValue(cw) - bagValue(sim)
         if (!best || v > best.v) best = { v, i }
       }
@@ -620,6 +643,9 @@ export function planXian2Actions(world, now, opts = {}) {
         let best = null
         E.opt.forEach((o, i) => {
           if (o.need?.r && (sim.cv?.r || 0) < o.need.r) return
+          // 严格保底：机缘的选项可能是「赌一把」——某个结果分支扣灵力（thunder −10、
+          // drunk / snake −20）。按最坏分支判断，扣完低于预留就不选这一项。
+          if (!evOptionSafe(o, sim.en, reserve)) return
           if (o.cost) {
             if (o.cost.stone && (sim.stone || 0) < o.cost.stone) return
             let short = false
@@ -650,17 +676,40 @@ export function planXian2Actions(world, now, opts = {}) {
   return { actions: acts.slice(0, maxN), reason }
 }
 
+/**
+ * 机缘的这个选项在「严格保底」下能不能选（reserve = 0 时一律放行）。
+ *
+ * 机缘是「赌一把」：某些分支会扣灵力（thunder −10、drunk / snake −20）。
+ * 按**最坏分支**判断——扣完低于预留就不选这一项。
+ * 带负面灵力的事件通常另有一个不扣灵力的选项，不会因此卡住；
+ * 万一全被挡掉（比如 snake 的备选项要金菇而手上没有），
+ * nextXian2WakeSec 会等到事件过期，而不是每 15 秒重试。
+ */
+function evOptionSafe(o, en, reserve) {
+  if (!reserve) return true
+  const worst = Math.min(...(o?.rolls || []).map((r) => Number(r?.[1]?.en || 0)))
+  return !(worst < 0 && Number(en || 0) + worst < reserve)
+}
+
 /** 下一次值得回来的时刻（秒）；没有就返回 Infinity */
-export function nextXian2WakeSec(world, now) {
+export function nextXian2WakeSec(world, now, opts = {}) {
   const x = world?.state?.xs
   if (!x) return Infinity
   const t = Math.floor(now || world.now || 0)
   const d = xsDay(t)
   const cands = []
+  // 用户手动设的预留灵力：秘境 / 斗法的等待点要按「预留 + 门票」算，
+  // 否则会按老门槛（15 / 25）每小时醒来一次、每次都被 emit 挡回去空转。
+  const reserve = Math.max(0, Math.min(EN_MAX, Math.floor(Number(opts.reserveManual) || 0)))
 
-  // 机缘：手上有未决的事件就尽快选；否则等冷却好了再抽
-  if (x.ev?.cur && t - x.ev.cur.t <= 1800) cands.push(t + 15)
-  else if (x.ev?.d !== d || (x.ev?.n || 0) < A.EV_DAILY) {
+  // 机缘：手上有未决的事件就尽快选；否则等冷却好了再抽。
+  // 例外：当前事件的所有选项都被「严格保底」挡掉了——那就别每 15 秒重试，
+  // 直接睡到事件过期（1800 秒）再抽新的。
+  if (x.ev?.cur && t - x.ev.cur.t <= 1800) {
+    const E = A.EVENTS.find((e) => e.id === x.ev.cur.id)
+    const anySafe = !E || E.opt.some((o) => evOptionSafe(o, x.en, reserve))
+    cands.push(anySafe ? t + 15 : Number(x.ev.cur.t) + 1800 + 2)
+  } else if (x.ev?.d !== d || (x.ev?.n || 0) < A.EV_DAILY) {
     const at = (x.ev?.d === d ? (x.ev.last || 0) : 0) + A.EV_GAP
     cands.push(at <= t ? t + 20 : at)
   }
@@ -670,7 +719,9 @@ export function nextXian2WakeSec(world, now) {
   else if (x.tech) {
     const left = x.rd?.d === d ? A.RLM_DAILY - (x.rd.n || 0) : A.RLM_DAILY
     if (left > 0) {
-      const need = Math.max(0, A.RLM_EN - (x.en || 0))
+      // 有手动预留时，门槛是「预留 + 门票」：扣完门票不能低于预留。
+      const gate = A.RLM_EN + reserve
+      const need = Math.max(0, gate - (x.en || 0))
       // 灵力是「每隔 RG 秒 +1」，起点是 enAt（上次结算时刻），不是 now。
       // 写成 t + need*RG 会把已经走了的那半格丢掉，每次都晚醒半格到一格。
       if (need > 0) {
@@ -685,7 +736,8 @@ export function nextXian2WakeSec(world, now) {
   // （秘境还有额度时门槛是 15+10，见 planXian2Actions 第 9 步）
   const duels = x.df?.d === d ? (x.df.n || 0) : 0
   const realmLeft2 = x.rlm ? 0 : (x.rd?.d === d ? Math.max(0, A.RLM_DAILY - (x.rd.n || 0)) : A.RLM_DAILY)
-  const fightFloor2 = realmLeft2 > 0 ? A.RLM_EN + A.FIGHT_COST : A.FIGHT_COST
+  // 有手动预留时门槛同样抬高：一场斗法的成本是 10，扣完不能低于预留。
+  const fightFloor2 = (realmLeft2 > 0 ? A.RLM_EN + A.FIGHT_COST : A.FIGHT_COST) + reserve
   if (duels < A.FIGHT_DAILY && (x.en || 0) < fightFloor2) {
     const rg = A.EN_REGEN * (x.tech === 'wind' ? 0.75 : 1)
     const at = Number(x.enAt || t) + (fightFloor2 - (x.en || 0)) * rg
@@ -715,13 +767,15 @@ export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
     breakMode: xc.breakMode,
     autoFuse: xc.autoFuse,
     fuseTarget: xc.fuseTarget,
+    // 用户手动设的预留灵力：2.0 也要守（见 planXian2Actions 的 emit 门控）
+    reserveManual: xc.reserveManual,
     memo,
   }
   const first = planXian2Actions(world, world.now, opts)
   if (!first.actions.length) {
     // 算出来的唤醒点很近但这一轮一个动作都排不出来（比如秘境预演判定不值），
     // 说明「看起来有活其实干不了」——把唤醒推后，避免每 20 秒空转一次。
-    let at = nextXian2WakeSec(world, world.now)
+    let at = nextXian2WakeSec(world, world.now, opts)
     if (Number.isFinite(at) && at - world.now < 60) at = world.now + 300
     memo.xian2WakeAt = at
     memo.xian2Reason = first.reason
@@ -774,7 +828,7 @@ export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
     plan = planXian2Actions(world, world.now, opts)
   }
 
-  memo.xian2WakeAt = nextXian2WakeSec(world, world.now)
+  memo.xian2WakeAt = nextXian2WakeSec(world, world.now, opts)
   if (total === 0) {
     // 提交了但全被拒：多半是规则/状态不同步，别马上回来重试
     const t = world.now

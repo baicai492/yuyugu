@@ -638,6 +638,12 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
   // 作物不会烂，晚收只是占着田。
   const manualReserve = opts.reserveManual || 0
   if (manualReserve > 0 && Number(sim.en || 0) < manualReserve) {
+    // 收功不耗灵力，但打坐超过 MED_MAX（30 分钟）的部分站点直接丢弃
+    // （xsrules 的 rise：d = Math.min(now - med.t, MED_MAX)）。
+    // 不在这里收，灵力补齐前会一直挂着打坐，超时的部分全白打——
+    // 2026-11-15 线上：灵力 8 < 预留 30，打坐挂了 41 分钟，后 11 分钟白扔。
+    // 预留的本意是「攒灵力别乱花」，不是「不许收功」。
+    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) emit({ a: 'rise' })
     const heal = huilingHeal(sim)
     const canEat = Number(sim.pills?.huiling || 0) >= 1 && dpUsedToday(sim, t) < PILL_DAILY
     // 吃了会溢出一大截就不吃（预留 100、当前 95 时吃一颗浪费 25 点），
@@ -986,6 +992,9 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
   // 醒来还是不够（照样不做动作），白转几十轮。
   const mr = opts.reserveManual || 0
   if (mr > 0 && Number(sim.en || 0) < mr) {
+    // 打坐已到上限：先醒过来收功。rise 不耗灵力，但超时的修为站点直接丢弃，
+    // 不能因为灵力没补够就跟着一起等（2026-11-15 线上挂了 41 分钟）。
+    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) return t + 3
     const rg = regenSec(sim)
     const backAt = Number(sim.enAt || t) + (mr - Number(sim.en || 0)) * rg + 1
     return backAt > t ? backAt : t + rg

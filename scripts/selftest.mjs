@@ -847,6 +847,26 @@ console.log('\n[新] 修仙2.0 · 秘境只认通关 / 手动让位 / 配招优�
     ok('残血秘境会撤出', p.actions.some((a) => a.a === 'xsRout'), p.actions.map((a) => a.a).join(','))
   }
 
+  // 2.5) 手动预留灵力：2.0 的秘境 / 斗法也不能把灵力花到预留以下
+  //
+  // 线上 2026-11-15：设了预留 30，灵力却掉到 8——1.0 的农事确实在 30 停手了，
+  // 但 2.0 的 xsRin（−15）和 xsAb（−10）完全没有这道约束。
+  {
+    const rin = (p) => p.actions.filter((a) => a.a === 'xsRin').length
+    const ab = (p) => p.actions.filter((a) => a.a === 'xsAb').length
+    const p45 = planXian2Actions(mk({ en: 45 }), now, { memo: {}, realm: true, reserveManual: 30 })
+    ok('预留 30 · 灵力 45 还能进 1 次秘境（45−15=30 刚好不低于预留）',
+      rin(p45) === 1, `秘境 ${rin(p45)} 次`)
+    const p40 = planXian2Actions(mk({ en: 40 }), now, { memo: {}, realm: true, reserveManual: 30 })
+    ok('预留 30 · 灵力 40 不能进秘境（40−15=25 < 30）', rin(p40) === 0, `秘境 ${rin(p40)} 次`)
+    const p8 = planXian2Actions(mk({ en: 8 }), now, { memo: {}, realm: true, reserveManual: 30 })
+    ok('预留 30 · 灵力 8 时不进秘境也不斗法', rin(p8) === 0 && ab(p8) === 0,
+      `秘境 ${rin(p8)} 次 / 斗法 ${ab(p8)} 次`)
+    // 预留 0 时行为不变（老门槛）
+    const pOld = planXian2Actions(mk({ en: 40 }), now, { memo: {}, realm: true, reserveManual: 0 })
+    ok('预留 0 时灵力 40 仍能进秘境（不引入回归）', rin(pOld) >= 1, `秘境 ${rin(pOld)} 次`)
+  }
+
   // 3) 手动秘境让位：realm=false 且 6 小时内还在走图
   {
     const w = mk({ rlm: { a: 'bamboo', sd: 123, L: 0, R: 1, c: 1, hp: 40, mx: 60, lt: {}, t: now - 100 } })
