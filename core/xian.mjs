@@ -640,9 +640,12 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
   if (manualReserve > 0 && Number(sim.en || 0) < manualReserve) {
     // 打坐不耗灵力，所以「攒灵力」和「修炼」不冲突：该坐就坐，灵力照常回。
     //
-    // 以前这里只在「已经在打坐且超时」时收功，没在打坐就干等——
-    // 灵力从 4 攒到预留 30 要两个多小时，这段时间一炉都不坐
-    // （2026-11-15 线上：灵力 4/100、打坐「没在打坐」，下次唤醒排到 45 分钟后）。
+    // 以前这里只在「已经在打坐且超时」时收功，没在打坐就整段早退。
+    // 早退本身没问题（耗灵力的动作本来就该停），问题是它连主流程末尾的
+    // 「突破 → 打坐」一起跳过了，于是灵力补齐前的整段时间一炉都不坐。
+    // 空窗多长只取决于预留和当前灵力：御风诀主修 270 秒/点，预留 15、
+    // 灵力 4 时约 50 分钟（2026-11-15 线上截图正是「灵力 4/100、没在打坐、
+    // 下次唤醒 45 分钟后」；配 1.0 的默认速度则是 66 分钟）。
     // 预留的本意是「攒灵力别乱花」，不是「不许修炼」。
     //
     // 例外和主流程一致——修为已满层且够突破时不再打坐：突破成功会把本层
@@ -674,7 +677,7 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
         if (emit({ a: 'rise' })) emit({ a: 'sit' })
       }
     } else {
-      // 没在打坐就直接开一炉，别把这两个多小时空着
+      // 没在打坐就直接开一炉，别把这段时间空着
       emit({ a: 'sit' })
     }
     const heal = huilingHeal(sim)
@@ -1031,7 +1034,7 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
     const rg = regenSec(sim)
     const backAt = Number(sim.enAt || t) + (mr - Number(sim.en || 0)) * rg + 1
     const energyAt = backAt > t ? backAt : t + rg
-    // 正在打坐就还要在 30 分钟上限回来收功续坐：灵力从 8 攒到预留 30 要两个多小时，
+    // 正在打坐就还要在 30 分钟上限回来收功续坐：灵力补齐要几十分钟，
     // 一直睡到那时，中间那一炉打坐超过上限的部分全被站点丢弃。
     if (sim.med) {
       const medCapAt = Number(sim.med.t || t) + MED_MAX + 1
