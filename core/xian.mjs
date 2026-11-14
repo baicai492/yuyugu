@@ -1147,8 +1147,17 @@ export function xianSnapshot(world, cfg = {}) {
     const need = Object.entries(P.need || {}).map(([k, n]) => ({
       id: k, name: HERBS[k]?.name || k, need: n, have: Number(sim.bag?.[k] || 0),
     }))
-    return { id, name: P.name, sell: P.sell, need, can: need.every((x) => x.have >= x.need) }
+    return { id, name: P.name, sell: P.sell, desc: P.desc || '', need, can: need.every((x) => x.have >= x.need) }
   })
+
+  // 作物表：规则常量（不随存档变），面板用来对照「种什么划算」。
+  // 净赚 = 卖价 − 种子价；一次收获 1 株（每 4 个动作那次 +1，见 x.log）。
+  const crops = Object.entries(HERBS).map(([id, H]) => ({
+    id, name: H.name,
+    seed: H.seed, sell: H.sell, grow: H.grow, lv: H.lv,
+    profit: H.sell - H.seed,
+    perHour: Number(((H.sell - H.seed) / (H.grow / 3600)).toFixed(1)),
+  })).sort((a, b) => a.lv - b.lv)
 
   // 田亩按作物归组（24 块逐条列太吵），只给株数、成熟数和「最早还要多久」。
   const byHerb = {}
@@ -1238,6 +1247,7 @@ export function xianSnapshot(world, cfg = {}) {
       stages,
       relations,
       recipes,
+      crops,
       plotsByHerb,
       mats: { ...(sim.mat || {}) },
       // 今日同门斗法（xsAb）胜场，和试炼/秘境分开统计

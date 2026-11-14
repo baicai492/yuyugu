@@ -112,6 +112,8 @@ try {
       realm: txt('xRealm'), stone: txt('xStone'), plotDetail: txt('xPlotDetail'),
       combatRows: count('xCombat'), rootsRows: count('xRoots'),
       stages: count('xStages'), npc: count('xNpc'), recipes: count('xRecipes'),
+      crops: count('xCrops'),
+      cropsText: txt('xCrops'),
       // 资源统计：材料 / 累计 / 每日 / 首通都要有值（主程序提供 detail.mats、history、daily）
       assets: txt('xAssets'), assetMats: txt('xAssetMats'), assetHist: txt('xAssetHist'),
       assetDaily: txt('xAssetDaily'), assetClears: txt('xAssetClears'),

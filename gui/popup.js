@@ -361,7 +361,7 @@ function xItem(lines) {
 let lastDetailKey = ''
 
 function renderXianDetail(D) {
-  const ids = ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes']
+  const ids = ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes', 'xCrops']
   if (!D) {
     $('xPlotDetail').textContent = '—'
     if (lastDetailKey === '') return
@@ -507,9 +507,25 @@ function renderXianDetail(D) {
         text: (p.need || []).map((n) => `${n.name} ${n.have}/${n.need}`).join(' · '),
         cls: 'dim',
       }],
+      // 丹药效果（规则里 PILLS.desc）：回灵丹 +30 灵力、每日 3 颗；培元丹 +40 药园经验
+      ...(p.desc ? [[{ text: p.desc, cls: 'dim' }]] : []),
     ]))
   }
   $('xRecipes').replaceChildren(recList)
+
+  // ---------- 作物表 ----------
+  // 规则常量，不随存档变；净赚 = 卖价 − 种子价（一次收获 1 株，每 4 个动作那次 +1）。
+  const cropList = document.createElement('div')
+  cropList.className = 'xlist'
+  for (const c of D.crops || []) {
+    cropList.append(xItem([[
+      { text: c.name, bold: true },
+      { text: `  种子 ${c.seed} → 卖 ${c.sell}`, cls: 'dim' },
+      { text: `  净赚 ${c.profit}`, cls: c.profit > 0 ? 'ok' : 'dim' },
+      { text: `  ${fmtSec(c.grow)} · Lv${c.lv} 解锁`, cls: 'dim' },
+    ]]))
+  }
+  $('xCrops').replaceChildren(cropList)
 
   // ---------- 地里作物（按作物归组） ----------
   const ph = D.plotsByHerb || []
