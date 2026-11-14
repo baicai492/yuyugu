@@ -210,6 +210,24 @@ function renderOverview() {
     ? `今日 ${fmt(tx.balancePaidToday)} · 明日预计 ${fmt(tx.balanceNext)}`
     : '—'
   $('balTax').className = tx && tx.balanceNext > 0 ? 'down' : 'muted'
+  // 规则模块：版本号 + 内容 hash + 最近检查时刻。
+  // 站点「改了公式却不换版本号」和「检查一直失败」都不会报错，
+  // 只会让托管悄悄用错规则——所以把这两件事直接摆在界面上。
+  const rl = status.rules
+  if (rl?.ver) {
+    const hhmm = rl.checkedAt
+      ? new Date(rl.checkedAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+      : '—'
+    $('rulesInfo').textContent = rl.ok === false
+      ? `检查失败×${rl.fail}（仍用 v${rl.ver}）`
+      : `v${rl.ver} · ${String(rl.hash || '').slice(0, 8) || '—'} · ${hhmm} 检查`
+    $('rulesInfo').className = rl.ok === false ? 'down' : 'muted'
+    $('rulesInfo').title = `站点规则模块版本 v${rl.ver}\n` +
+      `内容 hash ${rl.hash || '—'}（每 6 小时整份重下一次比对，变了会自动热替换）\n` +
+      `最近版本检查 ${hhmm}${rl.contentCheckedAt ? `，最近内容比对 ${new Date(rl.contentCheckedAt * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : ''}`
+  } else {
+    $('rulesInfo').textContent = '—'
+  }
   // 现金盈亏 = 收入 − 支出；差额（余额税、罚款、手动买卖等）单独列一行，
   // 否则「收入 − 支出」和实际余额对不上时看不出原因。
   const cashFlow = (status.ledger.earn || 0) - (status.ledger.spend || 0)

@@ -983,5 +983,53 @@ console.log('\n[新] 服务端时钟校准')
   }
 }
 
+console.log('\n[新] 规则同版本内容变更检测')
+{
+  const M2 = await import('../core/rules.mjs')
+  const { readFileSync: rf, writeFileSync: wf } = await import('node:fs')
+  const realFetch = globalThis.fetch
+  const file = M2.cachedRulesFile()
+  const origText = rf(file, 'utf8')
+  const ver = M2.rulesVersion()
+  ok('缓存里有规则文件且版本不是 cached', Boolean(file) && /^[0-9a-f]+$/.test(ver), `rules-${ver}.mjs`)
+  const h0 = M2.rulesContentHash()
+  ok('加载后有内容 hash', /^[0-9a-f]{40}$/.test(h0), h0.slice(0, 8))
+
+  // 假站点：/pets 永远返回同一版本号；pet-world-rules.js 返回给定内容
+  const mock = (rulesText) => {
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('/pets')) return { ok: true, text: async () => `<script src="/pets.js?v=${ver}"></script>` }
+      if (u.includes('pet-world-rules.js')) return { ok: true, text: async () => rulesText }
+      return { ok: false, status: 404, text: async () => '' }
+    }
+  }
+
+  try {
+    // 1) 版本号没变、内容也没变：识别为「已检查」，一个字节都不写
+    mock(origText)
+    const u1 = await M2.checkRulesUpdate({ baseUrl: 'http://mock.local', force: true })
+    ok('同版本同内容：识别为未变', u1?.changed === false && u1?.contentChecked === true,
+      `changed=${u1?.changed} checked=${u1?.contentChecked}`)
+    ok('同版本同内容：hash 不变', u1?.hash === h0, String(u1?.hash).slice(0, 8))
+    ok('同版本同内容：没动缓存文件', rf(file, 'utf8') === origText)
+
+    // 2) 版本号没变、内容变了：同名覆盖缓存 + 热替换，并标记 sameVersion
+    mock(origText + '\n// tampered-for-test\n')
+    const u2 = await M2.checkRulesUpdate({ baseUrl: 'http://mock.local', force: true })
+    ok('同版本新内容：识别为变更', u2?.changed === true && u2?.sameVersion === true,
+      `changed=${u2?.changed} same=${u2?.sameVersion}`)
+    ok('同版本新内容：hash 变了', Boolean(u2?.hash) && u2.hash !== h0,
+      `${String(u2?.oldHash).slice(0, 8)} → ${String(u2?.hash).slice(0, 8)}`)
+    ok('同版本新内容：缓存文件已覆盖', rf(file, 'utf8').endsWith('// tampered-for-test\n'))
+  } finally {
+    // 还原真实缓存文件并重新加载：不污染后续自测和下次离线启动
+    wf(file, origText, 'utf8')
+    globalThis.fetch = realFetch
+    await M2.loadRules({ ver, force: true }).catch(() => null)
+  }
+  ok('还原后 hash 回到原值', M2.rulesContentHash() === h0, M2.rulesContentHash().slice(0, 8))
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)

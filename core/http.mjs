@@ -177,6 +177,8 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
   return {
     baseUrl,
     stats,
+    // 规则模块热更新要用它重新拉 /pets 页面取版本号（不登录拿不到带 ?v= 的 script 标签）
+    get cookie() { return cookie },
     get: (p, o) => request(p, { ...o, method: 'GET' }),
     post: (p, body, o) => request(p, { ...o, method: 'POST', body }),
     // 掐点用：最近一次往返耗时 / 下一次 POST 还要等多久。

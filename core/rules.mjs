@@ -1,6 +1,7 @@
 // 规则模块加载：直接 import 站点线上那一份 pet-world-rules.js。
 // 这是本项目的核心设计——结算公式、价格公式、五子棋 AI 全部逐字一致，不移植、不抄写。
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -9,10 +10,17 @@ export const ROOT = resolve(HERE, '..')
 const CACHE_DIR = resolve(ROOT, 'cache')
 
 let R = null, currentVer = '', loadedAt = 0
+// 当前加载的规则文件内容 hash。站点有可能「悄悄改公式但不换版本号」——
+// 只比版本号会一直用旧公式且不报错，所以再按内容 hash 兜一层。
+let contentHash = ''
+// 上次整份下载做 hash 比对的时间（ms）。版本号没变时每 6 小时才重下一次。
+let lastContentCheck = 0
 // 游乐馆（弹弹乐 / 鲸鱼桌球 / 鲸鱼保龄）是**独立的** /arcade-rules.js，
 // 不在 pet-world-rules.js 的导出里（b12ExtraAction 只是内部调用了同一份代码）。
 // 所以这里单独缓存、单独热替换，和主规则同版本号。
 let ARC = null, arcVer = ''
+
+const sha1 = (text) => createHash('sha1').update(text).digest('hex')
 
 /** 从站点页面里取当前版本号（app.js?v=xxxx / pets.js?v=xxxx） */
 export async function fetchVersion(baseUrl, cookie, { timeoutMs = 15000, tries = 2 } = {}) {
@@ -105,9 +113,11 @@ export async function loadRulesCached() {
   R = mod
   currentVer = /rules-([0-9a-f]+)\.mjs/.exec(file)?.[1] || 'cached'
   loadedAt = statSync(file).mtimeMs
+  try { contentHash = sha1(readFileSync(file, 'utf8')) } catch {}
   await loadArcadeRulesCached()
   return R
 }
+
 
 /**
  * 用缓存兜底：网络抖动 / 站点抽风时不该让主程序起不来。
@@ -158,10 +168,12 @@ export async function loadRules({ baseUrl = 'https://52dmeme.com', ver, cookie, 
     }
     if (!text.includes('export function applyActions')) throw new Error('规则模块结构变了（缺少 applyActions），需要人工确认')
     writeFileSync(file, text, 'utf8')
+    lastContentCheck = Date.now()
   }
   const mod = await import(pathToFileURL(file).href + '?t=' + Date.now())
   if (typeof mod.applyActions !== 'function') throw new Error('规则模块缺少 applyActions')
   R = mod; currentVer = v; loadedAt = Date.now()
+  try { contentHash = sha1(readFileSync(file, 'utf8')) } catch {}
   // 游乐馆是独立文件；拉不到不影响主流程，缓存里有旧版就先用旧版
   await loadArcadeRules({ baseUrl, ver: v }).catch(() => null)
   return R
@@ -170,6 +182,7 @@ export async function loadRules({ baseUrl = 'https://52dmeme.com', ver, cookie, 
 export const rules = () => R
 export const rulesVersion = () => currentVer
 export const rulesLoadedAt = () => loadedAt
+export const rulesContentHash = () => contentHash
 
 /** 用规则模块初始化长夜时钟（每次拿到服务端 clockStart 都要调用） */
 export function configureClock(clockStart) {
@@ -187,23 +200,70 @@ export function configureClock(clockStart) {
  * 季节判错、价格算错、五子棋 AI 版本对不上，全都不报错，只是收益变低。
  * （今天排查时也踩过类似的坑：本地 cropStage 判番茄枯萎、服务端却允许收获。）
  *
- * 返回 { changed, from, to } 或 null（没变化/取不到版本号）。
+ * 版本号没变也不敢信：站点完全可以改了公式却不换 ?v=。所以每
+ * contentIntervalMs（默认 6 小时）把整份规则（~117KB）重下一次比对内容 hash，
+ * 变了就同名覆盖缓存并热替换，返回 sameVersion=true 让上层提示。
+ *
+ * 返回：
+ *   { changed, from, to, hash, contentChecked? , sameVersion? }  检查成功
+ *   null                                                          取不到版本号/下载失败
+ * 注意 null 不等于「没变化」——上层靠它统计连续失败次数并告警。
  * 任何异常都吞掉：规则检查失败不该影响正常托管。
  */
-export async function checkRulesUpdate({ baseUrl, cookie } = {}) {
+export async function checkRulesUpdate({ baseUrl, cookie, force = false, contentIntervalMs = 6 * 3600_000 } = {}) {
   try {
     const before = currentVer
     const v = await fetchVersion(baseUrl, cookie || '')
-    if (!v || v === before) return null
-    // 新模块实例的 b12ClockEpoch 是 0，热替换后必须立刻补喂 clockStart，
-    // 否则 isleIndex/seasonOf 会全部算错（本地以为秋天、服务端还是夏天）。
+    if (!v) return null
+
+    // 版本号变了：整份重下 + 热替换（loadRules 内部会写新文件）
+    if (v !== before) {
+      // 新模块实例的 b12ClockEpoch 是 0，热替换后必须立刻补喂 clockStart，
+      // 否则 isleIndex/seasonOf 会全部算错（本地以为秋天、服务端还是夏天）。
+      const epoch = R?.b12ClockStart?.() || 0
+      await loadRules({ baseUrl, ver: v, cookie, force: true })
+      if (epoch && R?.b12ConfigureClock) {
+        try { R.b12ConfigureClock(epoch) } catch {}
+      }
+      await loadArcadeRules({ baseUrl, ver: currentVer, force: true }).catch(() => null)
+      return { changed: currentVer !== before, from: before, to: currentVer, hash: contentHash }
+    }
+
+    // 版本号没变：按低频重下整份内容比对 hash
+    if (!force && Date.now() - lastContentCheck < contentIntervalMs) {
+      return { changed: false, from: before, to: v, hash: contentHash, contentChecked: false }
+    }
+    let text
+    try {
+      const res = await fetch(`${baseUrl}/pet-world-rules.js?v=${v}`, {
+        headers: { 'user-agent': 'Mozilla/5.0 Chrome/131', referer: baseUrl + '/pets' },
+        signal: AbortSignal.timeout(30000),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      text = await res.text()
+    } catch {
+      return null
+    }
+    lastContentCheck = Date.now()
+    if (!text.includes('export function applyActions')) return null
+    const h = sha1(text)
+    if (!contentHash || h === contentHash) {
+      return { changed: false, from: before, to: v, hash: contentHash || h, contentChecked: true }
+    }
+
+    // 同版本号、内容变了：同名覆盖缓存后热替换。
+    // loadRules 看到文件刚写过（不到 1 小时）不会再下载，直接用 ?t= 重新 import。
+    const oldHash = contentHash
+    writeFileSync(resolve(CACHE_DIR, `rules-${v}.mjs`), text, 'utf8')
     const epoch = R?.b12ClockStart?.() || 0
     await loadRules({ baseUrl, ver: v, cookie, force: true })
     if (epoch && R?.b12ConfigureClock) {
       try { R.b12ConfigureClock(epoch) } catch {}
     }
-    await loadArcadeRules({ baseUrl, ver: currentVer, force: true }).catch(() => null)
-    return { changed: currentVer !== before, from: before, to: currentVer }
+    return {
+      changed: true, sameVersion: true, from: before, to: v,
+      hash: contentHash, oldHash,
+    }
   } catch {
     return null
   }

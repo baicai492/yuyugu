@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ROOT } from './rules.mjs'
-import { checkRulesUpdate, rulesVersion } from './rules.mjs'
+import { checkRulesUpdate, rulesVersion, rulesContentHash } from './rules.mjs'
 import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices, energyActions, ANIMAL_FEED_SEC } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
@@ -79,6 +79,8 @@ export class Engine {
     if (st.arenaSpendDay) this.memo.arenaSpendDay = st.arenaSpendDay
     if (st.arenaCostDay) this.memo.arenaCostDay = st.arenaCostDay
     if (st.arenaCost != null) this.memo.arenaCost = st.arenaCost
+    // 规则版本/内容 hash 的最近一次检查结果（GUI 展示 + 连续失败告警计数）
+    if (st.rulesStatus && typeof st.rulesStatus === 'object') this.memo.rulesStatus = st.rulesStatus
     // 全站销量学习值：卖货/囤货/投资的「峰值」都要用它折算供需。
     // 不持久化的话每次重启都会退化成「假设没人卖」——峰值被高估，
     // 货就全部压着不卖（线上重启后 20 种货全部 sellNow=false 就是这个原因）。
@@ -159,6 +161,8 @@ export class Engine {
         externalSold: this.externalSoldRatio || {},
         // 偷菜守家线的按岛状态（打输计数/冷却/待补日志/负期望封禁）
         stealState: this.memo.stealState || {},
+        // 规则版本/内容 hash 的最近一次检查结果
+        rulesStatus: this.memo.rulesStatus || {},
         stats: this.stats,
       }
       saveState(this.logDir, this.persist)
@@ -454,8 +458,42 @@ export class Engine {
       const lastChk = this.memo.rulesCheckedAt || 0
       if (w.now - lastChk > 1800) {
         this.memo.rulesCheckedAt = w.now
-        const u = await checkRulesUpdate({ baseUrl: this.cfg.baseUrl })
-        if (u?.changed) this.log(`站点更新：规则模块 ${u.from} → ${u.to}（时钟已重新校准）`)
+        // 必须带登录 cookie：未登录的 /pets 不渲染带 ?v= 的 script 标签，
+        // fetchVersion 会拿到空字符串 —— 旧代码不传 cookie，于是「版本检查」
+        // 每次都被当成「没变化」静默跳过，站点更新后永远发现不了。
+        const u = await checkRulesUpdate({ baseUrl: this.cfg.baseUrl, cookie: this.world.client?.cookie })
+        if (u) {
+          if (u.changed) {
+            if (u.sameVersion) {
+              // 版本号没换但公式变了——最危险的一种更新，必须显眼地记一笔
+              this.log(`站点规则内容在版本号 ${u.to} 下变了` +
+                `（${String(u.oldHash || '').slice(0, 8)} → ${String(u.hash || '').slice(0, 8)}），已热替换`, 'warn')
+            } else {
+              this.log(`站点更新：规则模块 ${u.from} → ${u.to}（时钟已重新校准）`)
+            }
+            // 解禁时刻表是按旧公式算的（生长/保护期/连茬都可能写在规则里），
+            // 留着只会按错的时刻醒。丢掉，下一轮按新规则重算。
+            this.memo.stealSchedule = {}
+            this.memo.stealScanAt = 0
+          }
+          this.memo.rulesStatus = {
+            at: w.now,
+            ver: u.to || rulesVersion(),
+            hash: u.hash || '',
+            contentCheckedAt: u.contentChecked ? w.now : (this.memo.rulesStatus?.contentCheckedAt || 0),
+            ok: true,
+            fail: 0,
+          }
+        } else {
+          // null 是「取不到版本号/下载失败」，不是「没变化」。
+          // 第一次失败 + 之后每 12 次（30 分钟一轮 ≈ 6 小时）提醒一次，不刷屏。
+          const prev = this.memo.rulesStatus || {}
+          const fail = (prev.fail || 0) + 1
+          this.memo.rulesStatus = { ...prev, ok: false, fail }
+          if (fail === 1 || fail % 12 === 0) {
+            this.log(`规则版本检查失败（连续 ${fail} 次），继续用 rules-${rulesVersion()}；网络恢复后会自动重试`, 'warn')
+          }
+        }
       }
     } catch (e) { /* 规则检查失败不影响托管 */ }
 
@@ -1330,6 +1368,17 @@ export class Engine {
       arcade: this.arcadeView(),
       vault: this.vaultView(),
       tax: this.taxView(),
+      // 站点规则：当前版本 / 内容 hash / 最近一次检查结果。
+      // GUI 显示它才看得出「站点悄悄改了公式」和「版本检查一直失败」——
+      // 这两种情况都不会报错，只会让托管悄悄用错规则。
+      rules: {
+        ver: rulesVersion(),
+        hash: rulesContentHash(),
+        checkedAt: this.memo.rulesStatus?.at || 0,
+        contentCheckedAt: this.memo.rulesStatus?.contentCheckedAt || 0,
+        ok: this.memo.rulesStatus?.ok !== false,
+        fail: this.memo.rulesStatus?.fail || 0,
+      },
     }
   }
 
