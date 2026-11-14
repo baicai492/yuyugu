@@ -3,11 +3,10 @@
 // 文件格式（和 engine.log 写的一致）：
 //   2026-11-11 23:50:27 消息内容
 // 时间是北京时间。
-import { readdirSync, readFileSync, existsSync, statSync, unlinkSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 
 const FILE_RE = /^yuyugu-(\d{4}-\d{2}-\d{2})\.log$/
-const ANY_DAY_FILE_RE = /^((?:yuyugu|host)-\d{4}-\d{2}-\d{2})\.log$/
 
 /** 列出有日志的日期（新→旧） */
 export function listLogDays(dir) {
@@ -19,28 +18,9 @@ export function listLogDays(dir) {
     .reverse()
 }
 
-/**
- * 清理过期的按日日志（yuyugu-YYYY-MM-DD.log / host-YYYY-MM-DD.log）。
- *
- * 日志一天 1~2MB，不清理一年就是几百 MB。只删按日期命名的运行日志；
- * ledger.csv、state.json、battle-profiles.json 这类状态文件一律不动。
- * 日期按文件名判断（不用 mtime：拷来拷去会把 mtime 改掉）。
- * 返回被删掉的文件名数组。
- */
-export function pruneOldLogs(dir, { keepDays = 30, today = null } = {}) {
-  if (!existsSync(dir)) return []
-  const now = today || new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10) // 北京时间
-  const cutoff = new Date(Date.parse(now + 'T00:00:00Z') - keepDays * 86400_000).toISOString().slice(0, 10)
-  const removed = []
-  for (const f of readdirSync(dir)) {
-    const m = ANY_DAY_FILE_RE.exec(f)
-    if (!m) continue
-    const day = m[1].slice(-10)
-    if (day >= cutoff) continue
-    try { unlinkSync(join(dir, f)); removed.push(f) } catch {}
-  }
-  return removed
-}
+// 注意：这里**不做任何日志清理**。本地日志按天落盘后永久保留，
+// 不管多少天都不删（磁盘由用户自己决定怎么处理）。
+// 曾经有过一个 30 天自动清理，2026-11-14 按用户要求移除。
 
 /**
  * 旧版 Chrome 插件把日志存在浏览器的 Local Extension Settings（LevelDB）里。

@@ -19,7 +19,6 @@ import { World } from './core/world.mjs'
 import { Engine } from './core/engine.mjs'
 import { loadConfig, saveConfig } from './core/config.mjs'
 import { startServer } from './core/server.mjs'
-import { pruneOldLogs } from './core/logfile.mjs'
 import { createInterface } from 'node:readline'
 
 const args = process.argv.slice(2)
@@ -69,13 +68,7 @@ async function main() {
 
   const world = new World(client, log0)
   const engine = new Engine({ world, cfg })
-  // 过期日志清理：一天 1~2MB，不清理一年就是几百 MB。
-  // 只删按日期命名的运行日志（yuyugu-*/host-*），账本和状态文件不动。
-  try {
-    const keepDays = cfg.log?.keepDays ?? 30
-    const removed = pruneOldLogs(engine.logDir, { keepDays })
-    if (removed.length) console.log(`清理 ${removed.length} 份过期日志（保留 ${keepDays} 天）`)
-  } catch {}
+  // 本地日志永久保留，不做任何过期清理（按用户要求，2026-11-14 移除 30 天清理）。
   engine.log = engine.log.bind(engine)
   // 世界层（提交动作后的「收入/支出/获得什么」）也要写进日志文件，
   // 否则这些明细只出现在终端里，GUI 的历史记录看不到。
