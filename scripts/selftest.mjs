@@ -795,6 +795,59 @@ console.log('\n[新] 站宠护理')
   }
 }
 
+console.log('\n[新] 单实例锁')
+{
+  const { acquireLock, releaseLock, readLock, isPidAlive } = await import('../core/daemon-lock.mjs')
+  const { mkdtempSync, writeFileSync: wf, rmSync: rm, existsSync: ex } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'lock-'))
+  const f = join(dir, 'daemon.lock')
+  try {
+    ok('自己的 pid 一定活着', isPidAlive(process.pid) === true)
+    ok('不存在的 pid 判死', isPidAlive(999999) === false)
+    ok('pid 非法判死', isPidAlive(0) === false && isPidAlive('x') === false)
+
+    // 1) 空锁目录：直接拿到
+    const a = acquireLock(f)
+    ok('空文件时拿到锁', a.ok === true && readLock(f)?.pid === process.pid)
+
+    // 2) 同一进程重复拿：幂等（不是「被自己挡住」）
+    ok('同进程重复拿锁成功', acquireLock(f).ok === true)
+
+    // 3) 别的活进程占着：拒绝，并带回占用者
+    //    用一个真的活着的小进程，而不是猜某个 pid 在不在（pid 1 在 Windows 上不存在）
+    const { spawn: spawnChild } = await import('node:child_process')
+    const child = spawnChild(process.execPath, ['-e', 'setTimeout(()=>{},8000)'], { stdio: 'ignore' })
+    try {
+      await new Promise((r) => setTimeout(r, 300))
+      ok('活子进程确实活着', isPidAlive(child.pid) === true, `pid=${child.pid}`)
+      wf(f, JSON.stringify({ pid: child.pid, at: 1 }))
+      const held = acquireLock(f)
+      ok('活进程占用时拒绝', held.ok === false && held.holder?.pid === child.pid,
+        `ok=${held.ok} holder=${held.holder?.pid}`)
+      ok('拒绝时没覆盖锁文件', readLock(f)?.pid === child.pid)
+    } finally {
+      try { child.kill() } catch {}
+    }
+
+    // 4) 死进程留下的锁：可回收
+    wf(f, JSON.stringify({ pid: 999999, at: 1 }))
+    const re = acquireLock(f)
+    ok('死进程的锁可回收', re.ok === true && re.reclaimed === true && readLock(f)?.pid === process.pid)
+
+    // 5) 释放只删自己的；别人的锁不动
+    wf(f, JSON.stringify({ pid: 999998, at: 1 }))
+    releaseLock(f)
+    ok('别人的锁不会被删', ex(f) === true)
+    wf(f, JSON.stringify({ pid: process.pid, at: 1 }))
+    releaseLock(f)
+    ok('自己的锁会被删', ex(f) === false)
+  } finally {
+    try { rm(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+
 console.log('\n[新] 站内管家自动关闭')
 {
   const { disableAuto } = await import('../core/warehouse.mjs')

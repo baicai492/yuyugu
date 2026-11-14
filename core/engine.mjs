@@ -17,6 +17,7 @@ import { xianRound, xianSnapshot } from './xian.mjs'
 import { xian2Round, xian2Snapshot } from './xian2.mjs'
 import { arcadeRound, arcadeSummary } from './arcade.mjs'
 import { planVaultUpgrade, vaultSummary, vaultCapacity, disableAuto } from './warehouse.mjs'
+import { acquireLock, releaseLock, defaultLockPath } from './daemon-lock.mjs'
 import * as M from './market.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
@@ -49,6 +50,7 @@ export class Engine {
     this.externalSoldRatio = {}
     this.history = []
     this.stats = { totalRuns: 0, totalEarn: 0, firstRunAt: 0 }
+    this.lockPath = defaultLockPath(this.logDir)
     this.restore()
   }
 
@@ -374,6 +376,30 @@ export class Engine {
 
   /** 一轮完整的巡视 */
   async tick() {
+    // 单实例锁：GUI「重启」会先拉起新进程、旧进程可能还在 tick 里（擂台 4 分钟、
+    // 偷菜 30 秒）。两边同时用同一个 rev 提交 = 重复卖出/买入 + 存档互相覆盖。
+    // 拿不到锁就跳过本轮——新进程晚几秒接上，不会有第二份写入。
+    const lock = acquireLock(this.lockPath, { now: Math.floor(Date.now() / 1000) })
+    if (!lock.ok) {
+      const holder = lock.holder || {}
+      const key = `${holder.pid}`
+      if (this.memo.lockSkipPid !== key) {
+        this.memo.lockSkipPid = key
+        this.log(`另一个托管进程（pid ${holder.pid}）正在巡视，跳过本轮`, 'warn')
+      }
+      this.status = { ...this.status, state: 'waiting', step: '等待另一个进程退出' }
+      return { sleep: 5 }
+    }
+    this.memo.lockSkipPid = ''
+    try {
+      return await this.tickBody()
+    } finally {
+      releaseLock(this.lockPath)
+    }
+  }
+
+  /** 真正的一轮巡视（调用方已持有单实例锁） */
+  async tickBody() {
     const w = this.world
     const R = w.R
     const cfg = this.cfg

@@ -133,11 +133,26 @@ async function main() {
   }
 
   // ---------- 持续运行 ----------
-  process.on('SIGINT', () => {
-    engine.log('收到 Ctrl+C，正在停止…')
+  //
+  // 退出要等当前这一轮跑完：tick 里可能正有请求在飞，
+  // 硬切会留下 daemon.lock（下次靠死 pid 回收，但会白等一轮），
+  // 更糟的是请求已发出、回执没读，账本和库存对不上。
+  // 等满 15 秒还没停就强制退（擂台一轮要 4 分钟，不能无限等）。
+  const shutdown = (label) => {
+    engine.log(`收到 ${label}，正在停止…`)
     engine.stop()
-    setTimeout(() => process.exit(0), 500)
-  })
+    const t0 = Date.now()
+    const timer = setInterval(() => {
+      if (!engine.busy || Date.now() - t0 > 15000) {
+        clearInterval(timer)
+        process.exit(0)
+      }
+    }, 200)
+    timer.unref?.()
+  }
+  process.on('SIGINT', () => shutdown('Ctrl+C'))
+  // Windows 计划任务/服务管理器停止进程时发的是 SIGTERM（或直接 Terminate）。
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
 
   // 简单的命令行控制台（没有 GUI 时也能用）
   if (!has('no-console') && process.stdin.isTTY) {
