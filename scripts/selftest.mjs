@@ -406,7 +406,7 @@ console.log('\n[新] 修仙 2.0 规划器')
 console.log('\n[新] 游乐馆手操让位')
 {
   const { World } = await import('../core/world.mjs')
-  const { arcadeRound } = await import('../core/arcade.mjs')
+  const { arcadeRound, adoptPendingArcade } = await import('../core/arcade.mjs')
   const now = 1794629000
   let posts = 0
   const mkClient = () => ({
@@ -462,6 +462,29 @@ console.log('\n[新] 游乐馆手操让位')
   w.state = { arc: { cur: { g: 'bounce', seed: 7, t: now - 5 }, n: {} } }
   const r = await arcadeRound(w, { arcade: { enabled: true } }, () => {}, {})
   ok('arcadeRound 手操时跳过', r.played === 0 && posts === 0, `posts=${posts}`)
+
+  // 8) 重启接手：cur 是我们重启前开的一局，seed 对得上 → 认领成自己的局，
+  //    而不是当成玩家手操整轮让位（2026-11-15 00:11 线上实际踩到的坑）。
+  w.state = { arc: { cur: { g: 'pool', seed: 4242, t: now - 5 } } }
+  w.ourArcade = null
+  const adopted = adoptPendingArcade(w, { g: 'pool', seed: 4242, tries: 0 })
+  ok('seed 对得上时认领为我们的局', adopted?.seed === 4242 && w.ourArcadeHeld(), JSON.stringify(adopted))
+  // seed 对不上（那局已经提交/被覆盖）→ 不认领，记录作废
+  w.ourArcade = null
+  ok('seed 对不上时不认领', adoptPendingArcade(w, { g: 'pool', seed: 9999, tries: 0 }) === null)
+  // 没有 cur 时不认领
+  w.state = { arc: { cur: null } }
+  ok('cur 已清时不认领', adoptPendingArcade(w, { g: 'pool', seed: 4242, tries: 0 }) === null)
+  w.ourArcade = null
+
+  // 9) arcadeRound 真正补交那一局（arcEnd 会真的提交，MIN_PLAY 要等满 6 秒）
+  posts = 0
+  w.state = { arc: { cur: { g: 'pool', seed: 4242, t: now - 30 }, d: '', n: {}, best: {} } }
+  const memo = { arcadePending: { g: 'pool', seed: 4242, tries: 0 } }
+  const r2 = await arcadeRound(w, { arcade: { enabled: true, perTick: 1, games: ['pool'], solveMs: 3000 } },
+    () => {}, memo)
+  ok('重启接手的那局被补交', r2.played === 1 && posts > 0 && memo.arcadePending === null,
+    `played=${r2.played} posts=${posts} pending=${JSON.stringify(memo.arcadePending)}`)
 }
 
 console.log('\n[新] 服务端 operation 去重回执')

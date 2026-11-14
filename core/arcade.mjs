@@ -223,13 +223,114 @@ function defaultShots(A, g, seed) {
 }
 
 /**
+ * 打完一局：本地求解 → 等够 MIN_PLAY → 提交 arcEnd（「太快了」最多重试 3 次）。
+ *
+ * 调用前 world.ourArcade 必须已经指向这一局——world.act() 的手操让位门控靠它
+ * 放行，否则会被自己刚开的局挡住。
+ *
+ * @param startedAt 本地毫秒时间戳，用来算还差多久到 MIN_PLAY。
+ *                  接手重启残留的局时传 Date.now()：那一局的 arcStart 早就过去了，
+ *                  从此刻等满一轮，服务端那边只会更宽松。
+ * @returns arcEnd 的计分回执，失败返回 null 并在日志里说明原因
+ */
+async function finishGame(A, world, g, seed, startedAt, solveMs, log) {
+  let shots = []
+  let local = null
+  try {
+    shots = solveGame(A, g, seed, { solveMs })
+    local = verifyShots(A, g, seed, shots)
+  } catch (e) {
+    log(`游乐馆 · ${A.GAMES[g].name}：求解出错 ${e.message}`)
+  }
+  if (!shots?.length || local == null) {
+    // 求解失败也要提交一局能重放的默认 shots，别把次数留在半截
+    shots = defaultShots(A, g, seed)
+    local = verifyShots(A, g, seed, shots)
+  }
+  void local
+
+  // MIN_PLAY：规则原文判定的是 ctx.t − c.t（两次服务端处理时刻之差）。
+  // c.t 一定早于本地 startedAt，所以从回执之后等 MIN_PLAY + 1.2 秒，
+  // 到服务端那里只会更长，不会被判「太快」。
+  const needMs = (MIN_PLAY[g] + 1.2) * 1000
+  let counted = null
+  let lastFail = ''
+  // 「太快了」时服务端并不清 x.cur（arcade-05a5c445.mjs 第 144 行），
+  // 说明这一局还能救：等够时间重新 arcEnd 即可，不用白烧次数。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const waitMs = needMs - (Date.now() - startedAt)
+    if (waitMs > 0) await sleep(waitMs)
+    try {
+      const r2 = await world.act([{ a: 'arcEnd', g, shots }], { silent: true })
+      const o = (r2.out || [])[0]
+      if (o?.ok) { counted = o; break }
+      lastFail = o?.msg || '（无回执）'
+      if (/太快了/.test(lastFail)) {
+        if (attempt < 2) log(`游乐馆 · ${A.GAMES[g].name}：服务端判定太快，再等一轮重试`)
+        continue
+      }
+      break
+    } catch (e) {
+      lastFail = e.message
+      break
+    }
+  }
+  if (counted) {
+    log(`游乐馆 · ${A.GAMES[g].name}：${counted.score} 分${counted.newBest ? '（刷新个人纪录）' : ''}｜今日剩 ${counted.left} 次`)
+  } else {
+    log(`游乐馆 · ${A.GAMES[g].name}：未计分 ${lastFail}`, 'warn')
+  }
+  return counted
+}
+
+/**
+ * 把「重启前开了但没提交」的那一局认领回来（重启接手）。
+ *
+ * GUI 的「重启」会杀掉进程再拉起。如果切在 arcStart 之后、arcEnd 之前，
+ * 服务端的 arc.cur 会残留，而「这局是我们的」只存在内存里，新进程一无所知——
+ * 于是把自己开的局当成玩家手操，整轮让位 TTL 的 180 秒（2026-11-15 00:11 线上实测）。
+ *
+ * 只有服务端 cur 的 g / seed 都对得上才算。seed 是服务端随机的 31 位整数，
+ * 撞上的概率可以忽略；对不上说明那一局已经提交或已被别的局覆盖，记录作废。
+ *
+ * @returns 认领成功返回 {g, seed}（同时设好 world.ourArcade），否则 null
+ */
+export function adoptPendingArcade(world, pending) {
+  if (!pending || !(Number(pending.seed) > 0)) return null
+  const cur = world.state?.arc?.cur
+  if (!cur || cur.g !== pending.g || Number(cur.seed) !== Number(pending.seed)) return null
+  const seed = Number(pending.seed)
+  world.ourArcade = { g: pending.g, seed }
+  return { g: pending.g, seed }
+}
+
+/**
  * 跑一批游乐馆。每次巡视最多玩 cfg.arcade.perTick 局，避免把主流程拖太久。
  * 调用方应保证这时不在偷菜掐点窗口里。
+ *
+ * @param flush arcStart / arcEnd 之后立刻调用，让调用方把 memo.arcadePending 落盘。
+ *              重启接手的记录就靠它——不落盘，新进程会把我们自己的局当手操。
  */
-export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
+export async function arcadeRound(world, cfg, log = () => {}, memo = {}, flush = () => {}) {
   const A = arcadeRules()
   if (!A?.GAMES) return { played: 0, results: [] }
   const R = world.R
+  // 重启接手（必须在「手操让位」判断**之前**认领）：上一进程 arcStart 之后、
+  // arcEnd 之前被杀，服务端 cur 还留着，而「这局是我们的」只存在内存里。
+  // 不先认领的话，我们自己的局会被下面判成玩家手操，整轮让位 180 秒
+  // （2026-11-15 00:11 线上实测踩到）。
+  const pending = memo.arcadePending
+  const adopted = pending && (pending.tries || 0) < 3 ? adoptPendingArcade(world, pending) : null
+  // 认领成功先留着，等补交完再清；对不上说明那局已经提交或被覆盖，记录直接作废
+  if (pending && !adopted) {
+    memo.arcadePending = null
+    // world.ourArcade 要是还停在这个作废的 seed 上，一并清掉：
+    // 否则之后每轮都会无条件放行写入（让位门控靠它判断）
+    if (world.ourArcade?.g === pending.g && Number(world.ourArcade?.seed) === Number(pending.seed)) {
+      world.ourArcade = null
+    }
+  }
+
   // 有人在浏览器里手操：整轮跳过。我们的任何 arcStart 都会抢占他的 cur
   // （服务端同一时刻只允许一局），更别说别的写入会让他 arcEnd 409。
   const ma = world.manualArcade?.(world.now, cfg.arcade?.manualTtlSec)
@@ -246,6 +347,22 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
   const solveMs = cfg.arcade?.solveMs ?? 20000
   const results = []
 
+  // 补交重启前那一局：次数在 arcStart 时就扣过了，直接按 cur 里的 seed
+  // 重新求解并提交，别白烧一次。
+  if (adopted) {
+    log(`游乐馆 · ${A.GAMES[adopted.g].name}：接手重启前未提交的一局，补交`)
+    const counted = await finishGame(A, world, adopted.g, adopted.seed, Date.now(), solveMs, log)
+    world.ourArcade = null
+    if (counted) {
+      memo.arcadePending = null
+      results.push({ g: adopted.g, score: counted.score, best: counted.best, dayBest: counted.dayBest, newBest: !!counted.newBest, left: counted.left })
+    } else {
+      // cur 还在就说明还能再试一次；连试 3 次都不行就放弃这一局
+      memo.arcadePending = { g: adopted.g, seed: adopted.seed, tries: (pending.tries || 0) + 1 }
+    }
+    flush()
+  }
+
   for (const g of order) {
     let left = arcLeft(R, A, world.state, g, world.now)
     for (let k = 0; k < left && results.length < perTick; k++) {
@@ -256,17 +373,20 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
       // 弹弹乐 MIN_PLAY=5 全军覆没（2026-11-13 17:43 十连「太快了」），
       // 保龄 MIN_PLAY=8 也随机失败一半。
       let startedAt = 0
-      let seed = 0, startOk = false
+      let seed = 0
       try {
         const r1 = await world.act([{ a: 'arcStart', g }], { silent: true })
         const o = (r1.out || [])[0]
         if (!o?.ok) { log(`游乐馆 · ${A.GAMES[g].name}：开局失败 ${o?.msg || '（无回执）'}`); break }
         seed = o.seed
         startedAt = Date.now()
-        startOk = true
         // 这局归我们：arcStart → arcEnd 之间 cur 是我们自己的，
         // world.act 的手操让位门控要放行（否则托管会被自己刚开的局挡住）。
         world.ourArcade = { g, seed }
+        // 立刻落盘：GUI「重启」只要切在这之后的几秒内，新进程就靠这条记录认领，
+        // 不会把自己开的局误判成玩家手操。
+        memo.arcadePending = { g, seed, tries: 0 }
+        flush()
       } catch (e) {
         log(`游乐馆 · ${A.GAMES[g].name}：开局出错 ${e.message}`)
         break
@@ -275,61 +395,27 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
         // 开局回执成功但 state 里的 cur 不是我们的 seed（极小概率的并发手操），
         // 说明有人抢先开了局；此时我们的 arcEnd 会覆盖掉他的局，直接放弃这一局。
         world.ourArcade = null
+        memo.arcadePending = null
+        flush()
         log(`游乐馆 · ${A.GAMES[g].name}：cur 已被另一局占用，放弃本轮（不覆盖手操）`, 'warn')
         break
       }
 
-      let shots = []
-      let local = null
-      try {
-        shots = solveGame(A, g, seed, { solveMs })
-        local = verifyShots(A, g, seed, shots)
-      } catch (e) {
-        log(`游乐馆 · ${A.GAMES[g].name}：求解出错 ${e.message}`)
-      }
-      if (!startOk || !shots?.length || local == null) {
-        // 求解失败也要提交一局能重放的默认 shots，别把次数留在半截
-        shots = defaultShots(A, g, seed)
-        local = verifyShots(A, g, seed, shots)
-      }
-
-      // MIN_PLAY：规则原文判定的是 ctx.t − c.t（两次服务端处理时刻之差）。
-      // c.t 一定早于本地 startedAt，所以从回执之后等 MIN_PLAY + 1.2 秒，
-      // 到服务端那里只会更长，不会被判「太快」。
-      const needMs = (MIN_PLAY[g] + 1.2) * 1000
-      let counted = null
-      let lastFail = ''
-      // 「太快了」时服务端并不清 x.cur（arcade-05a5c445.mjs 第 144 行），
-      // 说明这一局还能救：等够时间重新 arcEnd 即可，不用白烧次数。
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const waitMs = needMs - (Date.now() - startedAt)
-        if (waitMs > 0) await sleep(waitMs)
-        try {
-          const r2 = await world.act([{ a: 'arcEnd', g, shots }], { silent: true })
-          const o = (r2.out || [])[0]
-          if (o?.ok) { counted = o; break }
-          lastFail = o?.msg || '（无回执）'
-          if (/太快了/.test(lastFail)) {
-            if (attempt < 2) log(`游乐馆 · ${A.GAMES[g].name}：服务端判定太快，再等一轮重试`)
-            continue
-          }
-          break
-        } catch (e) {
-          lastFail = e.message
-          break
-        }
-      }
+      const counted = await finishGame(A, world, g, seed, startedAt, solveMs, log)
       // arcEnd 已提交（无论成败），cur 不再属于我们
       world.ourArcade = null
       if (counted) {
+        memo.arcadePending = null
         results.push({ g, score: counted.score, best: counted.best, dayBest: counted.dayBest, newBest: !!counted.newBest, left: counted.left })
-        log(`游乐馆 · ${A.GAMES[g].name}：${counted.score} 分${counted.newBest ? '（刷新个人纪录）' : ''}｜今日剩 ${counted.left} 次`)
       } else {
-        log(`游乐馆 · ${A.GAMES[g].name}：未计分 ${lastFail}`, 'warn')
+        // 没提交成功：留着重启接手记录，下一轮再补交一次
+        memo.arcadePending = { g, seed, tries: 1 }
+      }
+      flush()
+      if (!counted) {
         // 连着失败多半是规则/时钟对不上，别把剩余次数一轮全烧光
         break
       }
-      void local
       void left
     }
   }

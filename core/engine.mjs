@@ -15,7 +15,7 @@ import { helpDaily, stealRound, probeStealable } from './social.mjs'
 import { shouldSnipe, snipeDue, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
 import { xian2Round, xian2Snapshot } from './xian2.mjs'
-import { arcadeRound, arcadeSummary } from './arcade.mjs'
+import { arcadeRound, arcadeSummary, adoptPendingArcade } from './arcade.mjs'
 import { planVaultUpgrade, vaultSummary, vaultCapacity, disableAuto } from './warehouse.mjs'
 import { acquireLock, releaseLock, defaultLockPath } from './daemon-lock.mjs'
 import * as M from './market.mjs'
@@ -74,9 +74,10 @@ export class Engine {
     if (st.stolenAt) this.memo.stolenAt = st.stolenAt
     // 站宠最近观测：重启后 GUI 立刻有数可显示，不用等第一轮护理跑完
     if (st.pet && typeof st.pet === 'object') this.petInfo = st.pet
+    // 游乐馆里没提交成的那一局（重启/异常中断留下）：见 tick 里的「重启接手」
+    if (st.arcadePending && typeof st.arcadePending === 'object') this.memo.arcadePending = st.arcadePending
     // 擂台今日场次：重启后不用等打完一轮才知道擂台有没有做完
-    if (st.arenaDay) this.memo.arenaDay = st.arenaDay
-    if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
+    if (st.arenaDay) this.memo.arenaDay = st.arenaDay    if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
     if (st.arenaMax) this.memo.arenaMax = st.arenaMax
     if (st.arenaChest != null) this.memo.arenaChest = st.arenaChest
     if (st.arenaChestEarned != null) this.memo.arenaChestEarned = st.arenaChestEarned
@@ -164,6 +165,8 @@ export class Engine {
         arenaSpendDay: this.memo.arenaSpendDay || '',
         arenaCostDay: this.memo.arenaCostDay || '',
         arenaCost: this.memo.arenaCost || 0,
+        // 游乐馆里开了局还没提交的那一局（重启接手用，见 tick）
+        arcadePending: this.memo.arcadePending || null,
         // 全站销量学习值：重启后立刻能继续按真实供需估峰值，不会退化成「没人卖」
         externalSold: this.externalSoldRatio || {},
         // 偷菜守家线的按岛状态（打输计数/冷却/待补日志/负期望封禁）
@@ -428,8 +431,19 @@ export class Engine {
     // 那一刻的旧 rev，前端不会重试 409。后台任何写入都会让玩家这一局作废（次数还照扣），
     // 所以检测到 state.arc.cur 就整轮停写，只保留状态刷新，等 cur 清掉再恢复。
     {
+      // 重启接手：上一进程在 arcStart 与 arcEnd 之间被杀（GUI「重启」经常切在这里），
+      // 服务端的 arc.cur 还留着，而「这局是我们的」只存在内存里，新进程一无所知——
+      // 于是把自己开的局当成玩家手操，整轮让位 TTL 的 180 秒（2026-11-15 00:11 线上实测）。
+      // 开局时把 {g, seed} 落过盘，这里按 seed 认领回来。
+      const p = this.memo.arcadePending
+      if (p && !w.ourArcade) {
+        const adopted = adoptPendingArcade(w, p)
+        if (adopted) this.log(`游乐馆：接手重启前没提交的一局（${adopted.g}），本轮补交`)
+        // cur 已经不是那一局了（提交成功或者被覆盖）：记录作废
+        else this.memo.arcadePending = null
+      }
       const ma = w.manualArcade(w.now, cfg.arcade?.manualTtlSec)
-      if (ma.active) return this.standbyTick(w, ma, cfg)
+      if (ma.active && !w.ourArcadeHeld()) return this.standbyTick(w, ma, cfg)
       if (this.memo.arcadeStandbyKey) {
         this.memo.arcadeStandbyKey = ''
         this.status.arcadeStandby = null
@@ -864,7 +878,9 @@ export class Engine {
         const left = this.arcadeLeft()
         if (left > 0) {
           this.setStep('游乐馆')
-          const ar = await arcadeRound(w, cfg, this.log.bind(this), this.memo)
+          // flush：arcStart 拿到 seed 之后立刻落盘。重启就切在这之后几秒内，
+          // 不落盘新进程无从知道那一局是我们的。
+          const ar = await arcadeRound(w, cfg, this.log.bind(this), this.memo, () => this.savePersist())
           if (ar.played > 0) { this.memo.arcadeStall = 0; didWork = true }
           else this.memo.arcadeStall = (this.memo.arcadeStall || 0) + 1
         }
