@@ -1054,5 +1054,30 @@ console.log('\n[新] 规则同版本内容变更检测')
   ok('还原后 hash 回到原值', M2.rulesContentHash() === h0, M2.rulesContentHash().slice(0, 8))
 }
 
+console.log('\n[新] 过期日志清理')
+{
+  const { pruneOldLogs } = await import('../core/logfile.mjs')
+  const { mkdtempSync, writeFileSync: wf, readdirSync, rmSync: rm } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'prune-'))
+  try {
+    for (const f of [
+      'yuyugu-2026-10-14.log', 'yuyugu-2026-10-15.log', 'yuyugu-2026-11-14.log',
+      'host-2026-01-01.log', 'host-2026-11-13.log', 'yuyugu-坏名字.log', 'ledger.csv', 'state.json',
+    ]) wf(join(dir, f), 'x')
+    const removed = pruneOldLogs(dir, { keepDays: 30, today: '2026-11-14' })
+    const left = new Set(readdirSync(dir))
+    ok('删掉了 30 天前的按日日志', removed.includes('yuyugu-2026-10-14.log') && removed.includes('host-2026-01-01.log'),
+      removed.join(','))
+    ok('边界那天（正好 30 天）保留', left.has('yuyugu-2026-10-15.log'))
+    ok('今天的日志保留', left.has('yuyugu-2026-11-14.log') && left.has('host-2026-11-13.log'))
+    ok('非日志文件和坏名字不动', left.has('ledger.csv') && left.has('state.json') && left.has('yuyugu-坏名字.log'))
+    ok('重复清理不再删东西', pruneOldLogs(dir, { keepDays: 30, today: '2026-11-14' }).length === 0)
+  } finally {
+    try { rm(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)
