@@ -596,6 +596,19 @@ console.log('\n[新] 多波次偷菜')
   }
 }
 
+console.log('\n[新] 掐点提交前的服务端确认')
+{
+  const { shouldConfirmSnipe } = await import('../core/social.mjs')
+  const tg = { snipe: true, at: 1000 }
+  ok('掐点目标、到点前 1.5 秒内要确认', shouldConfirmSnipe(tg, 999) === true)
+  ok('掐点目标、还差 2 秒不确认', shouldConfirmSnipe(tg, 998) === false)
+  ok('已过点也要确认', shouldConfirmSnipe(tg, 1010) === true)
+  ok('扫描发现的目标（无 at）不确认', shouldConfirmSnipe({ id: 1 }, 1000) === false)
+  ok('扫描目标恰好带 at 但没标记也不确认', shouldConfirmSnipe({ at: 1000 }, 1000) === false)
+  ok('scheduled 标记同样触发确认', shouldConfirmSnipe({ scheduled: true, at: 1000 }, 1000) === true)
+  ok('at=0 视为无效', shouldConfirmSnipe({ snipe: true, at: 0 }, 1e9) === false)
+}
+
 console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
 {
   const A = await import('../core/xian-rules.mjs')

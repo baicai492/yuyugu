@@ -394,6 +394,8 @@ function targetFromSchedule(R, world, info, c) {
     level: c.level || 1,
     guard: !!info.owner?.guard,
     at: c.at,
+    // 解禁时刻是本地推算的（不是服务端确认过的）：提交前要再 GET 一次校准。
+    scheduled: true,
   }
 }
 
@@ -1035,6 +1037,8 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
         // 服务端此刻已经标了 steal=true：不用等，立刻可以提交。
         let tg = targetFromVisit(R, world, cfg, info, {
           id: c.targetId, name: c.name, level: c.level || 1, guard: !!info.owner?.guard, at: realNow,
+          // 掐点路径：提交前再确认一次服务端的 steal 标记（见 stealFromTargets）。
+          snipe: true,
         })
         if (!tg) {
           // 提前量到场时，这几处往往还没到解禁（服务端 steal=false），
@@ -1177,6 +1181,17 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
  * 这里直接 import 使用。
  */
 
+/**
+ * 掐点目标要不要在提交前再 GET 一次确认。
+ *
+ * 确认为 true 的条件：目标是「掐点/调度推算」出来的（解禁时刻由本地算，
+ * 不是服务端确认的），并且已经接近/过了推算的解禁时刻。
+ * 抽成纯函数只是为了可测——逻辑本身两行。
+ */
+export function shouldConfirmSnipe(tg, clock) {
+  return Boolean((tg?.snipe || tg?.scheduled) && Number(tg?.at) > 0 && clock >= tg.at - 1.5)
+}
+
 /** 挨个偷。抽出来是因为「巡逻发现的」和「全量扫描发现的」走同一套逻辑。 */
 async function stealFromTargets(world, cfg, log, memo, targets, { tactical = true, ctx = null, energyPrepped = false } = {}) {
   const st = cfg.social?.steal
@@ -1225,11 +1240,36 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
   // finally 一定会把静止防守装换回去，不会被中途的异常绕过。
   const runSteals = async () => {
     let skippedEV = 0
-    for (const { t: tg, ev } of ranked) {
+    for (const entry of ranked) {
+      let tg = entry.t
+      let ev = entry.ev
       if (tried >= (st.visitsPerScan ?? 8)) break
       // 冷却 / 负期望封禁期内跳过。打输后只冷却几秒——下一轮会用刚拿到的
       // 战报重算后验，打不过才升级成 blockSec 的长期封禁。
       if (stealBlockedUntil(memo, tg.id) > world.now) continue
+      // 掐点目标的解禁时刻是本地推算的（成熟 + 保护期）。天气翻转、岛主临时
+      // 浇水、或者别人抢先，都会让它失准；而一次失败的 visit 提交要占掉
+      // 2.15 秒的 POST 间隔——在解禁瞬间，这 2.15 秒就是下一家（甚至同一家
+      // 第二处）的窗口。提交前先 GET 一次（不节流、不花体力），用服务端此刻
+      // 的 steal 标记校准：能偷就按最新 targets 提交，不能偷就跳过并留待下轮。
+      // 线上 11-12~14 每天有 25~59 次「TA 家现在没有能偷的」白撞，一半的
+      // 提交槽位浪费在这里。
+      if (shouldConfirmSnipe(tg, world.tickClock())) {
+        const clock = world.tickClock()
+        let info = null
+        try { info = await visitInfo(world, tg.id) } catch { /* GET 失败就按原计划提交 */ }
+        if (info) {
+          const fresh = targetFromVisit(R, world, cfg, info, {
+            id: tg.id, name: tg.name, level: tg.level || 1, guard: !!info.owner?.guard,
+          })
+          if (!fresh) {
+            log(`偷 ${tg.name}：服务端说还没解禁（本地推算 ${Math.round(clock - tg.at)} 秒前到点），跳过`)
+            continue
+          }
+          tg = fresh
+          ev = stealEV(tg, myLevel, energyValue)
+        }
+      }
       const needE = Math.min(tg.energy, st.maxEnergy ?? 15)
       // 期望收益（旧版 inspect() 的 ev）：货值 × 不被发现的概率 + 被发现后的
       // 「打赢多得 1 个 / 打输按 1.2 倍赔款」的期望 − 体力机会成本。
@@ -1399,9 +1439,13 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
         // 最常见的两种：409/「TA 家现在没有能偷的」= 被别人抢先；
         // 403/401 = cookie 失效。把状态码和「这份数据是几秒前的」都打出来，
         // 否则日志里只有一句话，分不清是程序 bug 还是竞争。
-        const age = Math.max(0, Math.round(world.now - (tg.seenAt || world.now)))
+        // 时差一律按 tickClock()（此刻）算：world.now 是上次 refresh 的时刻，
+        // 拿它减 seenAt 会得到 0 甚至负数，日志里永远是「目标数据 0 秒前拿到」。
+        const clock = world.tickClock()
+        const age = Math.max(0, Math.round(clock - (tg.seenAt || clock)))
+        const since = tg.at ? `，到点${clock >= tg.at ? '后' : '前'} ${Math.abs(Math.round(clock - tg.at))} 秒` : ''
         log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
-          `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处`)
+          `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处${since}`)
       }
       // 这座岛已经处理过了：推进到排好的下一波（多波次），没有就清空。
       // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
