@@ -3,7 +3,7 @@
 // 文件格式（和 engine.log 写的一致）：
 //   2026-11-11 23:50:27 消息内容
 // 时间是北京时间。
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 
 const FILE_RE = /^yuyugu-(\d{4}-\d{2}-\d{2})\.log$/
@@ -32,6 +32,12 @@ export function listLogDays(dir) {
  * 自动找到旧插件（v1）在浏览器里的 Local Extension Settings 目录。
  * 扫描 Chrome / Edge 的所有 profile；不写死 Profile 1。
  * 返回 [{ browser, profile, dir, size }]，按文件大小倒序。
+ *
+ * 除了正式 profile，还要扫临时目录里的一次性 profile：
+ * scripts/test-gui*.mjs 用 mkdtemp('yyg-') 建过一批，里面装的也是这个扩展。
+ * Chrome 在卸载/重装扩展时会连存储一起删掉（正式 profile 的 LevelDB 就是这么空的，
+ * 见目录里的 LOG：2026-11-12 01:43 "Creating DB ... since it was missing"），
+ * 而那些一次性 profile 没人清理，反而把当时的日志留住了。
  */
 export function findLegacyExtensionStores(extensionId, { extraRoots = [] } = {}) {
   const localApp = process.env.LOCALAPPDATA || ''
@@ -43,28 +49,42 @@ export function findLegacyExtensionStores(extensionId, { extraRoots = [] } = {})
   ].filter(Boolean)
 
   const out = []
+  const collect = (base, browser, profile) => {
+    const dir = join(base, 'Local Extension Settings', extensionId)
+    if (!existsSync(dir)) return
+    let size = 0
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!/\.(log|ldb)$/.test(f)) continue
+        try { size += statSync(join(dir, f)).size } catch {}
+      }
+    } catch {}
+    out.push({ browser, profile, dir, size })
+  }
+
   for (const root of roots) {
     if (!existsSync(root)) continue
     let profiles = []
     try { profiles = readdirSync(root).filter((n) => n === 'Default' || /^Profile \d+$/.test(n)) } catch { continue }
     for (const prof of profiles) {
-      const dir = join(root, prof, 'Local Extension Settings', extensionId)
-      if (!existsSync(dir)) continue
-      let size = 0
-      try {
-        for (const f of readdirSync(dir)) {
-          if (!/\.(log|ldb)$/.test(f)) continue
-          try { size += statSync(join(dir, f)).size } catch {}
-        }
-      } catch {}
-      out.push({
-        browser: /Chrome/.test(root) ? 'Chrome' : /Edge/.test(root) ? 'Edge' : /Brave/.test(root) ? 'Brave' : '未知',
-        profile: prof,
-        dir,
-        size,
-      })
+      const browser = /Chrome/.test(root) ? 'Chrome' : /Edge/.test(root) ? 'Edge' : /Brave/.test(root) ? 'Brave' : '未知'
+      collect(join(root, prof), browser, prof)
     }
   }
+
+  // 临时 profile：<TEMP>/yyg-XXXXXX/Default/...
+  const tmp = process.env.TEMP || process.env.TMP || ''
+  if (tmp && existsSync(tmp)) {
+    let names = []
+    try { names = readdirSync(tmp).filter((n) => /^yyg-/.test(n)) } catch {}
+    for (const n of names) {
+      const base = join(tmp, n)
+      let profs = []
+      try { profs = readdirSync(base).filter((x) => x === 'Default' || /^Profile \d+$/.test(x)) } catch { continue }  // yyg-rules.mjs 这种文件会抛错，跳过
+      for (const prof of profs) collect(join(base, prof), '临时 profile', n)
+    }
+  }
+
   out.sort((a, b) => b.size - a.size)
   return out
 }
@@ -86,6 +106,45 @@ export function readLegacyDir(dir, { maxLines = 500 } = {}) {
   }
   merged.sort((a, b) => a.ts.localeCompare(b.ts))
   return { rows: merged.slice(-maxLines), total: merged.length, error: '', files: files.length }
+}
+
+const LEGACY_CACHE = 'legacy-imported.json'
+
+/**
+ * 旧插件记录的本地缓存（logs/legacy-imported.json）。
+ *
+ * 浏览器那边的存储是易失的：Chrome 在扩展卸载/重装时会删掉
+ * Local Extension Settings（正式 profile 的 LevelDB 就是这么空的），
+ * 临时 profile 又躺在 Temp 里随时可能被系统清理。
+ * 所以每次扫到就落一份到项目目录，只增不减，以后原始存储没了也还能看。
+ *
+ * 返回 { rows, added }，rows 已按时间正序、按「时间 + 消息前 80 字」去重。
+ */
+export function mergeLegacyCache(dir, rows) {
+  const file = resolve(dir, LEGACY_CACHE)
+  const old = []
+  if (existsSync(file)) {
+    try {
+      const j = JSON.parse(readFileSync(file, 'utf8'))
+      if (Array.isArray(j)) for (const r of j) if (r?.ts && r?.msg) old.push(r)
+    } catch {}
+  }
+  const before = new Set(old.map((r) => r.ts + '|' + String(r.msg).slice(0, 80)))
+  const seen = new Set()
+  const all = []
+  for (const r of [...old, ...(rows || [])]) {
+    if (!r || !r.ts || !r.msg) continue
+    const k = r.ts + '|' + String(r.msg).slice(0, 80)
+    if (seen.has(k)) continue
+    seen.add(k)
+    all.push({ ts: r.ts, msg: r.msg, level: r.level || 'info', store: r.store || '' })
+  }
+  all.sort((a, b) => a.ts.localeCompare(b.ts))
+  const added = all.filter((r) => !before.has(r.ts + '|' + String(r.msg).slice(0, 80))).length
+  if (added > 0 || !existsSync(file)) {
+    try { writeFileSync(file, JSON.stringify(all)) } catch {}
+  }
+  return { rows: all, added }
 }
 
 export function readLegacyExtensionLogs(file, { maxLines = 500 } = {}) {

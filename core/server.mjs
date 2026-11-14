@@ -8,7 +8,7 @@ import { openSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { saveConfig } from './config.mjs'
-import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir } from './logfile.mjs'
+import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir, mergeLegacyCache } from './logfile.mjs'
 
 // 主程序版本号：GUI 标题栏显示为 v<版本>。
 // 这套是 v2（Node 主程序 + Chrome 仅 GUI）。加战斗内核那次误升到 3，已改回。
@@ -141,6 +141,10 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
       }
 
       // ---------- 旧插件（v1 Chrome 扩展）的浏览器内历史日志 ----------
+      // 不止读一份：正式 profile 的存储在 Chrome 卸载/重装扩展时会被整个删掉
+      // （见目录里的 LOG：2026-11-12 01:43 "Creating DB ... since it was missing"），
+      // 测试脚本留下的一次性 profile 里反而有残留。全部读出来按时间合并，
+      // 并落一份到 logs/legacy-imported.json——浏览器那边随时可能被清理。
       if (req.method === 'GET' && path === '/api/logs/legacy') {
         const cfgNow = engine.cfg
         const extId = cfgNow.log?.legacyExtensionId
@@ -150,18 +154,41 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
           ? [{ browser: '手动指定', profile: '-', dir: manual, size: 0 }]
           : findLegacyExtensionStores(extId)
         if (!stores.length) {
-          return send(res, 200, { stores: [], rows: [], error: `没在浏览器里找到插件 ${extId} 的存储（可能已卸载，或换过 profile）` })
+          // 浏览器里已经没了，但本地缓存可能还留着
+          const c = mergeLegacyCache(engine.logDir, [])
+          if (c.rows.length) {
+            return send(res, 200, {
+              stores: [], rows: c.rows.slice(-100000), total: c.rows.length,
+              days: c.rows.reduce((acc, r) => { const d = r.ts.slice(0, 10); acc[d] = (acc[d] || 0) + 1; return acc }, {}),
+              cached: true, error: '',
+            })
+          }
+          return send(res, 200, { stores: [], rows: [], error: `没在浏览器里找到插件 ${extId} 的存储（可能已卸载、换过 profile，或被 Chrome 清理了）` })
         }
-        const maxLines = Math.max(50, Math.min(5000, Number(url.searchParams.get('max')) || 800))
-        const st = stores[0]                       // 取最大的那份
-        const r = readLegacyDir(st.dir, { maxLines })
+        const maxLines = Math.max(50, Math.min(50000, Number(url.searchParams.get('max')) || 800))
+        const gathered = []
+        const dedup = new Set()
+        for (const st of stores) {
+          const r = readLegacyDir(st.dir, { maxLines: 100000 })
+          st.rows = r.rows.length
+          for (const row of r.rows) {
+            const k = row.ts + '|' + row.msg.slice(0, 80)
+            if (dedup.has(k)) continue
+            dedup.add(k)
+            gathered.push({ ...row, store: `${st.browser} · ${st.profile}` })
+          }
+        }
+        const merged = mergeLegacyCache(engine.logDir, gathered)
+        const rows = merged.rows.slice(-maxLines)
         return send(res, 200, {
           stores,
-          active: st,
-          rows: r.rows,
-          total: r.total,
-          files: r.files,
-          error: r.error || '',
+          active: stores[0],
+          rows,
+          total: merged.rows.length,
+          days: merged.rows
+            .reduce((acc, r) => { const d = r.ts.slice(0, 10); acc[d] = (acc[d] || 0) + 1; return acc }, {}),
+          added: merged.added,
+          error: '',
         })
       }
 

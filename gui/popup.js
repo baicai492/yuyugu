@@ -60,7 +60,7 @@ async function getLogHistory(day, max = 2000) {
   const q = day ? `day=${encodeURIComponent(day)}` : 'days=1'
   return api(`/api/logs/history?${q}&max=${max}`)
 }
-async function getLegacyLogs() { return api('/api/logs/legacy?max=800') }
+async function getLegacyLogs(max = 2000) { return api(`/api/logs/legacy?max=${max}`) }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
 
@@ -1071,6 +1071,7 @@ function renderLogs() {
     const p = document.createElement('p')
     const cls = l.level === 'err' ? 'bad' : logClass(l.msg || '')
     if (cls) p.className = cls
+    if (l.store) p.title = l.store      // 旧插件记录：悬停看这条来自哪个 profile
     const t = document.createElement('time')
     t.textContent = clock
     // createTextNode 本身就是转义安全的，不能再套 escapeHtml（会变成 &lt; 显示出来）
@@ -1090,6 +1091,7 @@ function renderLogs() {
 
 let histDay = ''          // 当前选中的日期（YYYY-MM-DD）
 let histShowAll = false   // 「显示全部」是否按下
+let legacyShowAll = false // 旧插件记录「显示全部」是否按下
 
 /** 把服务端的日志清单填进日期下拉。只在清单变化时重建，避免打断用户选择。 */
 function fillHistDays(inv) {
@@ -1142,15 +1144,27 @@ async function loadLegacyLogs() {
   if (!alive) return
   const info = $('legacyInfo')
   info.textContent = '正在读取浏览器里的旧插件记录…'
+  const max = legacyShowAll ? 50000 : 2000
   try {
-    const j = await getLegacyLogs()
-    legacyLines = (j.rows || []).map((r) => ({ ts: r.ts, msg: r.msg, level: r.level }))
+    const j = await getLegacyLogs(max)
+    legacyLines = (j.rows || []).map((r) => ({ ts: r.ts, msg: r.msg, level: r.level, store: r.store }))
     if (j.error) {
       info.textContent = j.error
     } else {
-      const st = j.active || {}
-      info.textContent = `${st.browser || '?'} · ${st.profile || '?'} · ${j.total || 0} 条` +
-        `（显示最近 ${legacyLines.length}）` + (j.files ? `，${j.files} 个文件` : '')
+      const total = Number(j.total || legacyLines.length)
+      const shown = legacyLines.length
+      const parts = []
+      // 浏览器那边存储可能被清理过；能显示是因为本程序扫到的都落盘缓存了
+      parts.push(`${(j.stores || []).length || 0} 份存储 · 共 ${total.toLocaleString()} 条`)
+      const dayTxt = Object.entries(j.days || {}).sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([d, n]) => `${d.slice(5)} ${n}`).join(' · ')
+      if (dayTxt) parts.push(dayTxt)
+      if (total > shown) parts.push(`显示最后 ${shown.toLocaleString()} 条`)
+      if (j.cached) parts.push('（浏览器存储已不存在，读的是本地缓存）')
+      else if (j.added) parts.push(`新增 ${j.added} 条已存到 logs/legacy-imported.json`)
+      info.textContent = parts.join(' · ')
+      $('legacyAll').hidden = legacyShowAll || !(total > shown)
+      $('legacyAll').textContent = `显示全部 ${total.toLocaleString()} 条`
     }
     if (logMode === 'legacy') renderLogs()
   } catch (e) {
@@ -1301,7 +1315,14 @@ function bind() {
     histShowAll = true
     loadLogHistory()
   }
-  $('legacyRefresh').onclick = () => loadLegacyLogs()
+  $('legacyAll').onclick = () => {
+    legacyShowAll = true
+    loadLegacyLogs()
+  }
+  $('legacyRefresh').onclick = () => {
+    legacyShowAll = false
+    loadLegacyLogs()
+  }
 }
 
 /** 调用 Native Messaging 宿主 */
