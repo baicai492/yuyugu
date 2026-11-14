@@ -177,6 +177,10 @@ class Engine:
             self.running = False
             self.state = 'idle'
             self.message = why
+            # 计时必须在停止这一刻冻住：否则 status 的 elapsed 会一直用 now()
+            # 往前推，面板上看起来像「停了还在计时」。
+            if self.t_start and not self.t_end:
+                self.t_end = self.now()
         self.log('停止托管' + ('（' + why + '）' if why else ''))
 
     def set_hint(self, rect):

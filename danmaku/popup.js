@@ -14,6 +14,10 @@ let timer = null;
 let logs = [];
 let lastState = '';
 let launching = false;      // 正在拉服务：期间别让轮询把提示语冲掉
+let shuttingDown = false;   // 正在关服务：同上
+let connWhy = '';           // 「未连接」时的说明，poll 失败时别把它冲掉
+
+const DEFAULT_CONN_MSG = '本地识别程序没连上。点「开始托管」会自动把它拉起来。';
 
 // 在插件里用 chrome.storage；直接用浏览器打开 popup.html 调试时退回 localStorage
 const hasChromeStore = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
@@ -49,11 +53,13 @@ function sleep(ms) {
 
 function setOnline(v, why) {
   online = v;
+  if (v) connWhy = '';
+  else if (why) connWhy = why;
   $('dot').className = 'dot' + (v ? ' on' : ' err');
   $('conn').classList.toggle('hide', v);
   if (!v) {
     $('state').textContent = '未连接';
-    $('stateSub').textContent = why || '本地服务没起来，或端口不对';
+    $('stateSub').textContent = connWhy || '本地服务没起来，或端口不对';
   }
 }
 
@@ -125,6 +131,30 @@ async function ensureServer() {
     await sleep(250);
   }
   return { ok: false, code: 'timeout', msg: '服务进程起来了，但端口一直没有响应' };
+}
+
+/**
+ * 让「开始托管」拉起的服务整个退出。
+ *
+ * 先 POST /api/exit（服务内部会先停托管、松开鼠标，再关服务器），
+ * 然后等端口真的关掉——不靠宿主的那条 kill 兜底，宿主没装也能用。
+ */
+async function shutdownServer() {
+  shuttingDown = true;
+  setConnMsg('正在关闭本地识别服务…');
+  try {
+    await api('/api/exit', { method: 'POST', body: '{}' });
+  } catch {
+    /* 回包前就关了，正常 */
+  }
+  for (let i = 0; i < 25; i++) {
+    if (!(await ping(600))) break;
+    await sleep(200);
+  }
+  shuttingDown = false;
+  setOnline(false, '已停止托管，本地识别服务也退出了');
+  setConnMsg(DEFAULT_CONN_MSG);
+  $('connHelp').classList.add('hide');
 }
 
 function showStartError(r) {
@@ -210,7 +240,7 @@ function esc(s) {
 }
 
 function poll() {
-  if (launching) return;            // 拉起过程中别覆盖提示语
+  if (launching || shuttingDown) return;   // 拉起/关闭过程中别覆盖提示语
   api('/api/status').then((st) => {
     if (!st || st.ok !== true) throw new Error('bad status');
     if (!online) setOnline(true);
@@ -235,6 +265,9 @@ $('toggle').addEventListener('click', async () => {
     if (stopping) {
       const st = await api('/api/stop', { method: 'POST', body: '{}' });
       if (st && st.ok !== false) paint(st);
+      // 这次托管用的服务如果是「开始托管」自动拉起的，连进程一起收掉；
+      // 手动双击 启动.bat 起的服务不动——用户可能还要留着用。
+      if (st && st.managed) await shutdownServer();
       return;
     }
     // 开始：服务不在就先让宿主拉起来，再点它自己的开始

@@ -142,7 +142,8 @@ def launch(port):
 
     try:
         proc = subprocess.Popen(
-            [find_python(), SERVER, '--port', str(port)],
+            # --managed：让服务知道自己是被插件拉起的，停止托管时连进程一起退
+            [find_python(), SERVER, '--port', str(port), '--managed'],
             cwd=HERE,
             stdin=subprocess.DEVNULL,
             stdout=log,

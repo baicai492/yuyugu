@@ -21,6 +21,9 @@ from engine import Engine, VERSION        # noqa: E402
 
 PORT = 8799
 MAX_BODY = 1 << 20
+# 宿主（native_host.py）拉起时写，退出时清；手动双击 启动.bat 起的不写
+PID_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'logs', 'danmaku.pid')
 
 # 插件是 https://52dmeme.com 的页面，访问 http://127.0.0.1 属于跨源，
 # 必须放开 CORS；反正只监听回环地址，外面连不进来。
@@ -39,11 +42,17 @@ class Handler(BaseHTTPRequestHandler):
     server_version = 'DanmakuBot/' + VERSION
     engine = None                     # 由 main() 填
     httpd = None                      # 由 main() 填，/api/exit 用
+    managed = False                   # 由宿主拉起 = True：停止托管时连进程一起退
 
     def log_message(self, fmt, *args):   # 别把每个请求都打到控制台
         pass
 
     # ---------------- 工具 ----------------
+    def _status(self):
+        st = self.engine.status()
+        st['managed'] = bool(self.managed)
+        return st
+
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -82,15 +91,16 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?', 1)[0].rstrip('/') or '/'
         try:
             if path in ('/', '/api/ping'):
-                st = self.engine.status()
+                st = self._status()
                 return self._send(200, {'ok': True, 'app': 'danmaku', 'version': VERSION,
-                                        'state': st['state'], 'running': st['running']})
+                                        'state': st['state'], 'running': st['running'],
+                                        'managed': st['managed']})
             if path == '/api/status':
-                return self._send(200, self.engine.status())
+                return self._send(200, self._status())
             if path == '/api/config':
                 return self._send(200, {'ok': True, 'config': self.engine.cfg})
             if path == '/api/logs':
-                st = self.engine.status()
+                st = self._status()
                 return self._send(200, {'ok': True, 'logs': st['logs']})
             return self._send(404, {'ok': False, 'error': 'not found'})
         except Exception as e:                       # noqa: BLE001
@@ -105,10 +115,10 @@ class Handler(BaseHTTPRequestHandler):
                 if 'dry' in body:
                     self.engine.set_config({'dry': bool(body['dry'])})
                 self.engine.start()
-                return self._send(200, self.engine.status())
+                return self._send(200, self._status())
             if path == '/api/stop':
                 self.engine.stop(str(body.get('why') or ''))
-                return self._send(200, self.engine.status())
+                return self._send(200, self._status())
             if path == '/api/config':
                 cfg = self.engine.set_config(body)
                 return self._send(200, {'ok': True, 'config': cfg})
@@ -149,6 +159,17 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
+def _clean_pid_file():
+    """只有 PID 文件里写的是自己才删：别的实例可能刚接管。"""
+    try:
+        with open(PID_FILE, 'r', encoding='utf-8') as f:
+            mine = int((f.read() or '').strip()) == os.getpid()
+        if mine:
+            os.remove(PID_FILE)
+    except (OSError, ValueError):
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=PORT)
@@ -156,17 +177,21 @@ def main():
     ap.add_argument('--fps', type=int, default=30)
     ap.add_argument('--monitor', type=int, default=1,
                     help='1=主屏，0=所有屏幕拼起来（游戏在副屏时用 0）')
+    ap.add_argument('--managed', action='store_true',
+                    help='由插件宿主拉起：停止托管时连本进程一起退出')
     args = ap.parse_args()
 
     eng = Engine(cfg={'dry': args.dry, 'fps': args.fps, 'monitor': args.monitor})
     Handler.engine = eng
+    Handler.managed = bool(args.managed)
     eng.start_thread()
 
     httpd = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     httpd.daemon_threads = True
     Handler.httpd = httpd
-    print('弹幕托管服务已启动：http://127.0.0.1:%d  （%s）'
-          % (args.port, '演练模式，不动鼠标' if args.dry else '实弹模式'), flush=True)
+    print('弹幕托管服务已启动：http://127.0.0.1:%d  （%s%s）'
+          % (args.port, '演练模式，不动鼠标' if args.dry else '实弹模式',
+             '，插件托管' if args.managed else '，手动启动'), flush=True)
     print('按 Ctrl+C 退出', flush=True)
     try:
         httpd.serve_forever()
@@ -175,6 +200,7 @@ def main():
     finally:
         eng.shutdown()
         httpd.server_close()
+        _clean_pid_file()
 
 
 if __name__ == '__main__':
