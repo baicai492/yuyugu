@@ -649,15 +649,31 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     // 修为清零（xian-rules 的 c.xp=0），多打的修为在突破那一刻全部作废。
     const curR = Number(sim.cv?.r || 0)
     const cvReady = Number(sim.cv?.s || 1) >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(curR, 9)
-    if (sim.med) {
+    const canBreak = shouldAllowBreakPolicy(sim, opts) &&
+      Number(sim.pills?.peiyuan || 0) >= curR + 1
+    if (cvReady && canBreak) {
+      // 突破不耗灵力（xian-rules 的 COST.break = 0），停在半路等灵力没有意义。
+      // 顺序照抄主流程：先突破再收功，让这一炉打坐攒的修为记到新的一层——
+      // 先收功的话修为会越过突破线，突破那一刻照样清零（c.xp=0）。
+      if (emit({ a: 'break' })) {
+        if (sim.med && t - Number(sim.med.t || 0) >= MED_MIN + 5) {
+          if (emit({ a: 'rise' })) emit({ a: 'sit' })
+        } else if (!sim.med) {
+          emit({ a: 'sit' })
+        }
+      }
+    } else if (cvReady) {
+      // 修为已满但培元丹不够：别再攒了，多打的修为会被突破清零。
+      // 已经开始的那一炉到上限就收掉。
+      if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) emit({ a: 'rise' })
+    } else if (sim.med) {
       // 到 MED_MAX（30 分钟）就收功：超过的部分站点直接丢弃
       // （xsrules 的 rise：d = Math.min(now - med.t, MED_MAX)）。
       // 收完立刻续上一炉——打坐不耗灵力，停下来等灵力纯属白等。
       if (t - Number(sim.med.t || 0) >= MED_MAX) {
-        const rose = emit({ a: 'rise' })
-        if (rose && !cvReady) emit({ a: 'sit' })
+        if (emit({ a: 'rise' })) emit({ a: 'sit' })
       }
-    } else if (!cvReady) {
+    } else {
       // 没在打坐就直接开一炉，别把这两个多小时空着
       emit({ a: 'sit' })
     }

@@ -833,10 +833,33 @@ console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
       const idleWake = nextXianWakeSec(mkIdle(4), now, {}, ro)
       ok('…唤醒点也在 3 秒后（不是灵力回满的两个多小时后）',
         idleWake - now <= 3, `${idleWake - now} 秒`)
-      // 满层且修为够突破时不开新炉：突破会把本层修为清零
+      // 满层且修为够突破时不能先打坐：突破会把本层修为清零，多打的白扔。
+      // 突破之后坐的是新的一层，那是正常的。
       const idleReady = planXianActions(mkIdle(4, { r: 2, s: 9, xp: 999999 }), now, ro)
-      ok('预留生效 + 修为已满够突破 → 不打坐（打了也白打）',
-        !idleReady.actions.some((a) => a.a === 'xsSit'), idleReady.actions.map((a) => a.a).join(','))
+      ok('预留生效 + 修为已满够突破 → 先突破再打坐（不白攒）',
+        idleReady.actions[0]?.a === 'xsBreak', idleReady.actions.map((a) => a.a).join(','));
+      // 但突破本身不耗灵力（xian-rules 的 COST.break = 0），不能被预留挡住。
+      // 以前这一支是「灵力不够就直接 return」，突破永远排不上，修为白攒到清零。
+      const roBreak = normalizeXianOptions({ enabled: true, reserveEnergy: 30, reserveManual: 30, breakMode: 'eager' })
+      const mkRich = (patch) => {
+        const y = A.newXs(now)
+        Object.assign(y, {
+          v: 1, st: 4, roots: { e: ['fire'], v: [] }, root: 'fire', tech: 'fire', techs: ['fire'],
+          lv: 5, en: 4, enAt: now, cv: { r: 2, s: 9, xp: 999999 }, pills: { peiyuan: 9 }, med: null,
+          plots: [], plotN: 0, seeds: {}, bag: {}, stone: 0, log: 0,
+        }, patch)
+        return { state: { xs: y }, now }
+      }
+      const brk = planXianActions(mkRich({}), now, roBreak)
+      ok('预留生效 + 修为已满 + 培元丹够 → 照样突破',
+        brk.actions.some((a) => a.a === 'xsBreak'), brk.actions.map((a) => a.a).join(','))
+      const brkMed = planXianActions(mkRich({ med: { t: now - 20 * 60 } }), now, roBreak)
+      ok('…突破在收功之前（先破再收，打坐收益记到新一层）',
+        brkMed.actions.map((a) => a.a).join(',') === 'xsBreak,xsRise,xsSit',
+        brkMed.actions.map((a) => a.a).join(','))
+      const noPill = planXianActions(mkRich({ pills: { peiyuan: 0 } }), now, roBreak)
+      ok('…培元丹不够时不突破也不打坐（攒了会被清零）',
+        noPill.actions.length === 0, noPill.actions.map((a) => a.a).join(','))
       const over = planXianActions(mkMed(41 * 60), now, ro)
       ok('预留生效 + 打坐 41 分钟 → 发出收功', over.actions.some((a) => a.a === 'xsRise'),
         over.actions.map((a) => a.a).join(','))
