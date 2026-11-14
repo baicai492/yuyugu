@@ -821,9 +821,20 @@ console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
       const under = planXianActions(mkMed(29 * 60), now, ro)
       ok('预留生效 + 打坐 29 分钟 → 不提前收功（还没到上限）',
         !under.actions.some((a) => a.a === 'xsRise'), under.actions.map((a) => a.a).join(','))
+      // 收功之后必须立刻续坐：打坐不耗灵力，停下来等灵力补齐纯属白等两个多小时。
+      // 例外和主流程一致——满层且修为够突破时只收功不续坐（突破会清零修为）。
+      const cont = planXianActions(mkMed(41 * 60), now, ro)
+      ok('收功后立刻续坐', cont.actions.map((a) => a.a).join(',') === 'xsRise,xsSit',
+        cont.actions.map((a) => a.a).join(','))
       // 唤醒点也要落在「立刻」，不能因为灵力没补够就睡到回满
       const wakeMed = nextXianWakeSec(mkMed(41 * 60), now, {}, ro)
       ok('预留生效 + 打坐已超时 → 立刻醒来收功', wakeMed - now <= 3, `${wakeMed - now} 秒`)
+      // 还没到上限的那一炉：不能一口气睡到灵力回满（两个多小时后），
+      // 要在 30 分钟上限醒来收功续坐，否则超时部分站点直接丢弃。
+      // 29 分钟那一炉离上限还差 60 秒，+1 = 61。
+      const wakeCap = nextXianWakeSec(mkMed(29 * 60), now, {}, ro)
+      ok('打坐未到上限 + 灵力不足 → 到 30 分钟上限醒来（不睡到回满）',
+        wakeCap - now === 61, `${wakeCap - now} 秒`)
     }
   }
 }

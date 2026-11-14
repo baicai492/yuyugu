@@ -642,8 +642,16 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     // （xsrules 的 rise：d = Math.min(now - med.t, MED_MAX)）。
     // 不在这里收，灵力补齐前会一直挂着打坐，超时的部分全白打——
     // 2026-11-15 线上：灵力 8 < 预留 30，打坐挂了 41 分钟，后 11 分钟白扔。
-    // 预留的本意是「攒灵力别乱花」，不是「不许收功」。
-    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) emit({ a: 'rise' })
+    // 预留的本意是「攒灵力别乱花」，不是「不许修炼」。
+    if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) {
+      const rose = emit({ a: 'rise' })
+      // 收完立刻续上一炉：打坐不耗灵力，停下来等灵力纯属白等两个多小时。
+      // 例外和主流程一致——修为已满层且够突破时不再续坐，多打的修为会被
+      // 突破清零（xian-rules 的 c.xp=0），等于白扔。
+      const curR = Number(sim.cv?.r || 0)
+      const cvReady = Number(sim.cv?.s || 1) >= 9 && Number(sim.cv?.xp || 0) >= cvNeed(curR, 9)
+      if (rose && !cvReady) emit({ a: 'sit' })
+    }
     const heal = huilingHeal(sim)
     const canEat = Number(sim.pills?.huiling || 0) >= 1 && dpUsedToday(sim, t) < PILL_DAILY
     // 吃了会溢出一大截就不吃（预留 100、当前 95 时吃一颗浪费 25 点），
@@ -997,7 +1005,14 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
     if (sim.med && t - Number(sim.med.t || 0) >= MED_MAX) return t + 3
     const rg = regenSec(sim)
     const backAt = Number(sim.enAt || t) + (mr - Number(sim.en || 0)) * rg + 1
-    return backAt > t ? backAt : t + rg
+    const energyAt = backAt > t ? backAt : t + rg
+    // 正在打坐就还要在 30 分钟上限回来收功续坐：灵力从 8 攒到预留 30 要两个多小时，
+    // 一直睡到那时，中间那一炉打坐超过上限的部分全被站点丢弃。
+    if (sim.med) {
+      const medCapAt = Number(sim.med.t || t) + MED_MAX + 1
+      if (medCapAt > t) return Math.min(energyAt, medCapAt)
+    }
+    return energyAt
   }
 
   if (sim.brew) {
