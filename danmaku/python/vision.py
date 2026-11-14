@@ -34,19 +34,25 @@ BOSS_HUD_X = 214              # 两行都是左对齐，214 逻辑像素足够�
 SPELL_Y = (28, 50)            # 符卡名（右对齐、背景条 y=30..48、基线 43）
 SPELL_X = 204                 # 符卡名从右边往左最多占这么宽
 
-# 敌弹阈值。背景美术带两层压暗叠加（0.25 黑 + 0.28 深蓝），再亮的竹林
-# 也到不了 V=168 且 S=135；纯白弹（PAL.white #e0e0e0 白核）S 很低，走第二条。
-SAT_V, SAT_S = 168, 135
+# 敌弹阈值（2026-11-15 在离线版上对着线上真实美术实测校准）：
+# 弹芯 V 中位 255、S 中位只有 79——旧值 SAT_S=135 / CORE_S=168 是按模拟器
+# 画的「高饱和红弹」定的，在真画面上只覆盖 24% 的弹。背景里那层漂浮的橙色
+# 萤火 V≈235、S≈87，所以**亮度**才是分界线：CORE_V 从 215 抬到 240，
+# 召回只掉 1.8 个百分点，误检从 32529 降到 2100（15 倍）。
+SAT_V, SAT_S = 190, 50
 WHITE_V, WHITE_S = 200, 52
 # 弹芯阈值：只留最亮的一层。子弹外面有一圈 shadowBlur 光晕，宽阈值会把
 # 相邻的子弹糊成一坨；用弹芯定中心和半径，两颗弹就算贴在一起也分得开。
-CORE_V, CORE_S, CORE_W = 208, 168, 244
+CORE_V, CORE_S, CORE_W = 240, 40, 244
+# 近身补检阈值（detect_near）：只作用在自机周围 120 逻辑像素内，
+# 召回 83%→92%，窗口内只多 0.2 颗误检/帧。
+NEAR_V, NEAR_S = 230, 40
+NEAR_W, NEAR_WS = 244, 45
 PEAK_MIN = 2.0        # 距离变换的峰值下限（识别坐标像素）
+MIN_R = 1.6           # 弹芯半径下限（逻辑像素）
+MAX_R = 34.0          # 弹芯半径上限（逻辑像素）
 
 # 连通域过滤（单位都是识别坐标 CAL 倍）
-MIN_AREA = 8          # 2x2 以下当噪点
-MAX_SIDE = 150        # 单边超过 75 逻辑像素的必不是子弹（大字/横幅）
-MIN_FILL = 0.30       # 弹体填充率，刀/菱形约 0.5，圆约 0.78
 BIG_SIDE = 180        # 再大就是横幅/对话气泡/Boss 立绘
 BIG_H = 150           # 高度阈值放到 75 逻辑像素，让 size 70~84 的敌机不被当成大块
 BIG_FILL = 0.12       # 大块必须「实心」；沿边散落的杂点组成的漫天大块不算
@@ -322,11 +328,66 @@ def detect_objects(field_img, player=None, cal=CAL, boss=False, want_hazards=Tru
         cx, cy = pcent[i]
         x, y, bw, bh, _area = pst[i]
         r = float(dist[y:y + bh, x:x + bw].max()) / cal
-        if r < 1.6 or r > 34:
+        if r < MIN_R or r > MAX_R:
             continue
         out[k] = (cx / cal, cy / cal, max(2.5, r))
         k += 1
     return out[:k], lasers, hazards
+
+
+def detect_near(field_img, player, cal=CAL, radius=120.0):
+    """自机附近的补检：同一套弹芯算法，但阈值放宽，且**只在这个窗口里生效**。
+
+    为什么需要它：全局阈值为了压背景误检，卡在 CORE_V=240，会漏掉 17% 的弹；
+    但真正决定生死的只有近身这一圈。在这 240x240 的窗口里放宽到 230，召回
+    从 83% 提到 92%，窗口内多出来的误检只有 0.2 颗/帧——窗口小，误检也就少。
+
+    返回 (n,3) [x,y,r] 逻辑坐标。调用方负责和主检出去重（别让同一颗弹生成
+    两条轨迹，那会让走位同时躲两颗「重合的弹」）。
+    """
+    if player is None:
+        return np.zeros((0, 3), np.float32)
+    px, py = player
+    x0 = int(round((px - radius) * cal)); x1 = int(round((px + radius) * cal))
+    y0 = int(round((py - radius) * cal)); y1 = int(round((py + radius) * cal))
+    x0 = max(0, x0); y0 = max(0, y0)
+    x1 = min(field_img.shape[1], x1); y1 = min(field_img.shape[0], y1)
+    if x1 - x0 < 40 or y1 - y0 < 40:
+        return np.zeros((0, 3), np.float32)
+    sub = field_img[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+    core = cv2.bitwise_or(
+        cv2.inRange(hsv, (0, NEAR_S, NEAR_V), (180, 255, 255)),
+        cv2.inRange(hsv, (0, 0, NEAR_W), (180, NEAR_WS, 255)))
+    edge = max(2, int(round(3 * cal)))
+    core[:edge, :] = 0
+    core[-edge:, :] = 0
+    core[:, :edge] = 0
+    core[:, -edge:] = 0
+    pr = _player_mask_rect(player)
+    if pr is not None:
+        a0, b0, a1, b1 = [int(round(q * cal)) for q in pr]
+        core[max(0, b0 - y0):max(0, b1 - y0), max(0, a0 - x0):max(0, a1 - x0)] = 0
+    dist = cv2.distanceTransform(core, cv2.DIST_L2, 5)
+    if dist.size == 0 or float(dist.max()) < PEAK_MIN:
+        return np.zeros((0, 3), np.float32)
+    peaks = (dist >= cv2.dilate(dist, np.ones((5, 5), np.uint8)) - 1e-4) & (dist >= PEAK_MIN)
+    npk, _plab, pst, pcent = cv2.connectedComponentsWithStats(peaks.astype(np.uint8), 8, cv2.CV_32S)
+    out = np.empty((max(0, npk - 1), 3), np.float32)
+    k = 0
+    for i in range(1, npk):
+        cx, cy = pcent[i]
+        x, y, bw, bh, _area = pst[i]
+        r = float(dist[y:y + bh, x:x + bw].max()) / cal
+        if r < MIN_R or r > MAX_R:
+            continue
+        fx = (cx + x0) / cal
+        fy = (cy + y0) / cal
+        if (fx - px) ** 2 + (fy - py) ** 2 > radius * radius:
+            continue
+        out[k] = (fx, fy, max(2.5, r))
+        k += 1
+    return out[:k]
 
 
 def laser_points(lasers, margin=3.0, step=24.0):

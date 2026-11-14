@@ -20,10 +20,10 @@ from ai import Tracker, Dodger, clamp_player, PLAYER_SPEED
 from io_win import Screen, Mouse, cursor_pos, LiveFeed
 from vision import (Field, FIELD_W, FIELD_H,
                     locate_field, locate_field_full, crop_field,
-                    detect_objects, laser_points,
+                    detect_objects, detect_near, laser_points,
                     read_boss_hp, frame_is_dark, CAL)
 
-VERSION = '0.2.0'
+VERSION = '0.2.1'
 
 # 判受击：自机雪碧图连续消失多久算死了一次。
 #
@@ -120,6 +120,8 @@ class Engine:
         self._last_bomb = 0.0
         self._hit_lock = 0.0
         self._pending = None
+        self.whale = 0
+        self.wpos = None
         self._t_last = 0.0
         self._fps_ema = 0.0
         self._haz_cache = np.zeros((0, 3), np.float32)
@@ -146,6 +148,7 @@ class Engine:
                 'boss': self.boss,
                 'hp': round(self.hp, 3),
                 'player': [round(self.player[0], 1), round(self.player[1], 1)],
+                'whale': self.whale,
                 'elapsed': round((self.t_end or self.now()) - self.t_start, 1) if self.t_start else 0,
                 'hits': self.hits,
                 'bombs': self.bombs,
@@ -299,6 +302,17 @@ class Engine:
         want_haz = self.frames % 3 == 0
         dets, lasers, hazards = detect_objects(crop, self.player, boss=boss,
                                                want_hazards=want_haz)
+        # 近身补检：全局阈值为了压背景误检卡得严，自机周围这一圈放宽一点
+        # （见 vision.detect_near）。两边都检出来的弹会产生两条轨迹，
+        # 所以离主检出 4 像素以内的补检结果丢掉。
+        extra = detect_near(crop, self.player)
+        if len(extra):
+            if len(dets):
+                dm = np.linalg.norm(extra[:, None, :2] - dets[None, :, :2],
+                                    axis=2).min(axis=1)
+                extra = extra[dm > 4.0]
+            if len(extra):
+                dets = np.concatenate([dets, extra], axis=0) if len(dets) else extra
         if want_haz:
             self._haz_cache = hazards
         else:
@@ -324,6 +338,8 @@ class Engine:
         #    闪烁（20 Hz，每次 50 毫秒）、Boss 换阶段的短暂清屏。只有第一种
         #    长到能过 0.6 秒的阈值。
         whale, wpos = _whale_pixels(crop, self.player)
+        self.whale = whale
+        self.wpos = wpos
         if whale >= 120 and wpos is not None:
             dx = wpos[0] - self.player[0]
             dy = wpos[1] - self.player[1]
@@ -393,16 +409,27 @@ class Engine:
             f = locate_field_full(img, self.hint)
             if f is None:
                 return None, None
-            return f, crop_field(img, f)
+            crop = crop_field(img, f)
+            return (f, crop) if crop is not None else (None, None)
         pad = 10
+        # 抓取矩形要夹在屏幕内：浏览器窗口顶到屏幕边缘时，pad 会把矩形推到画面外，
+        # 抓回来的图就少了那一条，crop_field 会判定「场地被裁掉一截」直接返回 None，
+        # 于是每帧都白跑一遍识别（场地贴边很常见，窗口最大化就是这样）。
         x, y, w, h = cur.rect(pad)
-        img = self._grab((x, y, w, h))
+        bx, by, bw, bh = self.screen.bounds()
+        x0 = max(bx, x); y0 = max(by, y)
+        x1 = min(bx + bw, x + w); y1 = min(by + bh, y + h)
+        if x1 - x0 < 60 or y1 - y0 < 60:
+            return None, None
+        img = self._grab((x0, y0, x1 - x0, y1 - y0))
         if img is None:
             return None, None
+        # 场地在这张裁剪图里的位置（夹紧之后才是准的）
+        lx, ly = cur.x - x0, cur.y - y0
         # 在裁剪图里重新定位：窗口被拖动/缩放时自动跟上。
         # 单帧找不到就沿用上一帧的矩形（边框可能被自机/弹幕压住）；
         # 连着 12 帧都找不到说明窗口真的动了，清掉让下一帧整屏重找。
-        f2 = locate_field(img, {'x': pad, 'y': pad, 'w': cur.w, 'h': cur.h})
+        f2 = locate_field(img, {'x': lx, 'y': ly, 'w': cur.w, 'h': cur.h})
         if f2 is None:
             self._relost += 1
             if self._relost > 12:
@@ -412,10 +439,14 @@ class Engine:
                 self._relost = 0
                 self.field = None
                 return None, None
-            return cur, crop_field(img, Field(cur.x - x, cur.y - y, cur.w, cur.h))
+            crop = crop_field(img, Field(lx, ly, cur.w, cur.h))
+            return (cur, crop) if crop is not None else (None, None)
         self._relost = 0
-        f2 = Field(f2.x + x, f2.y + y, f2.w, f2.h)
-        return f2, crop_field(img, Field(f2.x - x, f2.y - y, f2.w, f2.h))
+        f2 = Field(f2.x + x0, f2.y + y0, f2.w, f2.h)
+        crop = crop_field(img, Field(f2.x - x0, f2.y - y0, f2.w, f2.h))
+        # crop 可能是 None（场地被屏幕边缘截掉一截）。这时不能把 None 传下去，
+        # 否则 read_boss_hp(None) 会在这里抛 TypeError，整帧识别/走位全跳过。
+        return (f2, crop) if crop is not None else (None, None)
 
     def _advance_player(self, dt):
         """按游戏规则把自机朝「上一帧设的指针」推进一步（danmaku.js:164）。"""

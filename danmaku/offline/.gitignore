@@ -1,0 +1,12 @@
+# 临时产物：离线调试时生成的截图、误检样本、Chrome 用户目录
+_profile-*/
+__pycache__/
+_*.png
+_fp/
+_patch/
+_tp/
+_ghost*.png
+_eval/
+_art_*.png
+_smoke.png
+_worst*.png

@@ -23,13 +23,25 @@ SLOW_SPEED = 130.0        # 按住左键 130，本程序不用（慢速反而更
 PX_MIN_X, PX_MAX_X = 8.0, FIELD_W - 8.0
 PX_MIN_Y, PX_MAX_Y = 16.0, FIELD_H - 10.0
 
+# 背景噪声过滤：真弹最慢也有 60 逻辑像素/秒（danmaku.js 里 sp 最小 40 且很快
+# 加速），背景美术的视差滚动只有 14~30。所以「从出生起就没快过」的轨迹是背景。
+# 注意判据是**历史的快帧数**而不是当前速度：剑符的木/金弹会悬停 0.7~1 秒
+# （danmaku.js:192 stickY），它们停住之前飞得很快，计过数；而背景亮点永远慢。
+# 只按当前速度过滤会把悬停弹一起删掉，那就是送死。
+# 只看「最大速度」也不行：背景点有一帧抖动被算成 90 px/s，它就永远洗不白了。
+STATIC_SPD = 60.0             # 逻辑像素/秒
+STATIC_AGE = 8                # 至少跟踪这么多帧（≈0.3 秒）才下结论
+STATIC_HITS = 3               # 其中至少这么多帧快于此速度
+BG_R = 7.0                    # 判成背景的点：新检出离它这么近就直接忽略
+BG_TTL = 90                   # 背景点没有新检出后还记这么多帧（≈3 秒）
+
 
 def clamp_player(x, y):
     return (min(PX_MAX_X, max(PX_MIN_X, x)), min(PX_MAX_Y, max(PX_MIN_Y, y)))
 
 
 class Track:
-    __slots__ = ('x', 'y', 'vx', 'vy', 'r', 'age', 'miss', 'own', 'sx', 'sy')
+    __slots__ = ('x', 'y', 'vx', 'vy', 'r', 'age', 'miss', 'own', 'sx', 'sy', 'fast')
 
     def __init__(self, x, y, r, own=False, sx=None, sy=None):
         self.x, self.y, self.vx, self.vy = x, y, 0.0, 0.0
@@ -37,6 +49,7 @@ class Track:
         self.age = 0
         self.miss = 0
         self.own = own
+        self.fast = 0
         self.sx, self.sy = (x if sx is None else sx), (y if sy is None else sy)
 
 
@@ -44,10 +57,35 @@ class Tracker:
     def __init__(self, gate=26.0):
         self.gate = gate
         self.tracks = []
+        self.bg = []          # [x, y, ttl]：被判成背景亮点的位置
+        self.c_bg_skip = 0    # 诊断：被背景黑名单拦下的新检出数
+        self.c_bg_drop = 0    # 诊断：被判成背景删掉的轨迹数
         self.own_count = 0
 
     def reset(self):
         self.tracks = []
+        self.bg = []
+        self.c_bg_skip = 0
+        self.c_bg_drop = 0
+
+    def _is_bg(self, x, y):
+        """这个位置是不是背景亮点。是的话顺手更新它的位置（背景会缓慢视差）。"""
+        best = None
+        best_d = BG_R * BG_R
+        for e in self.bg:
+            d = (e[0] - x) ** 2 + (e[1] - y) ** 2
+            if d <= best_d:
+                best, best_d = e, d
+        if best is None:
+            return False
+        best[0], best[1], best[2] = x, y, BG_TTL
+        return True
+
+    def _age_bg(self):
+        if self.bg:
+            for e in self.bg:
+                e[2] -= 1
+            self.bg = [e for e in self.bg if e[2] > 0]
 
     def update(self, dets, dt, player=None):
         """dets: (n,3) [x,y,r]；返回 (danger 数组 (m,5), 全部轨迹数, 自身弹数)。"""
@@ -86,6 +124,8 @@ class Tracker:
                 # 平滑：新速度给多一点，但保留历史，免得单帧抖动带偏预判
                 t.vx = 0.6 * vx + 0.4 * t.vx
                 t.vy = 0.6 * vy + 0.4 * t.vy
+                if (vx * vx + vy * vy) ** 0.5 > STATIC_SPD:
+                    t.fast += 1
                 t.x, t.y = nx, ny
                 t.r = 0.7 * t.r + 0.3 * float(dets[j, 2])
                 t.age += 1
@@ -108,20 +148,47 @@ class Tracker:
                 keep.append(t)
         self.tracks = keep
 
-        # 新出现的
+        # 新出现的（先问一下背景黑名单：被判成背景的位置每帧都会再被检出，
+        # 如果不管它，刚刚删掉的轨迹下一帧就原样长回来）
         for j in range(len(dets)):
             if used[j]:
                 continue
             x, y = float(dets[j, 0]), float(dets[j, 1])
+            if self._is_bg(x, y):
+                self.c_bg_skip += 1
+                continue
             self.tracks.append(Track(x, y, float(dets[j, 2])))
 
-        # 自机子弹标记：从自机枪口冒出来、而且明显向上飞。
-        # 判据必须严 —— 标错了就等于把一颗敌弹从危险集合里永久删掉
-        # （曾经有一条绿色的环弹因为一帧速度抖动被标成「自己」，
-        #   然后从正上方落下来把自机打死了）。玩家最慢的弹也有 380 px/s。
+        # 背景美术的亮点（樱花、灯笼、瀑布水花…）每帧都在同一个位置被检出，
+        # 追踪几帧后速度接近 0。它们不是威胁，却会把走位的余量图搅乱——
+        # 实测误检多于真弹 4 倍时自机会被「不存在的墙」逼着撞上真弹。
+        dead = [t for t in self.tracks
+                if t.age >= STATIC_AGE and t.fast < STATIC_HITS]
+        if dead:
+            self.tracks = [t for t in self.tracks
+                           if not (t.age >= STATIC_AGE and t.fast < STATIC_HITS)]
+            for t in dead:
+                self.bg.append([t.x, t.y, BG_TTL])
+            self.c_bg_drop += len(dead)
+        self._age_bg()
+
+        # 自机子弹标记。判据必须严 —— 标错了就等于把一颗敌弹从危险集合里
+        # 永久删掉（曾经有一条绿色的环弹因为一帧速度抖动被标成「自己」，
+        #   然后从正上方落下来把自机打死了）。
+        #
+        # 主判据是方向：自机弹 380~820 px/s 向上，敌弹最快 240（回旋弹重新
+        # 发射 300~320，且都是朝下方的自机飞）。所以「向上快过 350」的必是自己人。
+        #
+        # 以前只按「出生时离自机近」认，在 15 fps 下这条几乎全失效：一条轨迹
+        # 断掉重建时弹已经飞出一百多像素，永远认不回来。实测 60~90 颗自机弹
+        # 全被当成敌弹，走位被自己的弹幕逼得到处乱撞。
         own = 0
         for t in self.tracks:
             if t.own:
+                own += 1
+                continue
+            if t.age >= 1 and t.vy < -350.0:
+                t.own = True
                 own += 1
                 continue
             if t.age <= 8 and t.age >= 1 and player is not None:
@@ -181,7 +248,11 @@ class Dodger:
 
         pos = arr[:, 0:2]
         vel = arr[:, 2:4]
-        rad = np.maximum(4.0, arr[:, 4] * 0.75 + self.margin)
+        # 识别出来的 r 是「弹芯半径」，比游戏真正用来判定的 r 略小：
+        # 稻弹判定 3（SIZE 表）而芯的峰值只有 2.5~3，大玉判定 11 而芯 8~10。
+        # 老算法 arr.r*0.75+2.5 在 r=3 时只有 4.75，比判定半径 5.2 还小，
+        # 等于贴着判定圈走。改成「芯半径 + 固定余量」，保证比判定圈多出 1~2 像素。
+        rad = np.maximum(5.0, arr[:, 4] + self.margin + 1.0)
 
         ts = np.arange(0.0, self.horizon + 1e-6, self.step).astype(np.float32)
         K = len(ts)
