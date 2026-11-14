@@ -77,7 +77,8 @@ export class Engine {
     // 游乐馆里没提交成的那一局（重启/异常中断留下）：见 tick 里的「重启接手」
     if (st.arcadePending && typeof st.arcadePending === 'object') this.memo.arcadePending = st.arcadePending
     // 擂台今日场次：重启后不用等打完一轮才知道擂台有没有做完
-    if (st.arenaDay) this.memo.arenaDay = st.arenaDay    if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
+    if (st.arenaDay) this.memo.arenaDay = st.arenaDay
+    if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
     if (st.arenaMax) this.memo.arenaMax = st.arenaMax
     if (st.arenaChest != null) this.memo.arenaChest = st.arenaChest
     if (st.arenaChestEarned != null) this.memo.arenaChestEarned = st.arenaChestEarned
