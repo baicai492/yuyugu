@@ -280,7 +280,7 @@ export const DEFAULTS = {
     homeSyncMax: 6,
     guardSyncMax: 8,
     trials: 800,                 // 擂台每套候选装备的模拟局数
-    guardTrials: 400,            // 偷菜前每家的模拟局数（要快，别拖过解禁窗口）
+    guardTrials: 800,            // 偷菜前每家的模拟局数（守家只有一次机会，宁可贵几十毫秒）
     minGain: 0.005,              // 换装至少提高 0.5% 期望效用
     zThreshold: 2.0,             // 且配对检验 z > 2（避免为噪音换装）
     guardBlockSec: 600,          // 打输/负期望后多久不再碰这座岛（秒）

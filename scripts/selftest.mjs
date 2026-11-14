@@ -609,6 +609,49 @@ console.log('\n[新] 掐点提交前的服务端确认')
   ok('at=0 视为无效', shouldConfirmSnipe({ snipe: true, at: 0 }, 1e9) === false)
 }
 
+console.log('\n[新] 偷菜拒绝回执分类')
+{
+  const { classifyStealReject, nextCstDayStart } = await import('../core/social.mjs')
+  // 2026-11-14 14:50:11 北京时间
+  const clock = 1794639011
+  const cst = (t) => new Date((t + 8 * 3600) * 1000).toISOString().replace('T', ' ').slice(0, 19)
+
+  ok('次日 0 点按北京时间算', cst(nextCstDayStart(clock)) === '2026-11-15 00:00:00', cst(nextCstDayStart(clock)))
+  ok('次日 0 点晚于现在、不超过 24 小时', nextCstDayStart(clock) > clock && nextCstDayStart(clock) - clock <= 86400)
+  // 刚好踩在 0 点整时封到「明天 0 点」，而不是原地返回今天 0 点
+  ok('0 点整翻到下一天', nextCstDayStart(1794585600) === 1794672000, cst(nextCstDayStart(1794585600)))
+
+  // 1) 每日上限：服务端按自然日封顶，封到次日 0 点（不是 90 秒冷却）
+  {
+    const k = classifyStealReject({ status: 400, message: '今天的偷菜次数已达上限', clock })
+    ok('「上限」判为 daily-cap', k.kind === 'daily-cap' && k.until === nextCstDayStart(clock), JSON.stringify(k))
+    ok('「今天偷过」同样封到次日', classifyStealReject({ message: '你今天已经偷过 TA 家了', clock }).kind === 'daily-cap')
+    ok('「新手」保护期也按每日上限处理', classifyStealReject({ message: '新手保护期内不能偷', clock }).kind === 'daily-cap')
+  }
+
+  // 2) 409 卡在推算解禁时刻 ±2 秒：时钟截断抖动，1 秒后重试一次
+  {
+    const k = classifyStealReject({ status: 409, message: '状态冲突', clock, expectedAt: clock - 1 })
+    ok('409 贴边判为 boundary-retry', k.kind === 'boundary-retry', JSON.stringify(k))
+    ok('重试时刻取 max(now+1, 解禁+1)', k.retryAt === clock + 1, `retryAt=+${k.retryAt - clock}`)
+    const late = classifyStealReject({ status: 409, message: '状态冲突', clock, expectedAt: clock - 2 })
+    ok('提前 2 秒也允许重试', late.kind === 'boundary-retry')
+    // 已经重试过一次就不再重试（防止和站点的截断差异卡在 409 上死循环）
+    const again = classifyStealReject({ status: 409, message: '状态冲突', clock, expectedAt: clock - 1, earlyRetry: true })
+    ok('重试过一次后落到冷却', again.kind === 'cooldown' && again.until === clock + 90, JSON.stringify(again))
+  }
+
+  // 3) 其余拒绝：被别人抢先 / 刚被收 / 不是 409 / 离解禁太远 → 90 秒冷却
+  {
+    const k = classifyStealReject({ status: 400, message: 'TA 家现在没有能偷的', clock })
+    ok('普通拒绝按 90 秒冷却', k.kind === 'cooldown' && k.until === clock + 90, JSON.stringify(k))
+    const far = classifyStealReject({ status: 409, message: '状态冲突', clock, expectedAt: clock - 5 })
+    ok('409 但离解禁太远按冷却', far.kind === 'cooldown', JSON.stringify(far))
+    const noAt = classifyStealReject({ status: 409, message: '状态冲突', clock, expectedAt: 0 })
+    ok('409 但没有解禁时刻按冷却', noAt.kind === 'cooldown', JSON.stringify(noAt))
+  }
+}
+
 console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
 {
   const A = await import('../core/xian-rules.mjs')

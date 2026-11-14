@@ -18,6 +18,41 @@ import {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * 下一个北京时间 0 点（服务端按自然日重置每日上限）。
+ * now 是服务端秒；返回同一个时间轴上的秒。
+ */
+export function nextCstDayStart(nowSec) {
+  const t = Math.floor(Number(nowSec) || 0)
+  return Math.floor((t + 8 * 3600) / 86400) * 86400 + 86400 - 8 * 3600
+}
+
+/**
+ * 偷菜被拒绝时怎么处理（参考 recordSnipeReceipt 的 rejected 分支）。
+ *
+ *   daily-cap       服务端按自然日封顶（「上限 / 今天偷过 / 新手」）：
+ *                   封到次日 0 点，这家今天不用再排；
+ *   boundary-retry  409 恰好卡在推算解禁时刻 ±2 秒：时钟截断抖动，不是真失败，
+ *                   1 秒后再试一次（每家只重试一次）；
+ *   cooldown        其余拒绝（最常见是「没有能偷的」= 被别人抢先/刚被收）：
+ *                   90 秒内不再碰这家。
+ *
+ * @returns {{kind:string, until?:number, retryAt?:number}}
+ */
+export function classifyStealReject({ status = 0, message = '', clock = 0, expectedAt = 0, earlyRetry = false } = {}) {
+  // 文案比参考实现多收了「已经偷过 TA 家」这种更常见的表述；
+  // 不收裸「偷过」，免得把「这茬已经被偷过 2 个」这类 stolen 计数误判成每日封顶
+  // ——那会把整座岛封到明天，代价远大于措辞上的宽容。
+  if (/上限|新手|今天偷过|已经偷过 TA 家/.test(String(message))) {
+    return { kind: 'daily-cap', until: nextCstDayStart(clock) }
+  }
+  if (Number(status) === 409 && Number(expectedAt) > 0 &&
+      Math.abs(clock - expectedAt) <= 2 && !earlyRetry) {
+    return { kind: 'boundary-retry', retryAt: Math.max(clock + 1, Number(expectedAt) + 1) }
+  }
+  return { kind: 'cooldown', until: clock + 90 }
+}
+
 async function wget(world, path) {
   return world.client.get('/api/pet/world/' + path)
 }
@@ -815,7 +850,7 @@ function stealBattleCtx(cfg) {
     storePath: b.profileStore || defaultProfileStorePath(),
     lockRoot: b.lockRoot || defaultLockRoot(),
     accountKey: b.accountKey || 'main',
-    trials: b.guardTrials ?? 400,
+    trials: b.guardTrials ?? 800,
     minGain: b.minGain ?? 0.005,
     zThreshold: b.zThreshold ?? 2.0,
     blockSec: b.guardBlockSec ?? 600,
@@ -1301,9 +1336,13 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
         if (world.state.en < needE) { starved++; continue }
       }
       tried++
+      let skipAdvance = false
       try {
         const r = await stealIsle(world, tg.id)
         const res = r.result || {}
+        // 拿到一次成功回执：清掉 409 边界重试的标记，下次卡边界还能再重试一次。
+        const osOk = stealStateOf(memo, tg.id)
+        if (osOk?.earlyRetry) osOk.earlyRetry = 0
         const unitOf = (id) => world.prices[id] || R.BASE_PRICE[id] || 0
         const nameOf = (id) => R.ITEM_NAME?.[id] || id
 
@@ -1446,12 +1485,37 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
         const since = tg.at ? `，到点${clock >= tg.at ? '后' : '前'} ${Math.abs(Math.round(clock - tg.at))} 秒` : ''
         log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
           `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处${since}`)
+        // 回执分类（见 classifyStealReject）：
+        //   · 「上限/今天偷过/新手」= 服务端按自然日封顶 → 封到次日 0 点；
+        //   · 409 卡在推算解禁时刻 ±2 秒 = 时钟截断抖动 → 1 秒后再试一次，
+        //     别当成「这一波没了」推进到下一波；
+        //   · 其余拒绝（最常见是「没有能偷的」= 被别人抢先/刚被收）→ 90 秒冷却。
+        const os = stealStateOf(memo, tg.id, true)
+        const k = classifyStealReject({
+          status: e.status, message: String(e.message || ''), clock,
+          expectedAt: Number(tg.at) || 0, earlyRetry: Boolean(os.earlyRetry),
+        })
+        if (k.kind === 'daily-cap') {
+          os.blockedUntil = Math.max(os.blockedUntil || 0, k.until)
+          os.blockedReason = 'server-daily-cap'
+          const rec = memo.stealSchedule?.[tg.id]
+          if (rec) { rec.upcoming = []; rec.waves = []; rec.nextAt = 0 }
+        } else if (k.kind === 'boundary-retry') {
+          os.earlyRetry = 1
+          os.cooldownUntil = Math.max(os.cooldownUntil || 0, clock + 1)
+          skipAdvance = true
+          if (memo.stealSchedule?.[tg.id]) memo.stealSchedule[tg.id].nextAt = k.retryAt
+        } else {
+          os.cooldownUntil = Math.max(os.cooldownUntil || 0, k.until)
+          os.blockedReason = 'rejected'
+        }
       }
       // 这座岛已经处理过了：推进到排好的下一波（多波次），没有就清空。
       // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
       // 以前这里直接 `rec.upcoming = []`——第二批成熟的作物因此只能等
       // 下一次全量巡逻（默认 30 分钟）才会被重新发现，通常早被别人偷了。
-      if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
+      // 409 边界重试是「同一波再来一次」，不是「这波结束」，所以不推进。
+      if (!skipAdvance && memo.stealSchedule && memo.stealSchedule[tg.id]) {
         const rec = memo.stealSchedule[tg.id]
         const completedAt = Number(rec.nextAt) || 0
         const more = advanceIsleWave(rec, world.now, { completedAt })
