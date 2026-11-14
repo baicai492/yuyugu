@@ -18,6 +18,7 @@ const balanceTax = (coins) => {
 let port = 8787
 let alive = false
 let restarting = false      // 正在重启的 1~2 秒空窗：期间的网络错误不写状态栏
+let exiting = false         // 正在「停止主程序」：进程退出期间的网络错误不写状态栏
 let switching = false       // 正在「拉起主程序 + 开托管」：期间不按 config.enabled 回弹开关
 let status = null
 let market = null
@@ -105,9 +106,9 @@ async function loadStatus() {
     renderArcade()
     $('ver').textContent = 'v' + (j.version || 2)
   } catch (e) {
-    // 重启空窗、进程刚退出都会走到这里。进行中的重启不算故障；
+    // 重启空窗、进程刚退出都会走到这里。进行中的重启/停止不算故障；
     // 其它情况才报，并且下一次读取成功时由 renderOverview 覆盖掉。
-    if (!restarting) $('statusline').textContent = '读取状态失败：' + e.message
+    if (!restarting && !exiting) $('statusline').textContent = '读取状态失败：' + e.message
   }
 }
 
@@ -1262,6 +1263,7 @@ function bind() {
   $('btnStart').onclick = async () => { try { await cmd('start'); await loadStatus() } catch (e) { $('statusline').textContent = e.message } }
   $('btnStop').onclick = async () => { try { await cmd('stop'); await loadStatus() } catch (e) { $('statusline').textContent = e.message } }
   $('btnOnce').onclick = async () => { try { await cmd('once'); setTimeout(loadStatus, 1500) } catch (e) { $('statusline').textContent = e.message } }
+  $('btnExit').onclick = stopProgram
 
   // 重启：主程序会 spawn 一个新进程再自杀，所以这里必然先看到连接断开，
   // 然后轮询 ping 直到新进程起来，再重新连接。
@@ -1462,6 +1464,84 @@ async function startProgram() {
     if (!alive) sw.checked = false
     else if (config) sw.checked = !!config.enabled
   }
+}
+
+// 停止主程序的一次性确认计时器：0 = 当前没在等确认
+let exitArmTimer = 0
+
+/**
+ * 停止主程序：暂停托管 + 退出进程。
+ *
+ * 和「暂停」的区别：暂停只把 cfg.enabled 置 false，进程继续活着给面板看状态；
+ * 这里连进程一起退，端口关掉、插件变成「未连接」。
+ *
+ * 退出走 /api/command {cmd:'exit'}，server.mjs 那边会先 engine.stop()，
+ * 等正在跑的这一轮跑完（最多 15 秒）再 process.exit——不硬切，免得在途请求
+ * 的回执没读、账本和库存对不上。
+ *
+ * 要点两下才动手：popup 里调 confirm() 会连带把面板关掉，只能用行内确认。
+ */
+async function stopProgram() {
+  const btn = $('btnExit')
+  if (exiting) return
+  if (!alive) {
+    $('statusline').textContent = '主程序没在运行，不用再停'
+    return
+  }
+  if (!exitArmTimer) {
+    exitArmTimer = setTimeout(() => {
+      exitArmTimer = 0
+      btn.textContent = '停止主程序'
+      btn.classList.remove('armed')
+    }, 4000)
+    btn.textContent = '确认停止？'
+    btn.classList.add('armed')
+    $('statusline').textContent = '再点一次确认停止；4 秒内不点就取消'
+    return
+  }
+  clearTimeout(exitArmTimer)
+  exitArmTimer = 0
+  btn.classList.remove('armed')
+  btn.disabled = true
+  btn.textContent = '正在退出…'
+  exiting = true
+  $('statusline').textContent = '正在停止：先暂停托管，等这一轮跑完再退出（最多 15 秒）'
+  try {
+    // enabled=false 先落盘：以后被拉起时不会自动接着托管
+    await cmd('stop').catch(() => {})
+    await cmd('exit').catch(() => {})
+  } catch {}
+  // 进程可能还在等这一轮跑完：轮询到端口关掉为止（最多 20 秒）
+  let down = false
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 500))
+    try { await api('/api/ping') } catch { down = true; break }
+  }
+  exiting = false
+  alive = false
+  status = null
+  config = null
+  blankOverview()
+  $('enabled').checked = false
+  $('connBox').hidden = false
+  $('launchHint').textContent = ''
+  $('dot').className = 'dot err'
+  $('linkState').textContent = '未连接'
+  $('linkState').className = 'pill bad'
+  $('statusline').textContent = down
+    ? '主程序已停止（托管也一并停了）。打开右上角开关会重新拉起。'
+    : '20 秒内还没退出：可能卡在某一轮里，再点一次停止，或用任务管理器结束 node'
+  btn.disabled = false
+  btn.textContent = '停止主程序'
+}
+
+/** 进程退出后清掉概览里的旧数字：留着上一轮的数会让人以为还在跑 */
+function blankOverview() {
+  for (const el of $('tab-overview').querySelectorAll('.card b[id]')) el.textContent = '—'
+  $('dayNet').className = ''
+  $('dayNetSub').textContent = ''
+  $('quotas').innerHTML = ''
+  $('otherRow').hidden = true
 }
 
 function startAuto() {

@@ -239,10 +239,23 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             if (engine.running) { engine.requestTick(); return send(res, 200, { ok: true, msg: '已唤醒，马上开始' }) }
             engine.tick().catch((e) => engine.log('手动巡视出错：' + e.message, 'err'))
             return send(res, 200, { ok: true })
-          case 'exit':
+          case 'exit': {
+            // 和 Ctrl+C 走同一条收尾路径（yuyugu2.mjs 的 shutdown）：先停托管，
+            // 等正在跑的这一轮跑完再退。硬切会丢掉在途请求的回执，账本和
+            // 库存对不上；擂台一轮能跑 4 分钟，所以最多等 15 秒。
             engine.log('GUI：退出程序')
-            setTimeout(() => process.exit(0), 300)
-            return send(res, 200, { ok: true })
+            send(res, 200, { ok: true })
+            engine.stop()
+            const t0 = Date.now()
+            const timer = setInterval(() => {
+              if (!engine.busy || Date.now() - t0 > 15000) {
+                clearInterval(timer)
+                process.exit(0)
+              }
+            }, 200)
+            timer.unref?.()
+            return
+          }
           case 'restart': {
             // 改了代码必须重启进程才生效。这里直接「换一个自己」：
             // 先把回包发出去，再 spawn 一个脱离的新进程，然后自己退出。

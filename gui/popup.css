@@ -85,6 +85,13 @@ nav.tabs button.on { background: var(--accent); border-color: var(--accent); col
 button { padding: 7px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
 button:disabled { opacity: .45; cursor: default; }
 button.ghost { background: var(--soft); color: var(--accent); }
+
+/* 停止主程序：和「暂停」隔开，红色描边，点第一下要再点第二下才执行 */
+.danger-zone { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.danger-zone .muted { font-size: 11px; flex: 1; min-width: 180px; }
+button.danger { background: transparent; color: var(--down); border: 1px solid color-mix(in srgb, var(--down) 45%, transparent); }
+button.danger:hover { background: color-mix(in srgb, var(--down) 10%, transparent); }
+button.danger.armed { background: var(--down); color: #fff; border-color: var(--down); }
 .chk { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
 .statusline { margin-top: 8px; font-size: 11px; color: var(--muted); min-height: 15px; }
 

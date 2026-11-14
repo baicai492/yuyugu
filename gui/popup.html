@@ -97,6 +97,12 @@
       <label class="chk"><input type="checkbox" id="dry" /> 演练（不提交）</label>
     </div>
     <div class="statusline" id="statusline"></div>
+    <!-- 「暂停」只停托管、进程留着给面板看状态；「停止主程序」连进程一起退。
+         两个按钮分开放，避免想暂停时误点到退出。 -->
+    <div class="danger-zone">
+      <button id="btnExit" class="danger" title="暂停托管并退出主程序进程（不是只暂停）">停止主程序</button>
+      <span class="muted">先暂停托管，等这一轮跑完再退出；下次打开右上角开关会重新拉起</span>
+    </div>
   </section>
 
   <!-- 市场预测 -->
