@@ -529,8 +529,6 @@ function renderXianDetail(D) {
   $('xRoots').replaceChildren(...rootRows, fuseList)
 
   // ---------- 试炼 ----------
-  // 列表只留一行（名字 + 状态 + 门槛）。玩法说明太长，挪到悬停提示里，
-  // 否则三关每关两行字，卡片一屏都放不下。
   const stageList = document.createElement('div')
   stageList.className = 'xlist'
   for (const st of D.stages || []) {
@@ -539,14 +537,18 @@ function renderXianDetail(D) {
       [
         { text: st.name, bold: true },
         { text: st.cleared ? '  已首通' : '  未通关', cls: st.cleared ? 'ok' : 'dim' },
-        { text: `  ${st.needRealm} · ${st.stone} 灵石`, cls: 'dim' },
+        { text: `  ${st.needRealm}可进 · 基础 ${st.stone} 灵石`, cls: 'dim' },
         ...(st.canEnter ? [] : [{ text: '  （境界不足）', cls: 'bad' }]),
       ],
+      [{
+        text: '首通给培元丹 ×1。入口：宗门广场上的论剑台（和丹房、藏经阁的门并列，不在藏经阁里）；' +
+          '战斗是弹幕小游戏，托管不会提交，只能手动点',
+        cls: 'dim',
+      }],
     ])
-    item.title = '首通给培元丹 ×1。入口：宗门广场上的论剑台（和丹房、藏经阁的门并列，不在藏经阁里）；' +
-      '战斗是弹幕小游戏，托管不会提交，只能手动点。'
+    // 和秘境的对应关系放在悬停提示里，列表本身不铺开。
     if (st.areaName) {
-      item.title += `\n\n秘境「${st.areaName}」走到首领选「🎯 亲自出手（弹幕）」，打的就是这一场（同一关卡）。` +
+      item.title = `秘境「${st.areaName}」走到首领选「🎯 亲自出手（弹幕）」，打的就是这一场（同一关卡）。\n` +
         '它会同时记下这一关的首通和该地图的通关，但两套标记是独立的：' +
         `在论剑台打赢这里，不会让${st.areaName}地图变成已通关（那张地图得自己走完）。`
     }
