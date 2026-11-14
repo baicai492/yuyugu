@@ -566,6 +566,34 @@ console.log('\n[新] 多波次偷菜')
     ok('间隔不足的波次被跳过', rec.waves.length === 1 && rec.waves[0].entries[0].i === 3,
       `i=${rec.waves[0]?.entries?.[0]?.i}`)
   }
+
+  // 6) 过期解禁重排（参考 guardOverdue）：解禁时刻已过但服务端仍报 steal:false
+  //    ——数据陈旧或被主人收了。旧版直接丢弃要等 30 分钟巡逻；现在首次 now+1，
+  //    连续过期按 5/20/60/300 退避，避免对死岛空转。
+  {
+    const one = updateIsleSchedule({ ...base, ...mkIsle([-1801]), ownerLeft: 5 })
+    ok('首次过期给 now+1 的宽限', one.rec.nextAt === now + 1 && one.rec.overdueCount === 1,
+      `nextAt=+${one.rec.nextAt - now} overdue=${one.rec.overdueCount}`)
+    ok('首次宽限保留精确标记', one.rec.upcoming[0]?.exact === true)
+
+    const two = updateIsleSchedule({ ...base, ...mkIsle([-1810]), ownerLeft: 5, prev: one.rec })
+    // 退避索引就是「之前连续过期了几轮」：prev=1 → [5,20,60,300][1]=20。
+    // 参考实现同样如此；now+5 只留给「过期超过 2 秒且首次发现」。
+    ok('连续过期按 20 秒退避', two.rec.nextAt === now + 20 && two.rec.overdueCount === 2,
+      `nextAt=+${two.rec.nextAt - now}`)
+    ok('退避后的目标不再是精确时刻', two.rec.upcoming[0]?.exact === false)
+
+    const three = updateIsleSchedule({ ...base, ...mkIsle([-1810]), ownerLeft: 5, prev: two.rec })
+    ok('第三次连续过期按 60 秒', three.rec.nextAt === now + 60, `nextAt=+${three.rec.nextAt - now}`)
+    const four = updateIsleSchedule({ ...base, ...mkIsle([-1810]), ownerLeft: 5, prev: three.rec })
+    ok('第四次连续过期封顶 300 秒', four.rec.nextAt === now + 300, `nextAt=+${four.rec.nextAt - now}`)
+    const five = updateIsleSchedule({ ...base, ...mkIsle([-1810]), ownerLeft: 5, prev: four.rec })
+    ok('第五次连续过期仍封顶 300 秒', five.rec.nextAt === now + 300, `nextAt=+${five.rec.nextAt - now}`)
+
+    const reset = updateIsleSchedule({ ...base, ...mkIsle([45]), ownerLeft: 5, prev: five.rec })
+    ok('不再过期时计数归零', reset.rec.overdueCount === 0 && reset.rec.nextAt === now + 45 + 1800,
+      `overdue=${reset.rec.overdueCount}`)
+  }
 }
 
 console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
@@ -959,6 +987,20 @@ console.log('\n[新] HTTP 重试边界')
     ok('演练模式拦截写请求', err?.name === 'DryRunError' && calls === 0, `calls=${calls}`)
     const rd = await cd.get('/api/pet/world')
     ok('演练模式放行 GET', rd.ok === 9 && calls === 1, `calls=${calls}`)
+
+    // 8) 409/429 的分类错误要带 status：调用方按 e.status 分支
+    //    （擂台的 429 特判、偷菜的回执状态机都是这么写的）。
+    stub(() => mkRes(409, { error: '状态已变化', rev: 3 }))
+    err = null
+    try { await c.post('/api/pet/world/help', {}) } catch (e) { err = e }
+    ok('409 抛 ConflictError 且带 status=409',
+      err?.name === 'ConflictError' && err.status === 409, `${err?.name}/${err?.status}`)
+    ok('409 的 data 带原始回执', err?.data?.rev === 3)
+    stub(() => mkRes(429, { retry: 0.01 }))
+    err = null
+    try { await c.post('/api/pet/world/help', {}) } catch (e) { err = e }
+    ok('429 重试耗尽后抛 RateLimitError 且带 status=429',
+      err?.name === 'RateLimitError' && err.status === 429, `${err?.name}/${err?.status}`)
   } finally {
     globalThis.fetch = realFetch
   }

@@ -145,16 +145,19 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
       const { res, json } = out
       method === 'POST' ? stats.post++ : stats.get++
 
-      if (res.status === 401) { stats.errors++; throw new AuthError() }
+      if (res.status === 401) { stats.errors++; throw Object.assign(new AuthError(), { status: 401 }) }
       if (res.status === 403 && /非法来源/.test(json.error || '')) {
         stats.errors++
         throw new Error('站点拒绝了请求来源：POST 必须带 Origin 头（这是程序 bug，不是 cookie 问题）')
       }
-      if (res.status === 409) throw new ConflictError(json.error || '状态冲突（rev 已变）', json)
+      // 409/429 单独成类是为了让调用方能按名字分支，但 status 必须挂上：
+      // 调用方（擂台的重试、偷菜的回执状态机）都是按 e.status 判断的，
+      // 以前这里没挂，那些分支从来没命中过。
+      if (res.status === 409) throw Object.assign(new ConflictError(json.error || '状态冲突（rev 已变）', json), { status: 409 })
       if (res.status === 429) {
         const retry = Number(json.retry) || 2
         if (attempt < retries) { await new Promise((r) => setTimeout(r, retry * 1000 + 200)); continue }
-        throw new RateLimitError(`站点限流（429）`, retry)
+        throw Object.assign(new RateLimitError(`站点限流（429）`, retry), { status: 429 })
       }
       if (res.status >= 500) {
         lastErr = new Error(json.error || `HTTP ${res.status}`)

@@ -182,6 +182,22 @@ export function updateIsleSchedule({
   const candidates = []
   const horizonEnd = now + Math.max(0, Number(horizonSec) || DEFAULT_HORIZON_SEC)
 
+  // 已经过了解禁时刻、但服务端仍说「不能偷」的目标：可能是数据是几秒前的
+  // （服务端还没刷新），也可能刚好被主人收了 / 被别人偷了。旧版直接丢掉，
+  // 要等下一轮全量巡逻（默认 30 分钟）才会再发现——而刚解禁的头几秒正是
+  // 最可能偷到的时候。这里立刻重排：首次给 now+1 的宽限（数据陈旧多半是
+  // 秒级），连续过期则按 5/20/60/300 秒退避，避免对着一座死岛空转。
+  // 与参考实现 recordVisitSnapshot 的 guardOverdue 同构。
+  const prevOverdueCount = Math.max(0, Number(prev?.overdueCount) || 0)
+  let sawOverdue = false
+  const guardOverdue = (rawAt, isExact) => {
+    if (rawAt > now) return { at: rawAt, exact: isExact }
+    sawOverdue = true
+    if (rawAt >= now - 2 && prevOverdueCount === 0) return { at: now + 1, exact: isExact }
+    const backoff = [5, 20, 60, 300][Math.min(3, prevOverdueCount)]
+    return { at: now + backoff, exact: false }
+  }
+
   // 对方岛的天气 / 洒水器决定生长速度；服务端收获时也是用「当前天气」整体重算。
   let rainy = false
   try { rainy = R.weatherOf(R.isleDay(now)) === 1 } catch { /* 规则模块缺失时按不浇水算 */ }
@@ -214,7 +230,9 @@ export function updateIsleSchedule({
       if (pl.stage === 3 || left > 0) unlockAt = Math.ceil(now + left + protect)
     }
     if (unlockAt == null) return
-    if (unlockAt <= now + 1 || unlockAt > horizonEnd) return
+    const g = guardOverdue(unlockAt, true)
+    unlockAt = g.at
+    if (unlockAt > horizonEnd) return
 
     const unit = priceOf(prices, pl.c, R)
     // 每块地每茬最多被偷 2 个（S:442、S:476、S:583）；stolen 是这一茬已经被偷走的数量，
@@ -222,8 +240,8 @@ export function updateIsleSchedule({
     // stolen=1 的地块高估约 33%，stolen=2 的还会被排进目标（服务端锁死，白跑一趟）。
     const qty = Math.max(0, perPlot - stolen) + sackAdd
     if (qty <= 0) return
-    rec.plots[i] = { unlockAt, exact: true, kind: 'plot', i, c: pl.c || '', value: unit * qty, unit, qty }
-    candidates.push({ kind: 'plot', i, at: unlockAt, item: pl.c || '', value: unit * qty, unit })
+    rec.plots[i] = { unlockAt, exact: g.exact, kind: 'plot', i, c: pl.c || '', value: unit * qty, unit, qty }
+    candidates.push({ kind: 'plot', i, at: unlockAt, exact: g.exact, item: pl.c || '', value: unit * qty, unit })
   })
 
   // —— 畜栏 ——
@@ -231,17 +249,21 @@ export function updateIsleSchedule({
     if (!pen) return
     if (pen.steal) return                          // 现在能偷的同样交给 targetsFromIsle
     const raw = state?.barn?.[i]
-    const unlockAt = penUnlockAt(R, raw, now, protect)
-    if (unlockAt == null || unlockAt <= now + 1 || unlockAt > horizonEnd) return
+    const rawAt = penUnlockAt(R, raw, now, protect)
+    if (rawAt == null) return
+    const g = guardOverdue(rawAt, true)
+    const unlockAt = g.at
+    if (unlockAt > horizonEnd) return
 
     const def = R?.ANIMALS?.find?.((a) => a.id === pen.k)
     const unit = priceOf(prices, def?.product, R)
     if (!unit) return
     // 第二个产物一出现，窝里正好 2 个；服务端按 perPen 给（通常也是 2）。
     const value = unit * (Math.max(perPen, 2) + sackAdd)
-    rec.pens[i] = { unlockAt, exact: true, kind: 'pen', i, c: pen.k || '', value, unit }
-    candidates.push({ kind: 'pen', i, at: unlockAt, item: def.product, value, unit })
+    rec.pens[i] = { unlockAt, exact: g.exact, kind: 'pen', i, c: pen.k || '', value, unit }
+    candidates.push({ kind: 'pen', i, at: unlockAt, exact: g.exact, item: def.product, value, unit })
   })
+  rec.overdueCount = sawOverdue ? prevOverdueCount + 1 : 0
 
   // —— 按时刻分组，挑出 EV 达标的前几波 ——
   //
@@ -288,14 +310,14 @@ export function updateIsleSchedule({
   rec.nextGroup = w0 ? w0.group : []
   rec.nextEV = w0 ? w0.ev : 0
   rec.upcoming = w0 ? w0.group.map((c) => ({
-    kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item, unit: c.unit || 0,
+    kind: c.kind, i: c.i, unlockAt: c.at, exact: c.exact !== false, item: c.item, unit: c.unit || 0,
   })) : []
   // 后续波次（不含当前这一波）。偷成功后由 advanceIsleWave 逐波提升，
   // 不能像以前那样整段清空——那样第二批成熟时就再也想不起来了。
   rec.waves = waves.slice(1).map((w) => ({
     at: w.at, ev: Math.round(w.ev), value: Math.round(w.value || 0),
     entries: w.group.map((c) => ({
-      kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item, unit: c.unit || 0,
+      kind: c.kind, i: c.i, unlockAt: c.at, exact: c.exact !== false, item: c.item, unit: c.unit || 0,
     })),
   }))
   rec.ownerLeft = ownerLeft == null ? null : Math.max(0, Math.floor(Number(ownerLeft) || 0))
