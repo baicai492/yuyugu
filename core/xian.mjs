@@ -13,7 +13,7 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, CHAPTERS, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
+  AREAS, BREW_MAX, BREW_MIN, CHAPTERS, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
   HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, PREF, REALMS, REL,
   RLM_DAILY, RLM_EN, ROOTS,
   ROOT_GROW, STAGES, STORY_END, TASK_KINDS, TECH_BUFF, TECH_PRICE, TECHS,
@@ -1250,6 +1250,14 @@ export function xianSnapshot(world, cfg = {}) {
   //   · 就算点「亲自出手（弹幕）」走 x sFight('duel') 再 xsWin，
   //     rules.js 里写的是 `if (f.s !== 'duel' && !x.clear[f.s])` —— 明确把切磋排除在首通之外。
   // 所以 x.clear.duel 永远是 undefined，列出来只能一直显示「未通关」，纯误导。
+  //
+  // 三关和「秘境」的关系（别搞混，名字不一样、门票池也不一样）：
+  //   · 论剑台直接打这三关 → 扣斗法池（每天 8 场）
+  //   · 进秘境走到首领「亲自出手」→ 打的是同一个 stage，但扣秘境池（每天 3 次）
+  //   两条路共用同一个首通标记 x.clear[stage]，所以走哪边都算通关。
+  const areaOfStage = Object.fromEntries(
+    Object.values(AREAS).filter((a) => a.stage).map((a) => [a.stage, a.n]),
+  )
   const TRIAL_STAGES = Object.entries(STAGES).filter(([id]) => id !== 'duel')
   const stages = TRIAL_STAGES.map(([id, S]) => ({
     id, name: S.name,
@@ -1258,6 +1266,8 @@ export function xianSnapshot(world, cfg = {}) {
     needRealm: REALMS[S.need] || `境界 ${S.need}`,
     cleared: Boolean(sim.clear?.[id]),
     canEnter: Number(sim.cv?.r || 0) >= S.need,
+    // 同名首领所在的秘境地图（竹海迷踪 / 地火洞窟 / 古修洞府），论剑台是它的快捷入口
+    areaName: areaOfStage[id] || '',
     manual: true,
   }))
 

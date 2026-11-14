@@ -794,7 +794,16 @@ export function xian2Snapshot(world) {
   const d = xsDay(t)
   const areas = {}
   for (const [k, a] of Object.entries(A.AREAS)) {
-    areas[k] = { name: a.n, unlocked: (x.cv?.r || 0) >= a.need, cleared: Boolean(x.rc?.[k]) }
+    // stage 是地图首领对应的论剑台关卡：进秘境打到首领点「亲自出手」时，
+    // 打的就是这一关（同一个 x.clear[stage]，首通两边通用）。
+    // cloud 的 stage 是 null（云海仙岛没有对应关卡），GUI 要能看出这一点。
+    areas[k] = {
+      name: a.n,
+      unlocked: (x.cv?.r || 0) >= a.need,
+      cleared: Boolean(x.rc?.[k]),
+      stage: a.stage || '',
+      stageName: a.stage ? (A.STAGES[a.stage]?.name || a.stage) : '',
+    }
   }
   return {
     mind: x.mind ?? 50,

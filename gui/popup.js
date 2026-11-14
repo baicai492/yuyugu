@@ -540,6 +540,11 @@ function renderXianDetail(D) {
           '战斗是弹幕小游戏，托管不会提交，只能手动点',
         cls: 'dim',
       }],
+      ...(st.areaName ? [{
+        text: `同一个首领也在秘境「${st.areaName}」里，走到那里点「亲自出手」打的是这一关；` +
+          '通关标记两边共用（论剑台打过了，秘境里也显示通关）。',
+        cls: 'dim',
+      }] : []),
     ]))
   }
   $('xStages').replaceChildren(stageList)
@@ -734,18 +739,28 @@ function renderXian2() {
     ? '有事件待选（本轮会处理）'
     : `${ev.n || 0}/${ev.max || 3} 次` + (ev.gapIn > 0 ? ` · ${fmtSec(ev.gapIn)}后可再抽` : '')
   $('x2Duel').textContent = `${s.duels || 0}/${s.duelsMax || 8} 场`
-  // 8 场这个池子只由「论剑台三关」和「同门切磋（自动/弹幕）」共用一个计数
-  // （站点 rules.js 的 fight / ab 两个动作各 x.df.n++）。秘境有自己的一天 3 次，
-  // 连首领「亲自出手」也不动 x.df（rlmGo 直接写 x.fight，没走 fight 动作）。
-  $('x2Duel').title = '今天已用 / 每天 8 场。论剑台三关和同门切磋共用这个池子；秘境单独算（每天 3 次）'
+  // 这 8 场由两个来源共用（站点 rules.js：fight 与 ab 两个动作都写 x.df.n++）：
+  //   · 论剑台三关：秘境竹林 / 魔窟 / 葬剑山（宗门广场上论剑台的三个选项）
+  //   · 同门切磋：自动对战或亲自出手（弹幕）
+  // 秘境探索（竹海迷踪…）是另一个池子，见下一行。
+  $('x2Duel').title = '今天已用 / 每天 8 场。\n' +
+    '这个池子由「论剑台三关（秘境竹林 / 魔窟 / 葬剑山）」和「同门切磋」共用。\n' +
+    '秘境探索（竹海迷踪等地图）是另一个池子，每天 3 次。'
   $('x2Realm').textContent = s.inRealm
     ? `探索中：${s.inRealm.area} 第 ${s.inRealm.floor || 1} 层（气血 ${Math.round(s.inRealm.hp)}/${s.inRealm.mx}）`
     : `${s.realms || 0}/${s.realmsMax || 3} 次`
-  $('x2Realm').title = '秘境每天 3 次，每次 15 灵力；和斗法的 8 场是分开的'
+  $('x2Realm').title = '秘境探索每天 3 次，每次 15 灵力；\n' +
+    '和斗法的 8 场是两个独立池子：走到秘境首领点「亲自出手」打的是论剑台那一关，但不扣 8 场。'
   const areas = Object.values(s.areas || {})
   $('x2Areas').textContent = areas.length
     ? areas.map((a) => `${a.name}${a.cleared ? '✓' : a.unlocked ? '' : '🔒'}`).join(' · ')
     : '—'
+  // 秘境地图和论剑台关卡的对应：首领「亲自出手」时打的就是这一关，
+  // 首通标记共用，所以论剑台打过了这里也显示通关。
+  if (areas.length) {
+    $('x2Areas').title = '秘境地图 → 对应的论剑台关卡（首领「亲自出手」时打这一关）：\n' +
+      areas.map((a) => `${a.name}${a.cleared ? '（已通关）' : ''} → ${a.stageName || '无对应关卡'}`).join('\n')
+  } else $('x2Areas').title = ''
   $('x2Slots').textContent = (s.slots || []).map((id) => nm(SPELL_NAMES, id)).join(' → ') || '默认（主修两式 + 灵弹 + 护体）'
   $('x2Mats').textContent = countList(s.mats, MAT_NAMES) || '—'
   // 材料现在还没有消耗途径：xs3.js 的说明写的是「秘境掉落，下一批『法宝』开放后用来炼器」。
