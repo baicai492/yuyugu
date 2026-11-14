@@ -10,6 +10,17 @@ let timer = null;
 let logs = [];
 let lastState = '';
 
+// 在插件里用 chrome.storage；直接用浏览器打开 popup.html 调试时退回 localStorage
+const hasChromeStore = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
+function loadPrefs(cb) {
+  if (hasChromeStore) chrome.storage.local.get({ port: DEF_PORT }, (v) => cb(v.port || DEF_PORT));
+  else cb(parseInt(localStorage.getItem('dm_port'), 10) || DEF_PORT);
+}
+function savePrefs(v) {
+  if (hasChromeStore) chrome.storage.local.set(v);
+  else Object.keys(v).forEach((k) => localStorage.setItem('dm_' + k, v[k]));
+}
+
 const STATE_TXT = {
   idle: '待机',
   searching: '找斗法画面…',
@@ -127,7 +138,7 @@ $('retry').addEventListener('click', () => {
   const v = parseInt($('port').value, 10);
   if (v >= 1024 && v <= 65535) {
     port = v;
-    chrome.storage.local.set({ port });
+    savePrefs({ port });
     startPolling();
   }
 });
@@ -157,10 +168,10 @@ $('cfgHorizon').addEventListener('change', (e) => pushCfg({ horizon: parseFloat(
 $('cfgReaction').addEventListener('change', (e) => pushCfg({ reaction: parseFloat(e.target.value) }));
 $('cfgFps').addEventListener('change', (e) => pushCfg({ fps: parseInt(e.target.value, 10) }));
 
-chrome.storage.local.get({ port: DEF_PORT }, (v) => {
-  port = v.port || DEF_PORT;
+loadPrefs((v) => {
+  port = v;
   $('port').value = port;
-  chrome.storage.local.set({ port });
+  savePrefs({ port });
   startPolling();
   // 把服务器当前的配置拉到界面上
   api('/api/config').then((r) => { if (r && r.config) paintCfg(r.config); }).catch(() => {});

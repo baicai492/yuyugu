@@ -70,12 +70,19 @@ class Tracker:
                     break
                 if matched[i] or used[j]:
                     continue
-                matched[i] = True
-                used[j] = True
                 t = tr[i]
                 nx, ny = float(dets[j, 0]), float(dets[j, 1])
                 vx = (nx - t.x) / dt
                 vy = (ny - t.y) / dt
+                # 运动学门限：单帧速度不该突变。没有这一条，自机子弹（向上
+                # 560 px/s）会抢走旁边敌弹的检测，两条轨迹的速度一起变成瞎猜，
+                # 预判就指到错误的方向上——实测一次受击就是这么来的。
+                if t.age >= 2:
+                    dv = ((vx - t.vx) ** 2 + (vy - t.vy) ** 2) ** 0.5
+                    if dv > max(300.0, 5.0 * (t.vx * t.vx + t.vy * t.vy) ** 0.5):
+                        continue
+                matched[i] = True
+                used[j] = True
                 # 平滑：新速度给多一点，但保留历史，免得单帧抖动带偏预判
                 t.vx = 0.6 * vx + 0.4 * t.vx
                 t.vy = 0.6 * vy + 0.4 * t.vy
@@ -108,15 +115,18 @@ class Tracker:
             x, y = float(dets[j, 0]), float(dets[j, 1])
             self.tracks.append(Track(x, y, float(dets[j, 2])))
 
-        # 自机子弹标记：从自机附近冒出来、而且向上飞
+        # 自机子弹标记：从自机枪口冒出来、而且明显向上飞。
+        # 判据必须严 —— 标错了就等于把一颗敌弹从危险集合里永久删掉
+        # （曾经有一条绿色的环弹因为一帧速度抖动被标成「自己」，
+        #   然后从正上方落下来把自机打死了）。玩家最慢的弹也有 380 px/s。
         own = 0
         for t in self.tracks:
             if t.own:
                 own += 1
                 continue
-            if t.age >= 1 and player is not None:
-                near = (t.sx - player[0]) ** 2 + (t.sy - player[1]) ** 2 < 140.0 ** 2
-                if near and t.vy < -80:
+            if t.age <= 8 and t.age >= 1 and player is not None:
+                dx, dy = t.sx - player[0], t.sy - player[1]
+                if abs(dx) < 46 and -70 < dy < 16 and t.vy < -300:
                     t.own = True
                     own += 1
         self.own_count = own

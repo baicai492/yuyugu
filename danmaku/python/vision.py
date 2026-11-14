@@ -145,12 +145,18 @@ def locate_field_full(screen_bgr, hint=None):
 
 
 def crop_field(screen_bgr, field, cal=CAL):
-    """把场地裁出来并放大到 cal 倍，返回 (BGR 图, 实际宽, 实际高)。"""
+    """把场地裁出来并放大到 cal 倍，返回 BGR 图（失败返回 None）。"""
     x0, y0 = field.to_screen(0, 0)
     x1, y1 = field.to_screen(FIELD_W, FIELD_H)
     x0 = max(0, int(round(x0))); y0 = max(0, int(round(y0)))
     x1 = min(screen_bgr.shape[1], int(round(x1)))
     y1 = min(screen_bgr.shape[0], int(round(y1)))
+    if x1 - x0 < FIELD_W * 0.5 or y1 - y0 < FIELD_H * 0.5:
+        return None
+    # 场地有一截在屏幕外：裁剪出来的比例就不对了，硬缩放会把弹位算歪，
+    # 宁可当这一帧没看见（引擎会先沿用旧矩形、再整屏重找）。
+    if abs((x1 - x0) - field.w) > 6 or abs((y1 - y0) - field.h) > 6:
+        return None
     sub = screen_bgr[y0:y1, x0:x1]
     if sub.size == 0:
         return None

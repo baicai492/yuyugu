@@ -72,8 +72,8 @@ def test_detect(rounds=40):
     return tp / max(1, tot) > 0.85
 
 
-def test_closed_loop(seconds=200, dump=None, verbose=False):
-    g = SimGame(seed=7)
+def test_closed_loop(seconds=200, dump=None, verbose=False, seed=7):
+    g = SimGame(seed=seed)
     scr = SimScreen(g)
     mou = SimMouse(g)
     eng = Engine(cfg={'fps': 60, 'dry': False}, screen=scr, mouse=mou)
@@ -132,6 +132,9 @@ def main():
     if '--dump' in args:
         dump = args[args.index('--dump') + 1]
         os.makedirs(dump, exist_ok=True)
+    seed = 7
+    if '--seed' in args:
+        seed = int(args[args.index('--seed') + 1])
     secs = 200.0
     for a in args:
         if a.replace('.', '', 1).isdigit():
@@ -141,7 +144,7 @@ def main():
     print('\n=== 2/3 子弹识别 ===')
     ok2 = test_detect()
     print('\n=== 3/3 闭环走位 ===')
-    ok3, hits, t = test_closed_loop(secs, dump)
+    ok3, hits, t = test_closed_loop(secs, dump, seed=seed)
     print('\n总结：定位%s，识别%s，闭环%s'
           % ('通过' if ok1 else '有问题', '通过' if ok2 else '有问题',
              '通过' if ok3 else '未通关（受击 %d 次，存活 %.0f 秒）' % (hits, t)))
