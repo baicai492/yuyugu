@@ -362,6 +362,15 @@ export function planXian2Actions(world, now, opts = {}) {
   {
     let n = sim.df?.d === d ? (sim.df.n || 0) : 0
     const wonToday = sim.dd?.d === d ? (sim.dd.w || []) : []
+    // 秘境还有额度时，斗法要等攒够「秘境门票 + 一场斗法」才动手。
+    //
+    // 灵力每小时才回 10 点，而秘境门槛 15、斗法门槛 10。斗法排在这里（秘境之后），
+    // 但秘境是「够 15 才进」——灵力涨到 10 时秘境还进不去，斗法却已经够格，
+    // 于是 10 点被斗法用掉，下一小时又是 10 点，秘境永远差那 5 点。
+    // 线上 2026-11-14 就是这样：斗法 8/8 打满，秘境 0/3 一次没进。
+    // 已在秘境里时 rgo/rout 不耗灵力，不需要再留门票。
+    const realmLeft = sim.rlm ? 0 : (sim.rd?.d === d ? Math.max(0, A.RLM_DAILY - (sim.rd.n || 0)) : A.RLM_DAILY)
+    const fightFloor = realmLeft > 0 ? A.RLM_EN + 10 : 10
     const all = Object.entries(A.NPC_FIGHT)
       .map(([id]) => ({ id, f: A.npcFighter(id) }))
       .filter((c) => c.f)
@@ -373,7 +382,7 @@ export function planXian2Actions(world, now, opts = {}) {
     for (const c of all) {
       if (n >= A.FIGHT_DAILY) break
       if (acts.length >= maxN) break
-      if ((sim.en || 0) < 10) break
+      if ((sim.en || 0) < fightFloor) break
       // 再赢一次只有 +3 好感 +1 熟练，性价比低于种地/钓鱼；体力不宽裕时让给 1.0。
       // 首胜有灵石，不受这道门槛限制。
       if (wonToday.includes(c.id) && (sim.en || 0) < 40) continue
@@ -458,11 +467,14 @@ export function nextXian2WakeSec(world, now) {
     }
   }
 
-  // 斗法：今天还有名额且灵力不够时，等灵力回到 10
+  // 斗法：今天还有名额且灵力不够时，等灵力回到门槛
+  // （秘境还有额度时门槛是 15+10，见 planXian2Actions 第 9 步）
   const duels = x.df?.d === d ? (x.df.n || 0) : 0
-  if (duels < A.FIGHT_DAILY && (x.en || 0) < A.FIGHT_COST) {
+  const realmLeft2 = x.rlm ? 0 : (x.rd?.d === d ? Math.max(0, A.RLM_DAILY - (x.rd.n || 0)) : A.RLM_DAILY)
+  const fightFloor2 = realmLeft2 > 0 ? A.RLM_EN + A.FIGHT_COST : A.FIGHT_COST
+  if (duels < A.FIGHT_DAILY && (x.en || 0) < fightFloor2) {
     const rg = A.EN_REGEN * (x.tech === 'wind' ? 0.75 : 1)
-    const at = Number(x.enAt || t) + (A.FIGHT_COST - (x.en || 0)) * rg
+    const at = Number(x.enAt || t) + (fightFloor2 - (x.en || 0)) * rg
     cands.push(at > t ? at : t + 20)
   }
 

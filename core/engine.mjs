@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ROOT } from './rules.mjs'
 import { checkRulesUpdate, rulesVersion } from './rules.mjs'
-import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices, energyActions } from './planner.mjs'
+import { planRound, nextWake, decisionSnapshot, nextRipe, foodChoices, energyActions, ANIMAL_FEED_SEC } from './planner.mjs'
 import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfile.mjs'
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
@@ -829,7 +829,12 @@ export class Engine {
       const done = this.memo.helpDay === R.worldDay(t) ? (this.memo.helpCount || 0) : 0
       const per = cfg.social.help.perDay ?? 10
       const needE = cfg.social.help.minEnergy ?? 5
-      if (done < per) {
+      // 帮忙的 D 币有日上限（实测四家就够 4,000）。到顶后再跑只扣体力不给钱，
+      // 但 helpCount 永远到不了 perDay，以前会一直显示「4/10 待做」，
+      // 看起来像欠了六家没帮。按上限状态说清楚。
+      const capGot = Number(s.cnt?.helpCoin) || 0
+      if (capGot >= 4000) bits.push(`帮忙 ${done}/${per}（D 币已到日上限 4,000）`)
+      else if (done < per) {
         bits.push(s.en >= needE
           ? `帮忙 ${done}/${per} 待做`
           : `帮忙 ${done}/${per}（等体力 ${needE}）`)
@@ -859,7 +864,10 @@ export class Engine {
     if (cfg.arena?.enabled) {
       const today = this.memo.arenaDay === R.worldDay(t) ? (this.memo.arenaToday || 0) : 0
       const maxB = this.memo.arenaMax || cfg.arena.battles || 30
-      bits.push(today >= maxB ? `擂台已满 ${today}/${maxB}` : `擂台 ${today}/${maxB}`)
+      // 服务端的 daily.battles 还会把守家/被打这类对战算进去，可能超过上限
+      // （线上显示过「擂台已满 39/30」）。额度只看前 maxB 场，显示也别超。
+      const shown = Math.min(today, maxB)
+      bits.push(today >= maxB ? `擂台已满 ${shown}/${maxB}` : `擂台 ${shown}/${maxB}`)
     }
 
     // 6) 为什么现在不做体力活
@@ -1011,7 +1019,7 @@ export class Engine {
     for (const pen of s.barn) {
       const st = R.animalReady(pen, t)
       if (st.ready) animal++
-      else if (!st.retired && t - pen.f >= 8 * 3600) animal++
+      else if (!st.retired && t - pen.f >= ANIMAL_FEED_SEC) animal++
     }
     if (animal > 0) return `${animal} 个畜栏要处理`
 

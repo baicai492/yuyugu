@@ -15,6 +15,20 @@ const clone = (x) => structuredClone(x)
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
 
 /**
+ * 多久没喂就算「饿」。
+ *
+ * 规则里真正的断产出点是 24 小时（animalReady 的 `fed = t - a.f < 86400`），
+ * 8 小时只是「下次喂食的最早时刻」（R:632 的拒绝条件），不是需求。
+ * 留 4 小时缓冲 → 20 小时喂一次；按 8 小时喂会白花 2/3 的饲料和体力。
+ *
+ * 这个值必须和唤醒器（engine.watchOnce、本文件 nextWake）共用：
+ * 曾经 planner 改 20 小时、唤醒器还写 8 小时，于是喂食后 8~20 小时这段
+ * 每一轮都「畜栏要处理 → 醒 → 什么都不做 → 退避 300 秒」，
+ * 线上 2026-11-14 一个上午刷了 735 次。
+ */
+export const ANIMAL_FEED_SEC = 20 * 3600
+
+/**
  * 一自然日有几个岛日。
  *
  * 长夜时钟只在 08:00–22:00 这 14 小时里走（规则的 b12ActiveSeconds，
@@ -711,7 +725,7 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     // 旧版按 8 小时喂一次，等于每天多喂两次：每只 3×150 = 450 D 饲料，
     // 其中 300 D 是白花的，还多耗 2 点体力——心情（每次 +8）早就满了。
     // 留 4 小时缓冲，20 小时喂一次。
-    if (t - pen.f >= 20 * 3600) hungry.push(i)
+    if (t - pen.f >= ANIMAL_FEED_SEC) hungry.push(i)
     if (!s.cnt['pet' + i]) { if (push({ a: 'pet', i })) petted++ }
   }
   if (hungry.length) {
@@ -1970,7 +1984,7 @@ export function nextWake(world, cfg, memo = {}) {
   for (const pen of s.barn) {
     const st = R.animalReady(pen, t)
     if (st.ready) push(1)
-    if (!st.retired && t - pen.f >= 8 * 3600) push(1)
+    if (!st.retired && t - pen.f >= ANIMAL_FEED_SEC) push(1)
     // 下一件产物的到达时刻（榜一「事件桶」里最容易漏掉的一个）。
     //
     // animalReady 返回的 nextP 是循环结束后的 cursor——即「最后一件产物完成的时刻」，
@@ -1981,7 +1995,14 @@ export function nextWake(world, cfg, memo = {}) {
     if (!st.retired && st.n < (st.def?.cap || 1)) {
       const period = st.period || 0
       const nextAt = (st.nextP || t) + period
-      if (nextAt > t) push(Math.min(nextAt - t, R.WORLD.regen || 180))
+      // 直接用精确的 nextP + period，不再截断到 180 秒。
+      // b12AnimalPeriod 返回的是真实秒数（season/weather 系数最多 ±4%），
+      // cursor 也是真实时刻，两者相加就是下一件产物的到点时刻。
+      // 以前截到 180 秒是担心 nextP 不精确，代价是 8 只动物每 3 分钟醒一次
+      // （线上 2026-11-14 一上午 997 轮巡视，绝大多数是这种空醒）。
+      // 就算算早了，醒来看到没货也只是空一轮；算晚了最多晚收几分钟，
+      // 窝里还远没到 cap（鸡 4 小时一件、cap 3），不会停产。
+      if (nextAt > t) push(nextAt - t)
     }
   }
   // 蟹笼
