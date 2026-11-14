@@ -43,6 +43,25 @@ export function pointsFor(gear, plan = 'atk') {
 }
 
 /**
+ * 擂台接口回执 → gear 快照。
+ *
+ * 训练/买装/换装/强化这些接口回的都是**完整** gear 对象：catalog、points、
+ * free、level、daily 全在顶层，`r.gear` 只是三个槽位（{weapon,armor,charm}）。
+ * 以前写 `g = (r?.gear || r)`，快照就只剩槽位映射，points/free 全丢——
+ * 下一轮按它算点，得到的是「全部清零」，POST 被服务端拒
+ * 「减少已加的点需要先洗点」（2026-11-15 00:58 线上打出一条）。
+ * 也只有那一轮，因为紧接着的重拉把快照修回来了，所以症状只是白费一次 POST
+ * 加一轮加点被跳过；但刚升级、有自由点的那一轮会被白白错过。
+ */
+function applyGearResp(g, r) {
+  if (!r || typeof r !== 'object') return g
+  if (r.catalog || r.points) return r
+  if (r.gear) return { ...g, gear: r.gear }
+  if (r.daily) return { ...g, ...r }
+  return g
+}
+
+/**
  * 穿戴「静止防守装」+ 分配自由点。
  *
  * 换装会改变面板，面板又会影响加点决策（比如零速必暴武器要先补速度），
@@ -66,7 +85,7 @@ export async function applyRestingLoadout(world, cfg, gear, log = () => {}, { ro
         try {
           const r = await api(world, '/api/pet/battle/equip', { slot: e.slot, item: e.item })
           log(`擂台换装：${e.slot} → ${e.name}（实战评分 ${e.score}）`)
-          g = (r?.gear || (r?.catalog ? r : g))
+          g = applyGearResp(g, r)
           changed++
           did = true
         } catch (err) {
@@ -157,7 +176,7 @@ export async function arenaSpend(world, cfg, gear, memo, log = () => {}) {
   const notes = []
   const pay = (c) => { budget -= c; spent += c }
   const coinOf = () => (g.coins ?? world.coins ?? 0)
-  const keep = (r) => { if (r?.gear) g = r.gear; else if (r?.daily) g = r }
+  const keep = (r) => { g = applyGearResp(g, r) }
   const fmt = (n) => Math.round(n).toLocaleString('en-US')
 
   // 1) 突破训练：从大额档开始（旧版顺序 300/200/100/50/10）
@@ -419,7 +438,9 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo, s
             } catch {}
           }
         }
-        if (r.gear) gear = r.gear
+        // 战斗回执里的 gear 只在是完整 gear 对象（带 catalog/points）时才采纳；
+        // 若是槽位映射，采纳了会把 level/daily 一起丢掉。
+        if (r.gear && (r.gear.catalog || r.gear.points)) gear = r.gear
         onBattle?.(battles, need)
       } catch (e) {
         if (e.status === 429) { await sleep(3000); k--; continue }

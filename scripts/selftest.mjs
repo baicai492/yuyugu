@@ -1293,5 +1293,68 @@ console.log('\n[新] 规则同版本内容变更检测')
   ok('还原后 hash 回到原值', M2.rulesContentHash() === h0, M2.rulesContentHash().slice(0, 8))
 }
 
+console.log('\n[新] 擂台换装回执不能把 gear 快照换成槽位映射')
+{
+  // 站点 /api/pet/battle/equip 的回执是完整 gear 对象：catalog、points、free、
+  // level、daily 都在顶层，而回执里的 `gear` 只是 {weapon,armor,charm} 三个槽位。
+  // 以前写 g = (r?.gear || r)，快照就只剩槽位，下一轮按它算点成了「全部清零」，
+  // POST 被服务端拒「减少已加的点需要先洗点」（2026-11-15 00:58 线上）。
+  const { applyRestingLoadout } = await import('../core/arena.mjs')
+  const base = {
+    level: 16, free: 3, points: { str: 33, vit: 8, agi: 1, spd: 3 },
+    breakdown: {
+      hp: { total: 382 }, atk: { total: 50 }, def: { total: 3 },
+      agi: { total: 19 }, spd: { total: 22 },
+    },
+    gear: { weapon: { id: 'w1', enh: 0 } },
+    items: [{ id: 'w1', enh: 0 }, { id: 'w2', enh: 0 }],
+    catalog: [
+      { id: 'w1', slot: 'weapon', name: '钝刀', rarity: 1, stats: { atk: 1 } },
+      { id: 'w2', slot: 'weapon', name: '利刃', rarity: 3, stats: { atk: 9 } },
+    ],
+  }
+  let cur = structuredClone(base)
+  const calls = []
+  const client = {
+    async get() { return structuredClone(cur) },
+    async post(path, body) {
+      calls.push([path, body])
+      if (path === '/api/pet/battle/equip') {
+        cur.gear = { ...cur.gear, [body.slot]: { id: body.item, enh: 0 } }
+        return structuredClone(cur)
+      }
+      if (path === '/api/pet/battle/points') {
+        const sum = ['str', 'vit', 'agi', 'spd'].reduce((n, k) => n + (body.points[k] || 0), 0)
+        // 真实服务端的拒绝条件：任何一项比已加的少就整单失败
+        for (const k of ['str', 'vit', 'agi', 'spd']) {
+          if ((body.points[k] || 0) < (cur.points[k] || 0)) throw new Error('减少已加的点需要先洗点')
+        }
+        if (sum < 45) throw new Error('减少已加的点需要先洗点')
+        cur.points = { ...body.points }
+        cur.free = 0
+        return structuredClone(cur)
+      }
+      throw new Error('unexpected ' + path)
+    },
+  }
+  const logs = []
+  const r = await applyRestingLoadout(
+    { client },
+    { arena: { autoEquip: true, autoPoints: true, pointsPlan: 'auto' } },
+    structuredClone(base),
+    (m) => logs.push(m),
+  )
+  const pts = calls.filter(([p]) => p === '/api/pet/battle/points')
+  ok('换装后按完整快照加点（不是全清零）',
+    pts.length === 1 && ['str', 'vit', 'agi', 'spd'].every((k) => (pts[0][1].points[k] || 0) >= base.points[k]),
+    JSON.stringify(pts))
+  ok('不再被「减少已加的点需要先洗点」拒绝',
+    !logs.some((m) => /减少已加的点/.test(m)), logs.join(' | '))
+  ok('换装确实生效且只换一次（changed=换装+加点）',
+    calls.filter(([p]) => p === '/api/pet/battle/equip').length === 1 &&
+    r.changed === 2 && r.gear?.gear?.weapon?.id === 'w2',
+    `changed=${r.changed} weapon=${r.gear?.gear?.weapon?.id}`)
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)
