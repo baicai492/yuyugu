@@ -13,10 +13,10 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
-  HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS, REL,
+  BREW_MAX, BREW_MIN, CHAPTERS, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
+  HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, PREF, REALMS, REL,
   RLM_DAILY, RLM_EN, ROOTS,
-  ROOT_GROW, STAGES, STORY_END, TECH_BUFF, TECH_PRICE, TECHS,
+  ROOT_GROW, STAGES, STORY_END, TASK_KINDS, TECH_BUFF, TECH_PRICE, TECHS,
   act as xsAct, breakRate, canMax, cvNeed, favTier, fuseKey, layerNeed, medBonus,
   myHp, mySlots, plotView, powerOf, rootMult, skill, techEff, techLayer,
   tick as xsTick, xsLuck, xsMind,
@@ -59,9 +59,6 @@ function xsEnergyCost(a, sim) {
 }
 
 const HERB_ENTRIES_DESC = Object.entries(HERBS).sort((a, b) => b[1].lv - a[1].lv || b[1].sell - a[1].sell)
-const PURE_CASH_HERBS = new Set(
-  Object.keys(HERBS).filter((h) => !Object.values(PILLS).some((p) => Object.hasOwn(p.need, h))),
-)
 const VARIANT_TECH_PRIORITY = ['ice', 'thunder', 'wind', 'lava', 'poison', 'metal', 'water', 'fire', 'earth', 'wood']
 
 export function xsDay(nowSec) {
@@ -289,6 +286,50 @@ export function computeDesiredPeiyuanStock(x, nowSec, opts) {
   return breakNeed * retryMultiplier + fuseReserve
 }
 
+/** 宗门委托还差哪些草药（今天没交的草药类委托，按种类汇总数量） */
+function getPendingSectHerbNeeds(x, nowSec) {
+  const needs = {}
+  const d = xsDay(nowSec)
+  if (x.tk?.d !== d || !Array.isArray(x.tk.list)) return needs
+  for (const row of x.tk.list) {
+    if (!Array.isArray(row) || row[1]) continue
+    const def = TASK_KINDS[row[0]]
+    if (def && def[0] === 'herb' && def[1]) needs[def[1]] = (needs[def[1]] || 0) + Number(def[2] || 0)
+  }
+  return needs
+}
+
+/**
+ * 人脉赠礼要留的草药：每个「章节没走完、好感没到 300、今天还没送过」的 NPC
+ * 各留 1 株他喜欢的、当前药园等级种得出的草药。
+ *
+ * 不预留的话 1.0 的卖药会把这些当现金卖掉（赤芝/冰莲/雷竹在喜好表里出现得最多，
+ * 而它们恰好是「不炼丹、纯卖钱」的药材），回头要送礼时手上没有，只能干等下一茬。
+ * 按手上的余量逐个扣减，同一株草药不会被两个 NPC 重复预留。
+ */
+function getSocialHerbNeeds(x, nowSec) {
+  const reserve = {}
+  const d = xsDay(nowSec)
+  const lv = Number(x.lv || 1)
+  const held = {}
+  for (const [h, qty] of Object.entries(x.bag || {})) held[h] = Number(qty || 0)
+  for (const id of Object.keys(CHAPTERS)) {
+    const chList = CHAPTERS[id]
+    if (!chList) continue
+    const v = x.npc?.[id] || [0, 0, 0, 0]
+    if (Number(v[2] || 0) >= chList.length || Number(v[0] || 0) >= 300 || v[3] === d) continue
+    for (const herbId of PREF[id]?.[0] || []) {
+      if (PILLS[herbId] || !HERBS[herbId] || HERBS[herbId].lv > lv) continue
+      if (Number(held[herbId] || 0) >= 1) {
+        held[herbId] -= 1
+        reserve[herbId] = (reserve[herbId] || 0) + 1
+        break
+      }
+    }
+  }
+  return reserve
+}
+
 export function computeAlchemyHerbTargets(x, nowSec, opts) {
   const usedDp = dpUsedToday(x, nowSec)
   const targetHuilingPills = (PILL_DAILY - usedDp) + PILL_DAILY
@@ -305,18 +346,34 @@ export function computeAlchemyHerbTargets(x, nowSec, opts) {
     ? Math.min(2, Math.max(0, Math.ceil((desiredPeiyuan - havePeiyuan) / inBrew)))
     : 0
 
+  // 宗门委托要的草药和送礼要的草药都算进「不能卖、不能种别的」的需求里。
+  // 委托需求进 needHerbs（种地时为它留产量），送礼需求只进 bagReserve
+  // （已经有货就够，不必为送礼专门多种一茬）。
+  const sectNeeds = getPendingSectHerbNeeds(x, nowSec)
+  const socialNeeds = getSocialHerbNeeds(x, nowSec)
+
+  const needHerbs = {
+    lingcao: huilingBatches * 3 + peiyuanBatches * 2 + (sectNeeds.lingcao || 0),
+    jingu: huilingBatches * 1 + (sectNeeds.jingu || 0),
+    linglan: peiyuanBatches * 1 + (sectNeeds.linglan || 0),
+  }
+  for (const [h, n] of Object.entries(sectNeeds)) if (!Object.hasOwn(needHerbs, h)) needHerbs[h] = n
+
+  const alchemyAndSectReserve = {
+    lingcao: Math.max(6, huilingBatches * 3 + peiyuanBatches * 2) + (sectNeeds.lingcao || 0),
+    jingu: Math.max(2, huilingBatches * 1) + (sectNeeds.jingu || 0),
+    linglan: (canGrowLinglan ? Math.max(2, peiyuanBatches * 1) : 0) + (sectNeeds.linglan || 0),
+  }
+  for (const [h, n] of Object.entries(sectNeeds)) {
+    if (!Object.hasOwn(alchemyAndSectReserve, h)) alchemyAndSectReserve[h] = n
+  }
+
+  const bagReserve = { ...alchemyAndSectReserve }
+  for (const [h, n] of Object.entries(socialNeeds)) bagReserve[h] = (bagReserve[h] || 0) + n
+
   return {
-    huilingBatches, peiyuanBatches,
-    needHerbs: {
-      lingcao: huilingBatches * 3 + peiyuanBatches * 2,
-      jingu: huilingBatches * 1,
-      linglan: peiyuanBatches * 1,
-    },
-    bagReserve: {
-      lingcao: Math.max(6, huilingBatches * 3 + peiyuanBatches * 2),
-      jingu: Math.max(2, huilingBatches * 1),
-      linglan: canGrowLinglan ? Math.max(2, peiyuanBatches * 1) : 0,
-    },
+    huilingBatches, peiyuanBatches, sectNeeds, socialNeeds,
+    needHerbs, alchemyAndSectReserve, bagReserve,
   }
 }
 
@@ -346,13 +403,20 @@ function chooseCropForEmptyPlot(x, nowSec, opts) {
   return null
 }
 
-/** 该卖哪种药材：先卖纯现金药材（雷竹/赤芝/冰莲），丹药原料留够底仓 */
+/**
+ * 该卖哪种药材：按卖价从高到低卖，但每种都要留够「炼丹 + 宗门委托 + 送礼」的底仓。
+ *
+ * 以前对「不参与任何丹方」的纯现金药材（赤芝/冰莲/雷竹）一律 keep=0 全卖，
+ * 可这几味恰恰是 NPC 喜好表里出现最多的送礼货——全卖光之后，赠礼要等下一茬
+ * 才送得出去。现在统一走 bagReserve：它们本来就没有炼丹底仓，
+ * 只有委托/送礼需要时才留。
+ */
 function findSellableHerb(x, nowSec, opts) {
   const { bagReserve } = computeAlchemyHerbTargets(x, nowSec, opts)
   for (const [herbId] of HERB_ENTRIES_DESC) {
     const qty = Number(x.bag?.[herbId] || 0)
     if (qty <= 0) continue
-    const keep = PURE_CASH_HERBS.has(herbId) ? 0 : Number(bagReserve[herbId] || 0)
+    const keep = Number(bagReserve[herbId] || 0)
     if (qty > keep) return { herb: herbId, sellableQty: qty - keep }
   }
   // 破产兜底：地里没东西、没种子、灵石买不起最便宜的种子 → 有货就卖

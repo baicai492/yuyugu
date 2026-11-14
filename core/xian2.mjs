@@ -423,29 +423,11 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 7) 赠礼：只送对方喜欢的**草药**（+40 好感），而且留够自家炼丹的余量。
+  // 7) 往事：按顺序推进，两个选项本地各模拟一次，取估值高的。
   //
-  //    绝不送丹药：回灵丹是灵力（每天最多吃 3 颗，一炉才 3~4 颗）、
-  //    培元丹是突破/融合/药园经验的硬通货，一颗 60~90 灵石，
-  //    换 +40 好感不划算。每个 NPC 的喜好表里都至少有一种草药，
-  //    禁掉丹药不会让任何人送不了礼。
-  {
-    const { bagReserve } = computeAlchemyHerbTargets(sim, t, opts)
-    for (const id of Object.keys(A.CHAPTERS)) {
-      if (acts.length >= maxN) break
-      const liked = A.PREF[id]?.[0] || []
-      for (const k of liked) {
-        if (A.PILLS[k]) continue
-        const have = Number(sim.bag?.[k] || 0)
-        // 送一颗之后还要够今天炼丹用的（bagReserve 是炼丹预留）
-        if (have - 1 < Number(bagReserve[k] || 0)) continue
-        if (have < 1) continue
-        if (emit({ a: 'gift', el: id, herb: k })) break
-      }
-    }
-  }
-
-  // 8) 往事：按顺序推进，两个选项本地各模拟一次，取估值高的
+  //    排在赠礼之前：章节推进给的是一次性的属性/关系/物资，通常比「+40 好感」
+  //    值钱得多；而且章节本身就卡好感门槛，推不动的时候下一块才需要送礼补好感。
+  //    顺序反过来会先把 10 个 NPC 都送一遍，把能推的章节白白拖后一批。
   {
     for (const [id, chapters] of Object.entries(A.CHAPTERS)) {
       if (acts.length >= maxN) break
@@ -463,6 +445,37 @@ export function planXian2Actions(world, now, opts = {}) {
         if (!best || v > best.v) best = { v, i }
       }
       if (best && best.v > 0) emit({ a: 'chap', el: id, n, i: best.i })
+    }
+  }
+
+  // 8) 赠礼：只送对方喜欢的**草药**（+40 好感），而且留够自家炼丹和宗门委托的余量。
+  //
+  //    绝不送丹药：回灵丹是灵力（每天最多吃 3 颗，一炉才 3~4 颗）、
+  //    培元丹是突破/融合/药园经验的硬通货，一颗 60~90 灵石，
+  //    换 +40 好感不划算。每个 NPC 的喜好表里都至少有一种草药，
+  //    禁掉丹药不会让任何人送不了礼。
+  //
+  //    判定用的是 alchemyAndSectReserve（**不含**送礼需求本身）：
+  //    要是也把「给这个 NPC 留的那一株」算进门槛，手上只有 1 株时就永远送不出去了。
+  {
+    const { alchemyAndSectReserve } = computeAlchemyHerbTargets(sim, t, opts)
+    const lv = Number(sim.lv || 1)
+    const d = xsDay(t)
+    for (const id of Object.keys(A.CHAPTERS)) {
+      if (acts.length >= maxN) break
+      const chList = A.CHAPTERS[id] || []
+      const v = sim.npc?.[id] || [0, 0, 0, 0]
+      // 章节已走完 / 好感已到 300 / 今天已经送过 —— 都不再值得花草药
+      if (Number(v[2] || 0) >= chList.length) continue
+      if (Number(v[0] || 0) >= 300) continue
+      if (v[3] === d) continue
+      for (const k of A.PREF[id]?.[0] || []) {
+        if (A.PILLS[k] || !A.HERBS[k] || A.HERBS[k].lv > lv) continue
+        const have = Number(sim.bag?.[k] || 0)
+        // 送一株之后还要够今天炼丹 + 宗门委托用的
+        if (have <= Number(alchemyAndSectReserve[k] || 0)) continue
+        if (emit({ a: 'gift', el: id, herb: k })) break
+      }
     }
   }
 

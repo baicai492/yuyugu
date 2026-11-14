@@ -521,6 +521,49 @@ console.log('\n[新] 多波次偷菜')
   }
 }
 
+console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
+{
+  const A = await import('../core/xian-rules.mjs')
+  const { computeAlchemyHerbTargets, xsDay } = await import('../core/xian.mjs')
+  const now = 1794643200
+  const d = xsDay(now)
+  const base = A.newXs(now)
+  Object.assign(base, { lv: 5, tech: 'fire', techs: ['fire'] })
+
+  // 1) 草药类委托：交完之前不能把货卖掉、也不能只种炼丹够用的量
+  {
+    const a = computeAlchemyHerbTargets(base, now, {})
+    const b = computeAlchemyHerbTargets({ ...base, tk: { d, list: [[0, 0]] } }, now, {})
+    // TASK_KINDS[0] = 灵草 ×5
+    ok('委托需求进种植计划', b.needHerbs.lingcao === a.needHerbs.lingcao + 5,
+      `${a.needHerbs.lingcao} → ${b.needHerbs.lingcao}`)
+    ok('委托需求进卖药底仓', b.bagReserve.lingcao === a.bagReserve.lingcao + 5,
+      `${a.bagReserve.lingcao} → ${b.bagReserve.lingcao}`)
+    // 已经交掉的委托不再算需求
+    const c = computeAlchemyHerbTargets({ ...base, tk: { d, list: [[0, 1]] } }, now, {})
+    ok('已交的委托不再占底仓', c.bagReserve.lingcao === a.bagReserve.lingcao,
+      `${c.bagReserve.lingcao}`)
+  }
+
+  // 2) 送礼草药：纯现金药材（赤芝/冰莲/雷竹）也要留一株，否则卖光就送不出礼
+  {
+    const r = computeAlchemyHerbTargets({ ...base, bag: { chizhi: 1 } }, now, {})
+    ok('送礼草药进卖药底仓', (r.socialNeeds.chizhi || 0) >= 1 && (r.bagReserve.chizhi || 0) >= 1,
+      JSON.stringify(r.socialNeeds))
+    // 赠礼判定用的是不含送礼需求的预留；含了就永远送不出手上唯一那一株
+    ok('送礼需求不挡赠礼本身', (r.alchemyAndSectReserve.chizhi || 0) === 0,
+      String(r.alchemyAndSectReserve.chizhi))
+    // 好感已到 300 的不再预留
+    const npc = Object.fromEntries(Object.keys(A.CHAPTERS).map((k) => [k, [300, 0, 0, 0]]))
+    const r2 = computeAlchemyHerbTargets({ ...base, bag: { chizhi: 1 }, npc }, now, {})
+    ok('好感 300 后不再预留', Object.keys(r2.socialNeeds).length === 0, JSON.stringify(r2.socialNeeds))
+    // 今天已经送过的不再预留
+    const npc2 = Object.fromEntries(Object.keys(A.CHAPTERS).map((k) => [k, [0, 0, 0, d]]))
+    const r3 = computeAlchemyHerbTargets({ ...base, bag: { chizhi: 1 }, npc: npc2 }, now, {})
+    ok('今天送过的不再预留', Object.keys(r3.socialNeeds).length === 0, JSON.stringify(r3.socialNeeds))
+  }
+}
+
 console.log('\n[新] 修仙2.0 · 秘境只认通关 / 手动让位 / 配招优先')
 {
   const A = await import('../core/xian-rules.mjs')
