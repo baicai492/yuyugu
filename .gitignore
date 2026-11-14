@@ -61,3 +61,7 @@ research/ext-logs-raw.txt
 
 # GUI 测试用的临时浏览器 profile（跑完自动删，崩溃时会残留）
 .tmp-*/
+
+# Python 缓存
+__pycache__/
+*.pyc

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>斗法托管</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="dot" id="dot"></span>
+      <h1>斗法托管</h1>
+    </div>
+    <div class="top-right">
+      <span class="pill" id="ver">v0.1.0</span>
+    </div>
+  </header>
+
+  <div class="conn" id="conn">
+    <p>本地识别程序没连上。先双击 <code>danmaku/启动.bat</code>（或运行 <code>python start.py</code>），再回这里点开始。</p>
+    <div class="row">
+      <label>端口
+        <input id="port" type="number" min="1024" max="65535" step="1" value="8799">
+      </label>
+      <button class="btn ghost" id="retry">重连</button>
+    </div>
+  </div>
+
+  <section class="tab">
+    <div class="card main">
+      <div class="main-row">
+        <div>
+          <div class="state" id="state">未连接</div>
+          <div class="sub" id="stateSub">—</div>
+        </div>
+        <button class="btn big" id="toggle">开始托管</button>
+      </div>
+      <div class="grid3">
+        <div class="kpi"><small>敌弹</small><b id="kBullets">0</b></div>
+        <div class="kpi"><small>敌机</small><b id="kHaz">0</b></div>
+        <div class="kpi"><small>激光</small><b id="kLas">0</b></div>
+        <div class="kpi"><small>余量</small><b id="kClr">—</b></div>
+        <div class="kpi"><small>受击</small><b id="kHits">0</b></div>
+        <div class="kpi"><small>符卡</small><b id="kBombs">2</b></div>
+      </div>
+      <div class="card-row"><span>Boss</span><b id="kBoss">—</b></div>
+      <div class="hpbar"><i id="hpFill"></i></div>
+      <div class="card-row"><span>识别帧率</span><b id="kFps">—</b></div>
+      <div class="card-row"><span>用时 / 帧数</span><b id="kTime">—</b></div>
+      <div class="card-row"><span>场地</span><b id="kField">—</b></div>
+    </div>
+
+    <details class="card" id="setBox">
+      <summary>设置</summary>
+      <label class="sw-row">
+        <span>演练模式<em>只识别，不动鼠标（先看识别准不准）</em></span>
+        <span class="switch"><input type="checkbox" id="cfgDry"><span></span></span>
+      </label>
+      <label class="sw-row">
+        <span>自动放符卡<em>躲不掉时清屏保命</em></span>
+        <span class="switch"><input type="checkbox" id="cfgBomb" checked><span></span></span>
+      </label>
+      <div class="row2">
+        <label>预判时长<select id="cfgHorizon">
+          <option value="0.30">0.30 秒（更保守）</option>
+          <option value="0.45" selected>0.45 秒</option>
+          <option value="0.60">0.60 秒</option>
+        </select></label>
+        <label>反应<select id="cfgReaction">
+          <option value="0.7">灵敏</option>
+          <option value="1.0" selected>标准</option>
+          <option value="1.6">稳</option>
+        </select></label>
+      </div>
+      <div class="row2">
+        <label>识别帧率<select id="cfgFps">
+          <option value="20">20</option>
+          <option value="30" selected>30</option>
+          <option value="45">45</option>
+          <option value="60">60</option>
+        </select></label>
+        <label class="hint-label">改了立刻生效</label>
+      </div>
+    </details>
+
+    <div class="card">
+      <div class="logs-head">
+        <span>日志</span>
+        <button class="mini" id="clearLogs">清屏</button>
+      </div>
+      <ul class="logs" id="logs"></ul>
+    </div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>
