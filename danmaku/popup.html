@@ -17,12 +17,17 @@
   </header>
 
   <div class="conn" id="conn">
-    <p>本地识别程序没连上。先双击 <code>danmaku/启动.bat</code>（或运行 <code>python start.py</code>），再回这里点开始。</p>
+    <p id="connMsg">本地识别程序没连上。点「开始托管」会自动把它拉起来。</p>
     <div class="row">
       <label>端口
         <input id="port" type="number" min="1024" max="65535" step="1" value="8799">
       </label>
       <button class="btn ghost" id="retry">重连</button>
+    </div>
+    <div class="conn-help hide" id="connHelp">
+      <p>自动启动要先装一次 Native 宿主（装一次就行）。在 <code>danmaku</code> 目录运行：</p>
+      <code class="cmd" id="installCmd">python python\install_host.py --ext-id=…</code>
+      <p>扩展 ID：<code id="extId">—</code></p>
     </div>
   </div>
 

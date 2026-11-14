@@ -1,5 +1,9 @@
 // 前台 GUI：只跟本地 Python 服务说话，不碰游戏页面。
 // 所有识别/走位都在 Python 进程里，这里负责看状态和改设置。
+//
+// 本地服务没起来时，点「开始托管」会通过 Native Messaging 让宿主进程把它
+// 拉起来，不用再手动双击 启动.bat。宿主没注册时（只在第一次需要），面板
+// 会展开安装说明和本扩展的 ID。
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -9,9 +13,13 @@ let online = false;
 let timer = null;
 let logs = [];
 let lastState = '';
+let launching = false;      // 正在拉服务：期间别让轮询把提示语冲掉
 
 // 在插件里用 chrome.storage；直接用浏览器打开 popup.html 调试时退回 localStorage
 const hasChromeStore = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
+const hasChromeMsg = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage;
+const EXT_ID = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) || '';
+
 function loadPrefs(cb) {
   if (hasChromeStore) chrome.storage.local.get({ port: DEF_PORT }, (v) => cb(v.port || DEF_PORT));
   else cb(parseInt(localStorage.getItem('dm_port'), 10) || DEF_PORT);
@@ -35,6 +43,10 @@ function api(path, opt) {
   }, opt)).then((r) => r.json());
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function setOnline(v, why) {
   online = v;
   $('dot').className = 'dot' + (v ? ' on' : ' err');
@@ -43,6 +55,95 @@ function setOnline(v, why) {
     $('state').textContent = '未连接';
     $('stateSub').textContent = why || '本地服务没起来，或端口不对';
   }
+}
+
+function setConnMsg(text) {
+  $('connMsg').textContent = text;
+}
+
+/* ---------------- 自动拉起本地服务 ---------------- */
+function ping(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const done = (v) => { clearTimeout(t); resolve(v); };
+    const t = setTimeout(() => { try { ctl && ctl.abort(); } catch { /* 已结束 */ } done(false); }, timeoutMs);
+    fetch(`http://127.0.0.1:${port}/api/ping`,
+      ctl ? { cache: 'no-store', signal: ctl.signal } : { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((j) => done(!!j && j.ok === true))
+      .catch(() => done(false));
+  });
+}
+
+// 交给 background 去调宿主：popup 一关，这里的连接就断了，
+// 而 sendNativeMessage 断开会连宿主进程一起被 Chrome 收掉。
+function hostCall(cmd, tries = 2) {
+  return new Promise((resolve) => {
+    if (!hasChromeMsg) {
+      resolve({ ok: false, code: 'no-native', msg: '请从 chrome://extensions 里打开这个面板' });
+      return;
+    }
+    const attempt = (left) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'host', cmd, port }, (res) => {
+          const err = chrome.runtime.lastError;
+          // service worker 刚被唤醒时可能还没挂上 onMessage，重试一次
+          if (err && left > 1) { setTimeout(() => attempt(left - 1), 250); return; }
+          if (err) { resolve({ ok: false, code: 'no-host', msg: err.message }); return; }
+          resolve(res && typeof res === 'object' ? res : { ok: false, msg: '后台没有回话' });
+        });
+      } catch (e) {
+        resolve({ ok: false, code: 'no-host', msg: String((e && e.message) || e) });
+      }
+    };
+    attempt(tries);
+  });
+}
+
+/**
+ * 确保本地服务在线：能连上就直接用，连不上就让宿主起一个。
+ * @returns {{ok:boolean, started?:boolean, msg?:string, code?:string}}
+ */
+async function ensureServer() {
+  if (await ping()) return { ok: true, started: false };
+
+  launching = true;
+  setConnMsg('正在启动本地识别服务…（首次要加载 cv2，约 2 秒）');
+  let res;
+  try {
+    res = await hostCall('launch');
+  } finally {
+    launching = false;
+  }
+
+  if (!res || res.ok === false) {
+    return { ok: false, code: res?.code || 'host', msg: res?.msg || '自动启动失败' };
+  }
+  // 宿主已经等到端口通了，这里再兜一下（它探活的是 TCP，ping 走的是 HTTP）
+  for (let i = 0; i < 24; i++) {
+    if (await ping(800)) return { ok: true, started: true };
+    await sleep(250);
+  }
+  return { ok: false, code: 'timeout', msg: '服务进程起来了，但端口一直没有响应' };
+}
+
+function showStartError(r) {
+  setOnline(false);
+  const help = r.code === 'no-host' || r.code === 'no-native';
+  $('connHelp').classList.toggle('hide', !help);
+  if (help) {
+    setConnMsg(EXT_ID
+      ? '自动启动要先注册一次 Native 宿主，按下面这行跑一次就好。'
+      : '自动启动要先注册一次 Native 宿主，按下面的说明做。');
+    $('stateSub').textContent = '没找到 Native 宿主（' + (r.msg || '未安装') + '）';
+  } else {
+    setConnMsg('自动启动没成功：' + (r.msg || '未知原因'));
+    $('stateSub').textContent = useManualHint(r.msg);
+  }
+}
+
+function useManualHint(msg) {
+  return (msg || '') + '　（也可以手动双击 danmaku\\启动.bat 先起服务）';
 }
 
 function fmtTime(s) {
@@ -108,6 +209,7 @@ function esc(s) {
 }
 
 function poll() {
+  if (launching) return;            // 拉起过程中别覆盖提示语
   api('/api/status').then((st) => {
     if (!st || st.ok !== true) throw new Error('bad status');
     if (!online) setOnline(true);
@@ -125,21 +227,43 @@ function startPolling() {
 }
 
 // ---------------- 交互 ----------------
-$('toggle').addEventListener('click', () => {
+$('toggle').addEventListener('click', async () => {
   const stopping = $('toggle').classList.contains('stop');
   $('toggle').disabled = true;
-  api(stopping ? '/api/stop' : '/api/start', { method: 'POST', body: '{}' })
-    .then((st) => { if (st && st.ok !== false) paint(st); })
-    .catch(() => setOnline(false))
-    .finally(() => { $('toggle').disabled = false; });
+  try {
+    if (stopping) {
+      const st = await api('/api/stop', { method: 'POST', body: '{}' });
+      if (st && st.ok !== false) paint(st);
+      return;
+    }
+    // 开始：服务不在就先让宿主拉起来，再点它自己的开始
+    const r = await ensureServer();
+    if (!r.ok) { showStartError(r); return; }
+    const st = await api('/api/start', { method: 'POST', body: '{}' });
+    if (st && st.ok !== false) {
+      $('connHelp').classList.add('hide');
+      setOnline(true);
+      paint(st);
+    }
+  } catch {
+    setOnline(false, '本地服务没响应，点「重连」再试');
+  } finally {
+    $('toggle').disabled = false;
+  }
 });
 
-$('retry').addEventListener('click', () => {
+$('retry').addEventListener('click', async () => {
   const v = parseInt($('port').value, 10);
-  if (v >= 1024 && v <= 65535) {
-    port = v;
-    savePrefs({ port });
-    startPolling();
+  if (!(v >= 1024 && v <= 65535)) return;
+  port = v;
+  savePrefs({ port });
+  $('retry').disabled = true;
+  try {
+    const r = await ensureServer();
+    if (!r.ok) showStartError(r);
+    else startPolling();
+  } finally {
+    $('retry').disabled = false;
   }
 });
 
@@ -167,6 +291,11 @@ $('cfgBomb').addEventListener('change', (e) => pushCfg({ bomb: e.target.checked 
 $('cfgHorizon').addEventListener('change', (e) => pushCfg({ horizon: parseFloat(e.target.value) }));
 $('cfgReaction').addEventListener('change', (e) => pushCfg({ reaction: parseFloat(e.target.value) }));
 $('cfgFps').addEventListener('change', (e) => pushCfg({ fps: parseInt(e.target.value, 10) }));
+
+// 安装说明里要带上本扩展的 ID（未打包加载时由目录决定，复制过去即可）
+$('extId').textContent = EXT_ID || '（从 chrome://extensions 里看）';
+$('installCmd').textContent =
+  `python python\\install_host.py --ext-id=${EXT_ID || '<把上面的ID粘过来>'}`;
 
 loadPrefs((v) => {
   port = v;

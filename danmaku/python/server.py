@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -37,6 +38,7 @@ CORS = {
 class Handler(BaseHTTPRequestHandler):
     server_version = 'DanmakuBot/' + VERSION
     engine = None                     # 由 main() 填
+    httpd = None                      # 由 main() 填，/api/exit 用
 
     def log_message(self, fmt, *args):   # 别把每个请求都打到控制台
         pass
@@ -124,10 +126,27 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/fps':
                 self.engine.set_config({'fps': body.get('fps', 30)})
                 return self._send(200, {'ok': True, 'config': self.engine.cfg})
+            if path == '/api/exit':
+                # native host 的 shutdown 用：先回话，再在别的线程里关服务器，
+                # 否则 shutdown() 会等当前这个请求处理完，卡在这里。
+                self._send(200, {'ok': True, 'msg': '正在退出'})
+                threading.Thread(target=self._exit, daemon=True).start()
+                return None
             return self._send(404, {'ok': False, 'error': 'not found'})
         except Exception as e:                       # noqa: BLE001
             traceback.print_exc()
             return self._send(500, {'ok': False, 'error': str(e)})
+
+    def _exit(self):
+        # 鼠标必须松开，不然光标会被卡在「按住移动」的状态
+        try:
+            self.engine.stop('服务退出')
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            self.httpd.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
 
 
 def main():
@@ -145,6 +164,7 @@ def main():
 
     httpd = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     httpd.daemon_threads = True
+    Handler.httpd = httpd
     print('弹幕托管服务已启动：http://127.0.0.1:%d  （%s）'
           % (args.port, '演练模式，不动鼠标' if args.dry else '实弹模式'), flush=True)
     print('按 Ctrl+C 退出', flush=True)

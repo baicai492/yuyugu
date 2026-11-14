@@ -53,6 +53,8 @@ _tmp_*
 # Native Messaging 生成物（路径与本机相关）
 native/yuyugu-host.bat
 native/com.*.yuyugu.json
+# danmaku 的宿主清单带扩展 ID，由 install_host.py 生成
+danmaku/native/com.*.danmaku.json
 logs/state.json
 logs/yuyugu.pid
 logs/host-*.log

@@ -21,18 +21,26 @@
 
 ## 怎么跑
 
-1. **起后台服务**（装了 opencv/numpy/mss 的那个 Python）
-
-   ```
-   danmaku\启动.bat            :: 或者  python start.py
-   ```
-
-   窗口会打印 `弹幕托管服务已启动：http://127.0.0.1:8799`。
-
-2. **装插件**：Chrome → `chrome://extensions` → 打开「开发者模式」→
+1. **装插件**：Chrome → `chrome://extensions` → 打开「开发者模式」→
    「加载已解压的扩展程序」→ 选 `danmaku/` 目录。
 
+2. **装一次 Native 宿主**（只装一次，之后不用再碰命令行）：
+
+   ```
+   cd danmaku
+   D:\miniconda\envs\py311\python.exe python\install_host.py
+   ```
+
+   脚本会从浏览器的扩展列表里认出本目录对应的扩展 ID（由加载路径反查，
+   认不出时才需要加 `--ext-id=<ID>`），然后生成
+   `native/com.baicai492.danmaku.json`，把清单路径写进
+   `HKCU\Software\Google\Chrome\NativeMessagingHosts`（顺带注册 Edge）。
+
 3. 打开斗法页面，进入战斗，点插件图标 →「开始托管」。
+   **Python 服务会自己起来**，不用先双击 `启动.bat`。
+
+> 想手动起服务也行：双击 `danmaku\启动.bat`（或 `python start.py`）。
+> 服务已经在跑时，插件会直接用它，不会重复起进程。
 
 托管期间**必须让斗法那个标签页保持在前台**：游戏自己监听了 `visibilitychange`，
 标签页一藏起来就自动暂停（`danmaku.js:149`），机器人再厉害也打不了暂停中的游戏。
@@ -67,16 +75,44 @@ mss 抓屏 ──► 找 #b77732 棕框（场地定位）──► 裁剪 + 2 �
 ```
 danmaku/
 ├── manifest.json / popup.* / content.js / background.js   插件（前台）
-├── start.py / 启动.bat                                     起服务的入口
+├── start.py / 启动.bat                                     手动起服务的入口
+├── native/danmaku-host.bat                                 Native 宿主的启动包装
 └── python/
-    ├── server.py     本地 HTTP 服务（只监听 127.0.0.1:8799）
-    ├── engine.py     主循环：状态机、受击判定、符卡、结束判定
-    ├── vision.py     屏幕识别：场地、敌弹、激光、敌机、血条
-    ├── ai.py         多帧跟踪 + 走位决策
-    ├── io_win.py     抓屏（mss）与鼠标注入（ctypes，不用装 pyautogui）
-    ├── sim.py        离线模拟器（把 danmaku.js 的核心动力学搬过来）
-    └── selftest.py   离线自测：定位 / 识别 / 闭环
+    ├── server.py      本地 HTTP 服务（只监听 127.0.0.1:8799）
+    ├── native_host.py Native Messaging 宿主：按插件请求拉起/关闭 server.py
+    ├── install_host.py 注册宿主（写注册表 + 生成清单），装一次就够
+    ├── engine.py      主循环：状态机、受击判定、符卡、结束判定
+    ├── vision.py      屏幕识别：场地、敌弹、激光、敌机、血条
+    ├── ai.py          多帧跟踪 + 走位决策
+    ├── io_win.py      抓屏（mss）与鼠标注入（ctypes，不用装 pyautogui）
+    ├── sim.py         离线模拟器（把 danmaku.js 的核心动力学搬过来）
+    └── selftest.py    离线自测：定位 / 识别 / 闭环
 ```
+
+## 自动拉起是怎么做的
+
+Chrome 只允许扩展通过 **Native Messaging** 启动本地进程，所以链路是：
+
+```
+popup 点「开始托管」
+  → background.js 收 onMessage
+  → chrome.runtime.sendNativeMessage('com.baicai492.danmaku', {cmd:'launch', port})
+  → Chrome 执行 native/danmaku-host.bat → python/native_host.py
+  → 宿主 detached 起 python/server.py（日志写 logs/danmaku-server.log）
+  → 宿主探到端口通了才回话（最多等 15 秒）
+  → popup 再 POST /api/start
+```
+
+几个容易踩的点：
+
+* **stdout 是协议通道**：宿主的 stdout 上只能是「4 字节小端长度 + JSON」，
+  一个多余的 `print` 就会让 Chrome 判定消息损坏。所以宿主的日志全写文件。
+* **服务已经在跑就直接复用**：宿主先探端口，通了就返回 `running`，不会再起一个抢端口。
+* **僵死进程会被清掉**：有 PID 但端口不通时先 `taskkill`，避免旧进程占着不放。
+* **popup 不能直接调 `sendNativeMessage`**：这是一次性连接，用户点完就关面板的话，
+  Chrome 会连宿主进程一起收掉。所以中转放在 service worker 里。
+* `shutdown` 先 POST `/api/stop` 和 `/api/exit`（先把鼠标松开、再关服务器），
+  实在不退才 `taskkill`。
 
 ## 离线自测
 
