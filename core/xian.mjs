@@ -1061,7 +1061,14 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
     // 2.0 还有额度时，把它的门票灵力（15）留给它，1.0 只用超出的部分。
     // 引擎现在也是先跑 2.0 再跑 1.0，但光靠顺序不够：1.0 只要还有 3 点灵力
     // 就会锄地，灵力永远攒不到 15，2.0 还是排不进动作。
-    reserveEnergy: xian2EnergyReserve(world.state?.xs, cfg, t),
+    //
+    // 再并上用户在「修仙 → 策略」里手动设的预留（xian.reserveEnergy）。取 max，
+    // 是为了让两种意图都不被破坏：设 0 时仍然是「刚好够 2.0 门票」，
+    // 设 40 时药园就真的停在 40 以上，不管 2.0 今天还剩多少额度。
+    reserveEnergy: Math.max(
+      xian2EnergyReserve(world.state?.xs, cfg, t),
+      Number(xc.reserveEnergy) || 0,
+    ),
     // xian2 关掉或 realm 关掉 = 没人接管秘境 → 检测到玩家手操就让位
     autoRealm: cfg.xian2?.enabled !== false && cfg.xian2?.realm !== false,
   })

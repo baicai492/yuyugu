@@ -82,6 +82,7 @@ nav.tabs button.on { background: var(--accent); border-color: var(--accent); col
 .card.xian .field label.has-hint { border-bottom: 1px dotted var(--line); cursor: help; }
 .card.xian select { width: 170px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
 .card.xian input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+.card.xian input[type=number] { width: 70px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; font-size: 12px; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 button { padding: 7px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }

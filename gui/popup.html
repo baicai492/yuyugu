@@ -235,7 +235,12 @@
         <label class="has-hint" title="融合会减少一条基础灵根，且不可逆；失败还会掉修为">自动融合灵根</label>
         <input type="checkbox" id="xFuse" />
       </div>
+      <div class="field">
+        <label class="has-hint" title="药园的锄地 / 播种 / 浇水不会把灵力花到这个数以下，留给秘境、斗法或你自己手动玩。收菜、炼丹、突破不受影响（收菜每块只要 2 点，是田块周转的保底）。">预留灵力</label>
+        <input type="number" id="xReserve" min="0" max="100" step="5" value="0" />
+      </div>
       <div class="note">融合不可逆（灵根 −1），默认关闭。只在修为损耗最小的窗口尝试。</div>
+      <div class="note">预留灵力取「你设的数」和「秘境/斗法下一次门票」里较大的那个；0 = 不额外预留。</div>
     </div>
 
     <div class="actions">

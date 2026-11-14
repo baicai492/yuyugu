@@ -709,6 +709,10 @@ function renderXian() {
     $('xBreak').value = config.xian.breakMode
   }
   $('xFuse').checked = !!config?.xian?.autoFuse
+  // 不要覆盖正在输入的值（用户可能正在改位数，轮询恰好回来）
+  if (document.activeElement !== $('xReserve')) {
+    $('xReserve').value = Number(config?.xian?.reserveEnergy) || 0
+  }
 
   if (!x.storyDone) $('xStatus').textContent = '剧情还没过完（测灵根、剧情要真人点），托管在待命'
   else if (x.fight) $('xStatus').textContent = '网页端正在斗法，托管暂时不插手'
@@ -1369,6 +1373,12 @@ function bind() {
   $('xEnabled').onchange = () => saveXianCfg((x) => { x.enabled = $('xEnabled').checked })
   $('xBreak').onchange = () => saveXianCfg((x) => { x.breakMode = $('xBreak').value })
   $('xFuse').onchange = () => saveXianCfg((x) => { x.autoFuse = $('xFuse').checked })
+  // 灵力上限 100，钳到 0–100；空值按 0 处理（= 不额外预留）
+  $('xReserve').onchange = () => {
+    const v = Math.max(0, Math.min(100, Math.floor(Number($('xReserve').value) || 0)))
+    $('xReserve').value = v
+    saveXianCfg((x) => { x.reserveEnergy = v })
+  }
 
   $('cfgSave').onclick = async () => {    try {
       await saveCfg(config)
