@@ -899,7 +899,7 @@ function pickSwapTarget(ranked) {
  * forceScan=true 时绕过 scanEvery 直接扫目录——engine 用可偷筛选探到
  * 「此刻有货」时会传它，避免被「半小时才扫一次」的间隔挡住。
  */
-export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceScan = false } = {}) {
+export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceScan = false, snipeNow = false } = {}) {
   const st = cfg.social?.steal
   if (!st?.enabled) return { stolen: 0, value: 0 }
   // 掐点判断依赖「此刻」，而 world.now 只在上次 accept 时更新。
@@ -979,7 +979,10 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
   //   2. 这条记录还没过点（nx.at >= now − leadSec）—— 用 <= 单向判断会让
   //      过去很久的记录也算命中，配合 nextWake 的 1 秒候选变成几秒一醒。
   const gap = Math.max(SNIPE_MIN_GAP_SEC, memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
-  const wakeReady = world.now - (memo.stealWakeAt || 0) >= gap
+  // snipeNow：引擎已经在 tick 里确认过「这一波该抢」。白醒节流只用于决定
+  // 要不要为偷菜再醒一次；已经醒着、目标就在 leadSec 内时不能再被它拦住——
+  // 否则会白等一个 gap（10 秒起步，连续抢不到时能到 15 分钟），货早没了。
+  const wakeReady = snipeNow === true || world.now - (memo.stealWakeAt || 0) >= gap
   const nx = nextUnlock(memo.stealSchedule || {}, world.now, { leadSec })
   const snipeReady = wakeReady && !!nx && nx.at >= world.now - leadSec && nx.at - world.now <= leadSec + 5
   // 宽限必须和 nextUnlock 的 WAKE_GRACE_SEC 一致。

@@ -12,7 +12,7 @@ import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
 import { petCareRound } from './pet-care.mjs'
 import { helpDaily, stealRound, probeStealable } from './social.mjs'
-import { shouldSnipe, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen } from './steal-schedule.mjs'
+import { shouldSnipe, snipeDue, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
 import { xian2Round, xian2Snapshot } from './xian2.mjs'
 import { arcadeRound, arcadeSummary } from './arcade.mjs'
@@ -518,7 +518,20 @@ export class Engine {
     // 本轮巡视已经投过资就不再评估新的投资。配合 planner 的 maxPerRound=1，
     // 保证一次巡视最多只买一项；是否继续投，等下次巡视重新看现金和规则。
     let investedThisTick = false
-    while (rounds++ < (cfg.loop?.maxRoundsPerTick || 8)) {
+
+    // 偷菜窗口的硬截断：解禁前一秒都不该再排新的经济 POST。
+    // 以前只有「窗口是否已经打开」的布尔值传给后台模块，主规划的 8 轮循环
+    // 照样跑满——每轮 2.15 秒的提交间隔，8 轮就是 17 秒，正好把 15 秒的提前量
+    // 全吃掉，等走到偷菜段时货已经被抢了。这里做两件事：
+    //   1) 进来就有目标在窗口内 → 只跑 1 轮（把自家成熟作物先收掉），立刻去偷；
+    //   2) 每提交完一批再看一眼 → 窗口在规划途中打开就停手。
+    // 剩下的经济动作下一轮巡视继续（nextWake 会因为还有活而很快醒来）。
+    const snipeLead = cfg.social?.steal?.enabled ? this.snipeLeadSec(w) : 8
+    const snipeAtStart = Boolean(this.snipeDueNow(w, snipeLead))
+    if (snipeAtStart) this.log('偷菜：解禁窗口已打开，本轮只跑 1 批农务就去抢')
+    const maxRounds = snipeAtStart ? 1 : (cfg.loop?.maxRoundsPerTick || 8)
+    while (rounds < maxRounds) {
+      rounds++
       this.setStep(rounds === 1 ? '规划本轮动作' : `规划第 ${rounds} 批动作`)
       // 一次规划循环可能横跨几分钟（每批要串行提交、等 http 间隔）。
       // 用校准过的本地时钟把 now 推上来，别拿几分钟前的快照时间做决策。
@@ -543,6 +556,11 @@ export class Engine {
         if (plan.summary.length) this.log(`第 ${rounds} 轮：${plan.summary.join('；')}`)
         if (plan.summary.some((x) => x.startsWith('投资：'))) investedThisTick = true
         if (!res.out?.some?.((o) => o?.ok)) break   // 全失败就别再转
+        // 批与批之间再看一眼：窗口是在这一批提交期间打开的
+        if (this.snipeDueNow(w, snipeLead)) {
+          this.log('偷菜：解禁窗口在规划途中打开，停止本轮剩余规划')
+          break
+        }
       } catch (e) {
         // 409：小岛状态在别处变了（网页端手动操作、站内管家抢先提交、另一个标签页）。
         // 旧版 core.mjs 的做法是「用响应里的新快照重新规划，continue」；
@@ -574,14 +592,16 @@ export class Engine {
     // 平时仍按原顺序（下面那块）走，不改变日常节奏。
     let stealSnipeDone = false
     w.tickClock()
-    const snipeLead = cfg.social?.steal?.enabled ? this.snipeLeadSec(w) : 8
-    if (cfg.social?.steal?.enabled && !cfg.dry &&
-        shouldSnipe(this.memo, this.memo.stealSchedule, w.now, { leadSec: snipeLead })) {
+    const snipeNx = this.snipeDueNow(w, snipeLead)
+    if (snipeNx) {
       try {
         this.setStep('串门 · 偷菜（掐点）')
-        const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
+        const r = await stealRound(w, cfg, this.log.bind(this), this.memo, { snipeNow: true })
         totalEarn += r.value || 0
+        // value 是**库存**按市价折算（现金没动，cash:false）；
+        // fine 是打输守家战真扣的 D（现金动了，要按支出记，否则账本少一笔）。
         this.credit(r.value || 0, 0, 0, { cash: false })
+        if (r.fine > 0) { totalSpend += r.fine; this.credit(0, r.fine) }
         if ((r.stolen || 0) > 0) noteSnipeResult(this.memo, r.stolen)
         else if (this.memo.stealWakePending && !r.staleWake) {
           const before = this.memo.stealWakeGap || 60
@@ -621,6 +641,7 @@ export class Engine {
             const r = await stealRound(w, cfg, this.log.bind(this), this.memo, { forceScan: true })
             totalEarn += r.value || 0
             this.credit(r.value || 0, 0, 0, { cash: false })
+            if (r.fine > 0) { totalSpend += r.fine; this.credit(0, r.fine) }
             if ((r.stolen || 0) > 0) this.memo.stealProbeGap = 60
             else this.memo.stealProbeGap = Math.min(900, gap * 2)
             stealNowDone = true
@@ -776,6 +797,7 @@ export class Engine {
         const r = await stealRound(w, cfg, this.log.bind(this), this.memo)
         totalEarn += r.value || 0
         this.credit(r.value || 0, 0, 0, { cash: false })
+        if (r.fine > 0) { totalSpend += r.fine; this.credit(0, r.fine) }
         // 记录这次「因解禁而醒」的结果，喂给自适应节流：
         // 偷到了就恢复 60 秒的敏锐节奏，白醒一趟就放宽一倍（封顶 15 分钟）。
         if ((r.stolen || 0) > 0) {
@@ -1167,6 +1189,26 @@ export class Engine {
    * shouldSnipe 必须用同一个值，否则引擎以为该醒了、窗口判定却说不算。
    * 换装和补体力都是 POST，必须算进去（见 steal-schedule.physicalPrepLeadSec）。
    */
+  /**
+   * 现在就该去抢的解禁目标（tick 内的判定）。
+   *
+   * 和 shouldSnipe 的区别是**不带白醒节流**：节流只用于「要不要为偷菜再醒一次」，
+   * 醒着的时候窗口打开就该抢。但「刚试过、什么都没偷到」的退避仍然生效——
+   * 除非这一趟本来就是为它醒的（stealWakePending），否则不重复空抢。
+   *
+   * @returns {object|null} nextUnlock 的结果
+   */
+  snipeDueNow(w, leadSec) {
+    if (!this.cfg.social?.steal?.enabled || this.cfg.dry) return null
+    const t = w.tickClock()
+    let nx = null
+    try { nx = snipeDue(this.memo.stealSchedule || {}, t, { leadSec }) } catch { return null }
+    if (!nx) return null
+    const gap = Math.max(SNIPE_MIN_GAP_SEC, this.memo.stealWakeGap || SNIPE_MIN_GAP_SEC)
+    if (!this.memo.stealWakePending && t - (this.memo.stealWakeAt || 0) < gap) return null
+    return nx
+  }
+
   snipeLeadSec(w, now = w.tickClock()) {
     const cfg = this.cfg
     const st = cfg.social?.steal || {}

@@ -407,6 +407,17 @@ export const SNIPE_MAX_GAP_SEC = 900
 export function shouldSnipe(memo, schedule, now, { leadSec = 8, graceSec = WAKE_GRACE_SEC } = {}) {
   const gap = Math.max(SNIPE_MIN_GAP_SEC, memo?.stealWakeGap || SNIPE_MIN_GAP_SEC)
   if (now - (memo?.stealWakeAt || 0) < gap) return null
+  return snipeDue(schedule, now, { leadSec, graceSec })
+}
+
+/**
+ * 同上，但**不带白醒节流**。
+ *
+ * 节流（stealWakeAt/stealWakeGap）的本意是「别为了偷菜反复醒来空转」，
+ * 不是「醒着的时候也别去偷」。引擎在 tick 里已经醒着，用它判断
+ * 「现在该不该把解禁目标抢下来」；要不要为此再醒一次仍由 shouldSnipe 决定。
+ */
+export function snipeDue(schedule, now, { leadSec = 8, graceSec = WAKE_GRACE_SEC } = {}) {
   const nx = nextUnlock(schedule || {}, now, { leadSec, wakeGraceSec: graceSec })
   if (!nx) return null
   if (nx.at < now - graceSec) return null

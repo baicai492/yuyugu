@@ -330,6 +330,30 @@ console.log('\n[偷菜掐点]')
   ok('关掉 skipMarked 时保留标记岛', noFilter.length === 2, `${noFilter.length} 家`)
   const errWorld = { client: { get: async () => { throw new Error('boom') } } }
   ok('探测失败当作没有', (await probeStealable(errWorld, {})).length === 0)
+
+  // 解禁判定的两套语义：shouldSnipe 带白醒节流（决定要不要醒），
+  // snipeDue 不带（已经醒着、窗口打开就该抢）。
+  {
+    const { shouldSnipe, snipeDue } = await import('../core/steal-schedule.mjs')
+    const sched = { 7: { upcoming: [{ unlockAt: now + 5, kind: 'plot', i: 0, item: 'grape' }] } }
+    const justTried = { stealWakeAt: now - 3, stealWakeGap: 10 }
+    ok('刚试过 3 秒：shouldSnipe 不醒', shouldSnipe(justTried, sched, now, { leadSec: 8 }) === null)
+    ok('刚试过 3 秒：snipeDue 仍认窗口', snipeDue(sched, now, { leadSec: 8 })?.at === now + 5)
+    // 引擎的取舍：醒着且这一趟就是为它醒的（stealWakePending），退避不拦
+    const armed = { stealWakeAt: now - 3, stealWakeGap: 10, stealWakePending: true }
+    ok('为它醒的这一趟不被退避拦住',
+      Boolean(snipeDue(sched, now, { leadSec: 8 })) && armed.stealWakePending === true)
+    // 白醒退避到底：连试连空之后间隔放宽，不该再判成「该抢」
+    const gaveUp = { stealWakeAt: now - 30, stealWakeGap: 120 }
+    ok('退避到 120 秒时 shouldSnipe 不醒', shouldSnipe(gaveUp, sched, now, { leadSec: 8 }) === null)
+    ok('但窗口本身依然成立（引擎自行决定要不要抢）', snipeDue(sched, now, { leadSec: 8 })?.at === now + 5)
+    // 超出提前量的不算：未来 30 秒解禁、leadSec 8 → 不是这一波
+    ok('超出提前量不算窗口',
+      snipeDue({ 7: { upcoming: [{ unlockAt: now + 30 }] } }, now, { leadSec: 8 }) === null)
+    // 过点太久也不算
+    ok('过点超过宽限不算窗口',
+      snipeDue({ 7: { upcoming: [{ unlockAt: now - 600 }] } }, now, { leadSec: 8 }) === null)
+  }
 }
 
 console.log('\n[新] 游乐馆求解器')
