@@ -795,6 +795,36 @@ console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
     const x2 = { ...x, med: null, rlm: { a: 'bamboo', sd: 1, L: 0, R: 0, c: 1, hp: 30, mx: 60, lt: {}, t: now - 100 } }
     const at2 = nextXianWakeSec({ state: { xs: x2 }, now }, now, {}, normalizeXianOptions({ enabled: true, autoRealm: false }))
     ok('手动秘境让位后按 2 分钟复查', at2 - now === 120, `${at2 - now} 秒`)
+
+    // 手动预留灵力生效时，打坐超 MED_MAX 也必须收功。
+    //
+    // 线上 2026-11-15：灵力 8 < 预留 30，规划器在「灵力不够」那一支直接早退返回，
+    // 连带把收功也跳过了，打坐挂了 41 分钟。规则里 rise 是
+    // d = Math.min(now - med.t, MED_MAX)——超过 30 分钟的部分直接丢弃，
+    // 也就是后 11 分钟白打。
+    {
+      const { planXianActions } = await import('../core/xian.mjs')
+      const mkMed = (elapsedSec) => {
+        const y = A.newXs(now)
+        Object.assign(y, {
+          v: 1, st: 4, roots: { e: ['fire'], v: [] }, root: 'fire', tech: 'fire', techs: ['fire'],
+          lv: 5, en: 8, enAt: now, cv: { r: 2, s: 3, xp: 0 },
+          pills: { peiyuan: 3, huiling: 0 }, med: { t: now - elapsedSec },
+          plots: [], plotN: 0, seeds: {}, bag: {}, stone: 0, log: 0,
+        })
+        return { state: { xs: y }, now }
+      }
+      const ro = normalizeXianOptions({ enabled: true, reserveEnergy: 30, reserveManual: 30 })
+      const over = planXianActions(mkMed(41 * 60), now, ro)
+      ok('预留生效 + 打坐 41 分钟 → 发出收功', over.actions.some((a) => a.a === 'xsRise'),
+        over.actions.map((a) => a.a).join(','))
+      const under = planXianActions(mkMed(29 * 60), now, ro)
+      ok('预留生效 + 打坐 29 分钟 → 不提前收功（还没到上限）',
+        !under.actions.some((a) => a.a === 'xsRise'), under.actions.map((a) => a.a).join(','))
+      // 唤醒点也要落在「立刻」，不能因为灵力没补够就睡到回满
+      const wakeMed = nextXianWakeSec(mkMed(41 * 60), now, {}, ro)
+      ok('预留生效 + 打坐已超时 → 立刻醒来收功', wakeMed - now <= 3, `${wakeMed - now} 秒`)
+    }
   }
 }
 
