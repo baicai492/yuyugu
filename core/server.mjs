@@ -123,20 +123,24 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
       //   ?day=YYYY-MM-DD  只看这一天（界面用这个：一天的日志上万行，
       //                    跨天合并再取尾部会把前几天整个切掉）
       //   ?days=N          最近 N 天（不传 day 时生效）
-      //   ?max=N           最多返回多少行（取尾部）
+      //   ?max=N           本次返回多少行（从尾部倒数）
+      //   ?offset=N        从尾部往回跳过多少行——界面滚到顶时用它加载更早的
       if (req.method === 'GET' && path === '/api/logs/history') {
         const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 3))
         const maxLines = Math.max(50, Math.min(50000, Number(url.searchParams.get('max')) || 800))
+        const offset = Math.max(0, Math.min(500000, Number(url.searchParams.get('offset')) || 0))
         const rawDay = url.searchParams.get('day')
         const day = rawDay && /^\d{4}-\d{2}-\d{2}$/.test(rawDay) ? rawDay : null
         const dir = engine.logDir
-        const r = readLogHistory(dir, { days, maxLines, day })
+        const r = readLogHistory(dir, { days, maxLines, day, offset })
         return send(res, 200, {
           days: logInventory(dir),
           logs: r.logs,
           total: r.total,
           day: r.day,
           picked: r.days,
+          hasMore: r.hasMore,
+          offset: r.offset,
         })
       }
 

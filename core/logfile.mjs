@@ -7,15 +7,21 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, statSync } from '
 import { resolve, join } from 'node:path'
 
 const FILE_RE = /^yuyugu-(\d{4}-\d{2}-\d{2})\.log$/
+const LEGACY_RE = /^legacy-(\d{4}-\d{2}-\d{2})\.log$/
 
-/** 列出有日志的日期（新→旧） */
+/**
+ * 列出有日志的日期（新→旧）。
+ * yuyugu-*.log 是主程序写的；legacy-*.log 是从 v1 旧插件浏览器存储里挖出来、
+ * 由 scripts/import-legacy-logs.mjs 导入的。两者都算「这一天有记录」。
+ */
 export function listLogDays(dir) {
   if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .map((f) => FILE_RE.exec(f)?.[1])
-    .filter(Boolean)
-    .sort()
-    .reverse()
+  const days = new Set()
+  for (const f of readdirSync(dir)) {
+    const d = FILE_RE.exec(f)?.[1] || LEGACY_RE.exec(f)?.[1]
+    if (d) days.add(d)
+  }
+  return [...days].sort().reverse()
 }
 
 // 注意：这里**不做任何日志清理**。本地日志按天落盘后永久保留，
@@ -206,36 +212,57 @@ function parseBeijingTime(s) {
 
 /**
  * 读某一天（或最近 N 天）的日志。
- * 返回 { logs: [{ t, ts, level, msg }], total, day, days }
+ * 返回 { logs: [{ t, ts, level, msg, src }], total, day, days, hasMore }
  *   logs 按时间正序。
  *   day      只看这一天（YYYY-MM-DD）；不传则看最近 `days` 天
  *   days     读最近几天（默认 3，仅在 day 为空时生效）
- *   maxLines 最多返回多少行（取尾部）
- *   total    该范围内的总行数（未截断），用于告诉界面「被截掉了多少」
+ *   maxLines 本次返回多少行（从尾部倒数）
+ *   offset   从尾部往回跳过多少行——滑动窗口用它加载更早的记录
+ *   total    该范围内的总行数（未截断），用于告诉界面「还有多少没显示」
+ *   hasMore  是否还有更早的行没返回
+ *
+ * 同一天可能有两个文件：yuyugu-D.log（主程序写的）和 legacy-D.log
+ * （从 v1 旧插件浏览器存储里挖出来的，见 scripts/import-legacy-logs.mjs）。
+ * 这里按时间合并成一个序列，来源记在 src 上。
  *
  * 注意：多天模式是「跨天合并后再取尾部」，一天的日志就上万行，
  * 所以早期几天会被整个切掉——界面只用单天模式。
  */
-export function readLogHistory(dir, { days = 3, maxLines = 800, day = null } = {}) {
+export function readLogHistory(dir, { days = 3, maxLines = 800, day = null, offset = 0 } = {}) {
   const avail = listLogDays(dir)
   const picked = day
     ? (avail.includes(day) ? [day] : [])
     : avail.slice(0, days)
   const out = []
-  for (const d of picked.slice().reverse()) {          // 从旧到新拼
-    const file = resolve(dir, `yuyugu-${d}.log`)
+  const read = (file, src) => {
     let text = ''
-    try { text = readFileSync(file, 'utf8') } catch { continue }
+    try { text = readFileSync(file, 'utf8') } catch { return }
     for (const line of text.split(/\r?\n/)) {
       if (!line.trim()) continue
       const m = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)$/.exec(line)
-      if (!m) { out.push({ t: 0, ts: '', level: 'info', msg: line }); continue }
+      if (!m) { out.push({ t: 0, ts: '', level: 'info', msg: line, src }); continue }
       const t = parseBeijingTime(m[1])
       const msg = m[2]
-      out.push({ t, ts: m[1], level: /出错|失败|错误|⚠/.test(msg) ? 'err' : 'info', msg })
+      out.push({ t, ts: m[1], level: /出错|失败|错误|⚠/.test(msg) ? 'err' : 'info', msg, src })
     }
   }
-  return { logs: out.slice(-Math.max(1, maxLines)), total: out.length, day: day || null, days: picked }
+  for (const d of picked.slice().reverse()) {          // 从旧到新拼
+    read(resolve(dir, `yuyugu-${d}.log`), 'main')
+    read(resolve(dir, `legacy-${d}.log`), 'legacy')
+  }
+  out.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''))
+  const n = Math.max(1, maxLines)
+  const skip = Math.max(0, offset)
+  const end = Math.max(0, out.length - skip)
+  const start = Math.max(0, end - n)
+  return {
+    logs: out.slice(start, end),
+    total: out.length,
+    day: day || null,
+    days: picked,
+    hasMore: start > 0,
+    offset: skip,
+  }
 }
 
 /**
@@ -367,12 +394,23 @@ export function todayTaxFromLog(dir, nowMs = Date.now()) {
   return tax
 }
 
-/** 日志目录概况（给 GUI 显示有哪些天可选） */export function logInventory(dir) {
+/** 日志目录概况（给 GUI 显示有哪些天可选）。主日志与 legacy 日志按天合并计算大小。 */
+export function logInventory(dir) {
   const days = listLogDays(dir)
   return days.map((day) => {
-    const file = resolve(dir, `yuyugu-${day}.log`)
-    let size = 0, mtime = 0
-    try { const st = statSync(file); size = st.size; mtime = st.mtimeMs } catch {}
-    return { day, size, mtime }
+    let size = 0, mtime = 0, lines = 0
+    for (const f of [`yuyugu-${day}.log`, `legacy-${day}.log`]) {
+      const file = resolve(dir, f)
+      try {
+        const st = statSync(file)
+        size += st.size
+        mtime = Math.max(mtime, st.mtimeMs)
+      } catch { continue }
+      try { lines += readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).length } catch {}
+    }
+    return { day, size, mtime, lines }
   })
 }
+
+/** 旧插件记录的本地缓存路径（浏览器存储被清理后的兜底） */
+export function legacyCacheFile(dir) { return resolve(dir, LEGACY_CACHE) }

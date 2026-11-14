@@ -38,7 +38,7 @@ core/
   server.mjs             本地 HTTP 服务（给 GUI 用，仅 127.0.0.1）
   config.mjs             默认配置与读写
 gui/                     Chrome MV3 插件（纯 GUI）
-scripts/                 运维脚本（仓库调整、管家配置）
+scripts/                 运维脚本（仓库调整、管家配置、旧插件日志导入）
 MODULES.md               全部 18 个前端模块的机制清单（实现依据）
 ```
 
@@ -109,10 +109,20 @@ node scripts/install-host.mjs --ext-id=<你的扩展ID>
 - **设置**：常用开关与数值，保存后主程序热生效
 - **日志**：三个模式
   - **本次运行**：当前进程的实时日志
-  - **历史记录**：**按天选择**查看磁盘上的历史日志（每天上万行，默认显示当天最后 2,000 行，
-    可点「显示全部」；**永久保留，不做过期清理**；重启、换版本都不丢）
+  - **历史记录**：**按天选择**查看磁盘上的历史日志。一天的日志上万行，默认只加载最后
+    2,000 行；**向上滚动会自动往前续 2,000 行**（滑动窗口，翻多久加载多久），
+    也可以点「显示全部」一次拉完。**永久保留，不做过期清理**；重启、换版本都不丢
   - **旧插件记录**：直接读旧版 Chrome 插件存在浏览器里的历史日志
-    （自动扫描 Chrome/Edge/Brave 所有 profile 的 `Local Extension Settings`，不写死路径）
+    （自动扫描 Chrome/Edge/Brave 所有 profile 和测试脚本留下的临时 profile 的
+    `Local Extension Settings`，不写死路径）。扫到的记录会落一份到
+    `logs/legacy-imported.json`，浏览器存储被 Chrome 清掉后仍能看
+
+> **旧插件日志并入历史记录**：`node scripts/import-legacy-logs.mjs` 会把浏览器里
+> 挖到的 v1 记录按天写成 `logs/legacy-<日期>.log`。历史记录页读某一天时，
+> `yuyugu-<日期>.log` 与 `legacy-<日期>.log` 会**按时间合并显示**（旧插件的行带
+> `[旧插件]` 前缀）。分两个文件是为了不污染主日志的「今日收支」重放。
+> 浏览器存储是易失的：Chrome 卸载/重装扩展会整个删掉，v1 自己还只保留最后
+> 1,500 条，所以更早日期的记录一旦丢了就找不回来——**建议尽早导入一次**。
 
 ### 重启后还在的数据
 
@@ -127,7 +137,7 @@ node scripts/install-host.mjs --ext-id=<你的扩展ID>
 | 上次扫偷菜目录的时间 | `state.json` 的 `stealScanAt` |
 | 累计运行次数 / 累计收益 | `state.json` 的 `stats` |
 | 全部日志 | `logs/yuyugu-<日期>.log`（追加写，不覆盖） |
-| 旧版插件的运行记录 | 浏览器 `Local Extension Settings`，由 GUI 「旧插件记录」页直接读 |
+| 旧插件的运行记录 | 浏览器 `Local Extension Settings`，由 GUI 「旧插件记录」页直接读；导入过的落盘到 `logs/legacy-<日期>.log`，历史记录页与主日志合并显示 |
 
 ## 站点版本适配记录
 

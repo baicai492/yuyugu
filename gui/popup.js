@@ -55,10 +55,11 @@ async function getMarket() {
 async function getXian() { return api('/api/xian') }
 async function getLogs(since) { return api(`/api/logs?since=${since}`) }
 // 历史日志按「单天」读：一天的日志就上万行，跨天合并再取尾部会把前几天整个切掉。
-// max 传 0 表示该天全部（服务端上限 50000）。
-async function getLogHistory(day, max = 2000) {
+// max 是本次取多少行（从尾部倒数），offset 是从尾部往回跳过多少行——
+// 界面滚到顶部时用 offset 接着加载更早的记录（滑动窗口）。
+async function getLogHistory(day, max = 2000, offset = 0) {
   const q = day ? `day=${encodeURIComponent(day)}` : 'days=1'
-  return api(`/api/logs/history?${q}&max=${max}`)
+  return api(`/api/logs/history?${q}&max=${max}&offset=${offset}`)
 }
 async function getLegacyLogs(max = 2000) { return api(`/api/logs/legacy?max=${max}`) }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
@@ -116,7 +117,9 @@ async function loadLogs() {
     const j = await getLogs(logSince)
     for (const l of j.logs || []) { logSince = Math.max(logSince, l.t); logLines.push(l) }
     if (logLines.length > 1500) logLines = logLines.slice(-1500)
-    renderLogs()
+    // 只有停在「本次运行」时才重画：历史窗口可能有上万行，
+    // 每 1.5 秒整块重建会明显卡顿，而且内容本来就不会变。
+    if (logMode === 'now') renderLogs()
   } catch {}
 }
 
@@ -1040,14 +1043,12 @@ function logClass(msg) {
   return ''
 }
 
-function renderLogs() {
+function renderLogs(opts = {}) {
   const box = $('logs')
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20
   const src = logMode === 'hist' ? histLines : logMode === 'legacy' ? legacyLines : logLines
   // 「本次运行」是每 1.5 秒整块重建的滚动日志，只画尾部 600 行，免得 DOM 越滚越大。
-  // 历史记录 / 旧插件记录是一次性静态读取，拉到多少就画多少——
-  // 以前这里无差别 slice(-600)，点「显示全部」拉回 9,823 行也只画 600 行，
-  // 看着就像按钮没生效。
+  // 历史记录 / 旧插件记录是按需加载的窗口，拉到多少就画多少。
   const view = logMode === 'now' ? src.slice(-600) : src
   const frag = document.createDocumentFragment()
   let lastDay = ''
@@ -1086,11 +1087,17 @@ function renderLogs() {
   // 用 fragment 一次换掉整块，别用 replaceChildren(...out)：
   // 「显示全部」时是上万行，展开成上万个实参会逼近 V8 的参数上限。
   box.replaceChildren(frag)
-  if (atBottom) box.scrollTop = box.scrollHeight
+  if (opts.keepScroll) {
+    // 加载更早的行后，内容是从顶部插入的：保持用户当前看的那几行不动
+    box.scrollTop = opts.prevTop + (box.scrollHeight - opts.prevH)
+  } else if (atBottom) box.scrollTop = box.scrollHeight
 }
 
 let histDay = ''          // 当前选中的日期（YYYY-MM-DD）
 let histShowAll = false   // 「显示全部」是否按下
+let histHasMore = false   // 是否还有更早的行没加载（滑动窗口用）
+let histLoading = false   // 正在加载更早的行，防重复触发
+let histTotal = 0         // 当天总行数
 let legacyShowAll = false // 旧插件记录「显示全部」是否按下
 
 /** 把服务端的日志清单填进日期下拉。只在清单变化时重建，避免打断用户选择。 */
@@ -1103,8 +1110,9 @@ function fillHistDays(inv) {
     sel.replaceChildren(...inv.map((x) => {
       const o = document.createElement('option')
       o.value = x.day
-      const mb = (x.size / 1048576).toFixed(1)
-      o.textContent = x.day === inv[0].day ? `${x.day}（今天，${mb}MB）` : `${x.day}（${mb}MB）`
+      // 小文件用行数更直观（11-10 这种只有几十行，显示「0.0MB」等于没说）
+      const size = x.size >= 1048576 ? `${(x.size / 1048576).toFixed(1)}MB` : `${(x.lines || 0).toLocaleString()} 行`
+      o.textContent = x.day === inv[0].day ? `${x.day}（今天，${size}）` : `${x.day}（${size}）`
       return o
     }))
     const pick = want.includes(keep) ? keep : want[0]
@@ -1113,30 +1121,51 @@ function fillHistDays(inv) {
   if (!histDay) histDay = sel.value || ''
 }
 
-async function loadLogHistory() {
-  if (!alive) return
+/**
+ * 加载历史日志。
+ *   默认      读最后 2,000 行（窗口底部）
+ *   prepend   窗口顶部：用 offset=已加载行数 再往回取 2,000 行，插到前面
+ *   showAll   一次取全部（服务端上限 50,000 行）
+ *
+ * 为什么不一次全读：一天的日志上万行，全量拉取 + 全量渲染每次要几秒，
+ * 而 95% 的时候用户只想看最新那段。滚动到顶再续，翻多久加载多久。
+ */
+async function loadLogHistory({ prepend = false } = {}) {
+  if (!alive || histLoading) return
   const day = histDay || $('histDay').value || ''
-  // 首次（还不知道有哪些天）先问一次清单：不带 day 就返回最新一天的尾部
+  const box = $('logs')
+  const prevTop = box.scrollTop
+  const prevH = box.scrollHeight
+  const offset = prepend ? histLines.length : 0
   const max = histShowAll ? 50000 : 2000
+  histLoading = true
   try {
-    const j = await getLogHistory(day, max)
+    const j = await getLogHistory(day, max, offset)
     fillHistDays(j.days || [])
-    histLines = j.logs || []
-    const total = Number(j.total || histLines.length)
+    const incoming = j.logs || []
+    histLines = prepend ? incoming.concat(histLines) : incoming
+    histHasMore = !!j.hasMore
+    histTotal = Number(j.total || histLines.length)
     const shown = histLines.length
     const info = $('histInfo')
     const label = histDay || j.picked?.[0] || '该日'
     if (!j.days?.length) info.textContent = '没有历史日志'
-    // histShowAll 之后 total > shown 只剩一种可能：撞上服务端单次 5 万行上限
-    else if (total > shown && histShowAll) info.textContent = `${label}：共 ${total.toLocaleString()} 行，单次最多取 ${shown.toLocaleString()} 行`
-    else if (total > shown) info.textContent = `${label}：共 ${total.toLocaleString()} 行，显示最后 ${shown.toLocaleString()} 行`
-    else info.textContent = `${label}：共 ${total.toLocaleString()} 行`
-    // 已经拉过全部就别再显示这个按钮——再点一次也是同一份数据
-    $('logAll').hidden = histShowAll || !(total > shown)
-    $('logAll').textContent = `显示全部 ${total.toLocaleString()} 行`
-    if (logMode === 'hist') renderLogs()
+    else if (histShowAll && histTotal > shown) {
+      // 只有撞上服务端单次 5 万行上限才会走到这里
+      info.textContent = `${label}：共 ${histTotal.toLocaleString()} 行，单次最多取 ${shown.toLocaleString()} 行`
+    } else if (histHasMore) {
+      info.textContent = `${label}：共 ${histTotal.toLocaleString()} 行，已显示 ${shown.toLocaleString()} 行（向上滚动加载更早的）`
+    } else {
+      info.textContent = `${label}：共 ${histTotal.toLocaleString()} 行（全部）`
+    }
+    // 已经拉过全部 / 已经没有更早的了，就不显示按钮
+    $('logAll').hidden = histShowAll || !histHasMore
+    $('logAll').textContent = `显示全部 ${histTotal.toLocaleString()} 行`
+    if (logMode === 'hist') renderLogs(prepend ? { keepScroll: true, prevTop, prevH } : {})
   } catch (e) {
     $('histInfo').textContent = '读取失败：' + e.message
+  } finally {
+    histLoading = false
   }
 }
 
@@ -1291,7 +1320,12 @@ function bind() {
   $('cfgReset').onclick = () => loadConfig().catch((e) => { $('cfgStatus').textContent = e.message })
 
   $('logAuto').onchange = () => { if ($('logAuto').checked) startAuto() }
-  $('logClear').onclick = () => { logLines = []; renderLogs() }
+  $('logClear').onclick = () => {
+    if (logMode === 'hist') { histLines = []; histHasMore = false; $('histInfo').textContent = '已清屏（点「刷新」重新读取）' }
+    else if (logMode === 'legacy') { legacyLines = []; $('legacyInfo').textContent = '已清屏（点「重新读取」）' }
+    else logLines = []
+    renderLogs()
+  }
 
   $('reconnect').onclick = async () => {
     port = Number($('port').value) || 8787
@@ -1306,9 +1340,24 @@ function bind() {
   $('logModeNow').onclick = () => setLogMode('now')
   $('logModeHist').onclick = () => setLogMode('hist')
   $('logModeLegacy').onclick = () => setLogMode('legacy')
+  // 滑动窗口：滚到顶部附近就加载更早的行。
+  // 只在历史模式下生效——「本次运行」是滚动日志，没有更早的记录可翻。
+  let wheelLock = 0
+  $('logs').onscroll = () => {
+    if (logMode !== 'hist' || histShowAll || histLoading || !histHasMore) return
+    const box = $('logs')
+    if (box.scrollTop > 150) return
+    const now = Date.now()
+    if (now - wheelLock < 400) return      // 一次滚动会连发很多 scroll 事件，节流
+    wheelLock = now
+    loadLogHistory({ prepend: true })
+  }
+
   $('histDay').onchange = () => {
     histDay = $('histDay').value || ''
     histShowAll = false
+    histLines = []
+    histHasMore = false
     loadLogHistory()
   }
   $('logAll').onclick = () => {
