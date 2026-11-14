@@ -224,7 +224,9 @@ export async function petCareRound(world, cfg, log = () => {}, memo = {}) {
       }
       // 0 动作也是有效观测（GUI 要显示当前等级和三围）；dayXp 是顶层字段，
       // 不并进 before 的话 GUI 会一直显示「今日经验 0/1000」。
-      memo.pet = { ...(memo.pet || {}), ...plan.before, dayXp: plan.dayXpBefore, cap: plan.cap, at: world.now }
+      // day 也要带上：引擎靠它判断这条观测是不是昨天的，跨日要归零。
+      memo.pet = { ...(memo.pet || {}), ...plan.before,
+                   day: petDay(world.now), dayXp: plan.dayXpBefore, cap: plan.cap, at: world.now }
       memo.petCareGapUntil = world.now + Math.max(300, Number(pc.retryGapSec) || 900)
       break
     }
@@ -251,8 +253,9 @@ export async function petCareRound(world, cfg, log = () => {}, memo = {}) {
     memo.pet = {
       level: prog.level ?? plan.after.level,
       xp: prog.xp ?? plan.after.xp,
-      day: prog.day,
-      dayXp: prog.day_xp,
+      // 回执不一定带 day；没有就按这次提交所处的自然日算（引擎靠它判断跨日）
+      day: prog.day || petDay(world.now),
+      dayXp: prog.day_xp ?? plan.dayXpAfter,
       cap: prog.cap ?? plan.cap,
       hunger: plan.after.hunger,
       energy: plan.after.energy,

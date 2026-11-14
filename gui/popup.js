@@ -194,11 +194,19 @@ function renderOverview() {
     : '—'
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
   // 站宠护理：等级 + 今日经验（上限 1000/天）。没有存档时显示 —。
+  // stale = 这条观测是昨天留下的（今天还没护理过），三围也一并标出来。
   const pc = status.pet
   $('petCare').textContent = pc
     ? `Lv${pc.level} · 今日经验 ${fmt(pc.dayXp || 0)}/${fmt(pc.cap || 1000)}` +
-      ` · 饱${Math.round(pc.hunger ?? 0)}/精${Math.round(pc.energy ?? 0)}/洁${Math.round(pc.cleanliness ?? 0)}`
+      ` · 饱${Math.round(pc.hunger ?? 0)}/精${Math.round(pc.energy ?? 0)}/洁${Math.round(pc.cleanliness ?? 0)}` +
+      (pc.stale ? '（昨日）' : '')
     : '—'
+  // 观测时间放 tooltip：数字是从服务端读回来的，不是本地猜的，看的时候心里有数
+  $('petCare').title = pc
+    ? (pc.at ? '上次观测：' + new Date((Number(pc.at) + 8 * 3600) * 1000).toISOString()
+      .replace('T', ' ').slice(0, 16) + '（北京时间）' : '')
+      + (pc.stale ? '\n今天的今日经验按 0 显示，新一轮护理跑完就会更新' : '')
+    : '还没读到站宠存档（第一轮巡视结束后出现）'
 
   const q = w.quotas || {}
   const names = { fish: '钓鱼', mine: '挖矿', craft: '加工', bomb: '炸矿', coffee: '咖啡', npc: '52弟', gomokuPaid: '五子棋计奖', arenaChest: '擂台宝箱' }

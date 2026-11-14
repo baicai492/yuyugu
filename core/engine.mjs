@@ -10,7 +10,7 @@ import { todayStartFromLedger, todayBookFromLog, todayTaxFromLog } from './logfi
 import { loadState, saveState, rollDay, readLedger } from './persist.mjs'
 import { playGomoku, playOther } from './npc.mjs'
 import { arenaDaily } from './arena.mjs'
-import { petCareRound } from './pet-care.mjs'
+import { petCareRound, petDay } from './pet-care.mjs'
 import { helpDaily, stealRound, probeStealable } from './social.mjs'
 import { shouldSnipe, snipeDue, noteSnipeResult, physicalPrepLeadSec, stealGearSwaps, snipeStaminaReservation, snipeWindowOpen, SNIPE_MIN_GAP_SEC } from './steal-schedule.mjs'
 import { xianRound, xianSnapshot } from './xian.mjs'
@@ -47,6 +47,9 @@ export class Engine {
     this.memo = {}                 // 跨轮记忆（今日已帮谁、上次扫偷菜…）
     this.ledger = { day: '', earn: 0, spend: 0, tax: 0, startCoins: 0, startStock: 0 }
     this.status = { state: 'idle', step: '', round: 0, nextAt: 0, lastError: '', lastRun: 0 }
+    // 站宠最近一次观测（等级/今日经验/三围）。不能只挂在 status 上：
+    // 每轮收尾会整个重建 status 对象，挂在上面的字段活不过一轮。
+    this.petInfo = null
     this.externalSoldRatio = {}
     this.history = []
     this.stats = { totalRuns: 0, totalEarn: 0, firstRunAt: 0 }
@@ -69,6 +72,8 @@ export class Engine {
     if (st.helpStall) this.memo.helpStall = st.helpStall
     if (st.gomokuStall) this.memo.gomokuStall = st.gomokuStall
     if (st.stolenAt) this.memo.stolenAt = st.stolenAt
+    // 站宠最近观测：重启后 GUI 立刻有数可显示，不用等第一轮护理跑完
+    if (st.pet && typeof st.pet === 'object') this.petInfo = st.pet
     // 擂台今日场次：重启后不用等打完一轮才知道擂台有没有做完
     if (st.arenaDay) this.memo.arenaDay = st.arenaDay
     if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
@@ -145,6 +150,8 @@ export class Engine {
         gomokuStall: this.memo.gomokuStall || 0,
         // 最近一次被偷的时刻：之后 24 小时都要续守家道具
         stolenAt: this.memo.stolenAt || 0,
+        // 站宠最近观测（等级/今日经验/三围）：落盘后重启也能立刻显示
+        pet: this.petInfo || null,
         // 擂台今日场次（只从 /battle/gear 拿得到）：nextWake 靠它判断擂台是否打完
         arenaDay: this.memo.arenaDay || '',
         arenaToday: this.memo.arenaToday || 0,
@@ -770,7 +777,7 @@ export class Engine {
       try {
         this.setStep('站宠护理')
         const r = await petCareRound(w, cfg, this.log.bind(this), this.memo)
-        if (r?.pet) this.status.pet = r.pet
+        if (r?.pet) this.petInfo = r.pet
         if (r?.saved > 0) didWork = true
       } catch (e) { this.log('站宠护理出错：' + e.message, 'err') }
     }
@@ -1311,6 +1318,22 @@ export class Engine {
 
   stop() { this.running = false }
 
+  /**
+   * 站宠观测的展示副本。
+   *
+   * 存档里的 dayXp 是「观测当时那一天」的经验；跨过自然日（或刚重启、
+   * 当天还没护理过）时把今日经验按 0 显示——服务端每天本来就从 0 起算。
+   * 没有省/市时区歧义：petDay() 和站点前端一样按北京时间自然日。
+   */
+  petView() {
+    const p = this.petInfo
+    if (!p) return null
+    const today = petDay(this.world?.now || Date.now() / 1000)
+    const stale = Boolean(p.day) && p.day !== today
+    if (!stale) return { ...p }
+    return { ...p, dayXp: 0, stale: true }
+  }
+
   /** 给 GUI 的状态快照 */
   statusSnapshot() {
     const w = this.world
@@ -1333,8 +1356,10 @@ export class Engine {
       sleep: this.status.sleep || 0,
       lastError: this.status.lastError || '',
       lastRun: this.status.lastRun || 0,
-      // 站宠：最近一次护理后的等级/经验/三围（GUI 可展示等级进度）
-      pet: this.status.pet || null,
+      // 站宠：最近一次护理后的等级/经验/三围（GUI 可展示等级进度）。
+      // 跨过自然日时「今日经验」必须归零——否则会拿昨天晚上已经刷满的
+      // 1000/1000 冒充今天，看着像没在护理。
+      pet: this.petView(),
       world: w.ready ? {
         now: w.now,
         isleDay: w.isleDay,
