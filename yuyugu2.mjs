@@ -17,7 +17,7 @@ import { createClient } from './core/http.mjs'
 import { loadRules } from './core/rules.mjs'
 import { World } from './core/world.mjs'
 import { Engine } from './core/engine.mjs'
-import { loadConfig, saveConfig } from './core/config.mjs'
+import { loadConfig, saveConfig, configLoadFailed } from './core/config.mjs'
 import { startServer } from './core/server.mjs'
 import { createInterface } from 'node:readline'
 
@@ -30,6 +30,13 @@ const getArg = (k, dflt) => {
 
 const cfg = loadConfig()
 if (has('dry')) cfg.dry = true
+// 重启交棒：旧进程会把「重启那一刻是否在托管」通过环境变量带过来（见 core/server.mjs）。
+// 只在 config.json 正本和 .bak 都读失败时才用它兜底——正常情况一律以文件为准，
+// 否则「用户暂停后重启」会被莫名其妙地重新开起来。
+if (configLoadFailed() && process.env.YYG_RESUME_ENABLED === '1') {
+  cfg.enabled = true
+  console.error('config.json 读不出来，已按重启前状态恢复为「托管中」')
+}
 
 async function main() {
   // ---------- 离线测试五子棋 ----------

@@ -1,5 +1,5 @@
 // 配置：默认值 + 用户覆盖，全部可热改（GUI 直接改这个对象）。
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ROOT } from './rules.mjs'
 
@@ -406,11 +406,38 @@ export function mergeConfig(base, over) {
 }
 
 const CONFIG_FILE = resolve(ROOT, 'config.json')
+const CONFIG_BAK = CONFIG_FILE + '.bak'
+const CONFIG_TMP = CONFIG_FILE + '.tmp'
+
+// 上次 loadConfig 是否读失败（文件被写坏/读空）。重启交棒用它判断要不要用
+// 旧进程带过来的 enabled 兜底，见 yuyugu2.mjs。
+let lastLoadFailed = false
+export function configLoadFailed() { return lastLoadFailed }
 
 export function loadConfig() {
-  let raw = {}
-  if (existsSync(CONFIG_FILE)) {
-    try { raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) } catch (e) { console.error('config.json 解析失败，使用默认值：', e.message) }
+  lastLoadFailed = false
+  let raw = null
+  let err = null
+  // 先读正本，读坏了再读上次成功写入的副本。
+  //
+  // 为什么需要副本：saveConfig 以前是直接 writeFileSync 覆盖，
+  // 该调用会先把文件截断成 0 字节再写。如果重启时新进程恰好在这个窗口里
+  // loadConfig，JSON.parse 会失败，旧代码静默退回 DEFAULTS —— 而
+  // DEFAULTS.enabled 是 false，新进程就成了「暂停」状态，用户得再点一次
+  // 启动（2026-11-14 的偶发现象）。现在写入走 tmp+rename（原子），
+  // 读失败还有 .bak 兜底。
+  for (const f of [CONFIG_FILE, CONFIG_BAK]) {
+    if (!existsSync(f)) continue
+    try {
+      raw = JSON.parse(readFileSync(f, 'utf8'))
+      if (f === CONFIG_BAK && err) console.error('config.json 读取失败，已回退到 config.json.bak：', err.message)
+      break
+    } catch (e) { err = e; raw = null }
+  }
+  if (raw === null) {
+    lastLoadFailed = true
+    if (err) console.error('config.json 及其备份都无法解析，使用默认值（enabled 会变回 false）：', err.message)
+    raw = {}
   }
   return mergeConfig(DEFAULTS, raw)
 }
@@ -430,6 +457,18 @@ export function saveConfig(cfg) {
     return target
   }
   walk(DEFAULTS, cfg, diff)
-  writeFileSync(CONFIG_FILE, JSON.stringify(diff, null, 2), 'utf8')
+  const text = JSON.stringify(diff, null, 2)
+  // 原子写：先写 .tmp 再 rename。rename 在同一分区上是原子的，
+  // 读的一方要么看到旧内容、要么看到新内容，不会读到半截。
+  try {
+    writeFileSync(CONFIG_TMP, text, 'utf8')
+    renameSync(CONFIG_TMP, CONFIG_FILE)
+  } catch (e) {
+    // rename 失败（比如 Windows 上被占用）就退回直接写，至少别丢配置
+    try { unlinkSync(CONFIG_TMP) } catch {}
+    writeFileSync(CONFIG_FILE, text, 'utf8')
+  }
+  // 留一份最近一次成功写入的副本给 loadConfig 兜底
+  try { writeFileSync(CONFIG_BAK, text, 'utf8') } catch {}
   return diff
 }

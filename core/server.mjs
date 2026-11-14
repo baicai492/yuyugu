@@ -273,10 +273,20 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
             const handoff = () => {
               let child = null
               try {
+                // 交棒前把当前配置（尤其是 enabled）落盘。
+                //
+                // 新进程靠 config.json 决定「起来后是继续托管还是暂停」。
+                // 如果文件里还是旧值（比如某次 saveConfig 没写成、或 GUI 的
+                // 开关刚被误触），重启后就会变成暂停，用户得再点一次启动。
+                // 这里以「重启这一刻内存里的状态」为准写一次，让新进程拿到的
+                // 一定是确定的。顺带通过环境变量把 enabled 带过去，作为
+                // config.json 读失败时的兜底（见 core/config.mjs 的 loadConfig）。
+                try { saveConfig(cfg) } catch (e) { engine.log('重启前保存配置失败：' + e.message, 'err') }
                 // 本地日期：toISOString 是 UTC，北京时间 0–8 点会写成前一天
                 const out = openSync(resolve(root, 'logs', `host-${new Date().toLocaleDateString('sv-SE')}.log`), 'a')
                 child = spawn(process.execPath, [main, ...args], {
                   cwd: root, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+                  env: { ...process.env, YYG_RESUME_ENABLED: cfg.enabled ? '1' : '0' },
                 })
                 child.unref()
                 writeFileSync(resolve(root, 'logs', 'yuyugu.pid'), String(child.pid), 'utf8')

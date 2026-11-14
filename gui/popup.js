@@ -1259,7 +1259,15 @@ function bind() {
   // 然后轮询 ping 直到新进程起来，再重新连接。
   $('btnRestart').onclick = async () => {
     const btn = $('btnRestart')
+    const sw = $('enabled')
     btn.disabled = true
+    // 重启空窗期把右上角开关一起锁住。
+    //
+    // 这期间端口是断的，界面看起来像「没在跑」，很容易让人去点开关确认——
+    // 但开关此时是「开」的，一点就成了「关」，直接发 stop 把 enabled 写进
+    // config.json。新进程读到 false 就是暂停状态，用户只好再点一次启动。
+    // 2026-11-14 18:34 的三连重启 + 暂停/启动就是这个路径。
+    sw.disabled = true
     $('statusline').textContent = '正在重启主程序…'
     // 旧进程退出到新进程监听之间有几百毫秒到两秒的空窗。
     // 这期间任何请求都会连接被拒（TypeError: Failed to fetch）：
@@ -1279,14 +1287,19 @@ function bind() {
         try { await api('/api/ping'); up = true; break } catch {}
       }
       if (up) {
+        // connect 里会 await loadStatus()，开关状态和概览数据一起刷新
         await connect()
-        $('statusline').textContent = '已重启，加载的是最新代码'
+        const wasOn = $('enabled').checked
+        $('statusline').textContent = wasOn
+          ? '已重启，加载的是最新代码'
+          : '已重启，但托管处于暂停状态（右上角开关可打开）'
       } else {
         $('statusline').textContent = '重启超过 60 秒没连上，请看 logs/host-*.log'
       }
     } finally {
       restarting = false
       btn.disabled = false
+      sw.disabled = false
     }
   }
 
@@ -1459,9 +1472,11 @@ async function main() {
   port = Number(p) || 8787
   $('port').value = port
   bind()
-  // 先把界面点亮（按钮要能点），再异步连接，避免未连接时界面长时间不响应
-  $('connBox').hidden = false
-  connect().catch(() => {})
+  // 不再一打开弹窗就先亮出「主程序没有运行」：
+  // 大多数时候主程序是在跑的，connect() 一秒内就会把它隐藏，
+  // 中间这一闪反而容易让人误点「启动主程序」按钮。
+  // 现在由 connect() 按真实结果决定显不显示（连不上才显示）。
+  connect().catch(() => { $('connBox').hidden = false })
   startAuto()
 }
 

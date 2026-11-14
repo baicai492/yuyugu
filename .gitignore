@@ -13,6 +13,8 @@ runtime.env
 logs/
 *.log
 ledger.csv
+# config.json 的原子写副本（saveConfig 每次成功写入后留一份，读失败时兜底）
+config.json.bak
 
 # 站点源码快照（体积大，可随时重新下载；需要时用 scripts/fetch-live.mjs 拉）
 live/
