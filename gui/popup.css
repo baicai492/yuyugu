@@ -63,6 +63,14 @@ nav.tabs button.on { background: var(--accent); border-color: var(--accent); col
 .up { color: var(--up); }
 .down { color: var(--down); }
 .muted { color: var(--muted); }
+
+/* 修仙「资料」类卡片的可滚动明细列表（人脉、功法、试炼等） */
+.xlist { display: grid; gap: 5px; margin-top: 6px; max-height: 230px; overflow-y: auto; }
+.xitem { font-size: 11px; line-height: 1.5; padding: 4px 7px; background: var(--soft); border-radius: 6px; }
+.xitem .dim { color: var(--muted); }
+.xitem .ok { color: var(--up); }
+.xitem .bad { color: var(--down); }
+.xitem .tag { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 999px; background: var(--card); color: var(--accent); font-size: 10px; }
 .note { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 6px; }
 .note b { color: var(--fg); }
 

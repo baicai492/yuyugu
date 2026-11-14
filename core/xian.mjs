@@ -13,11 +13,13 @@
 //   2) 炼丹出炉：BREW_MIN=15 秒，19 秒后出炉稳定拿上品（3 颗）。
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
-  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FIGHT_COST, FIGHT_DAILY, FUSIONS,
-  HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS,
-  RLM_DAILY, RLM_EN,
-  ROOT_GROW, STAGES, STORY_END, TECH_PRICE, TECHS,
-  act as xsAct, canMax, cvNeed, fuseKey, medBonus, rootMult, tick as xsTick,
+  BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
+  HERBS, LV_NEED, MED_MAX, MED_MIN, NEW_NPCS, PILL_DAILY, PILLS, PLOTS, REALMS, REL,
+  RLM_DAILY, RLM_EN, ROOTS,
+  ROOT_GROW, STAGES, STORY_END, TECH_BUFF, TECH_PRICE, TECHS,
+  act as xsAct, breakRate, canMax, cvNeed, favTier, fuseKey, layerNeed, medBonus,
+  myHp, mySlots, plotView, powerOf, rootMult, skill, techEff, techLayer,
+  tick as xsTick, xsLuck, xsMind,
 } from './xian-rules.mjs'
 
 export {
@@ -995,6 +997,106 @@ export function xianSnapshot(world, cfg = {}) {
   const pillUse = sim.dp?.d === today ? Number(sim.dp.n || 0) : 0
   const fightUse = sim.df?.d === today ? Number(sim.df.n || 0) : 0
 
+  // ---------- 明细：战力、功法、灵根、试炼、人脉、丹方、田亩 ----------
+  // 全部从本地存档按规则算，不为面板额外发请求。GUI 的「资料」卡片会全量展示。
+  const allRootEls = [...(sim.roots?.e || []), ...(sim.roots?.v || [])]
+  const slotIds = mySlots(sim) || []
+  const combat = {
+    hp: myHp(sim),
+    // powerOf = (1 + 0.3×大境界 + 0.03×层数) × 灵根效率 × 功法倍率，和 meFighter 同一套
+    power: Number(powerOf(sim).toFixed(3)),
+    rootEffect: techEff(sim),                                  // 单灵根 1.5，多灵根 1
+    cultivateMul: Number(rootMult(sim).toFixed(3)),            // 修炼速度倍率
+    meditateMul: Number(medBonus(sim).toFixed(2)),             // 打坐加成（心境 + 人脉）
+    mind: xsMind(sim),
+    luck: xsLuck(sim),
+    breakRate: Number(breakRate(sim).toFixed(2)),              // 突破成功率
+    slots: slotIds.map((id) => ({ id, name: skill(id)?.n || id })),
+  }
+
+  const techDetail = (sim.techs || []).map((el) => {
+    const L = techLayer(sim, el)
+    const m = Number(sim.tm?.[el] || 0)
+    const need = layerNeed(L)                                   // 到下一层要的总熟练
+    return {
+      id: el,
+      name: TECHS[el]?.name || el,
+      element: ROOTS[TECHS[el]?.el || el] || '',
+      layer: L, maxLayer: 9,
+      mastery: m, nextNeed: need, nextIn: Math.max(0, need - m),
+      buff: TECH_BUFF[el] || '',
+      spells: TECHS[el]?.spells || [],
+      main: el === sim.tech,
+    }
+  })
+
+  const rootDetail = {
+    elements: (sim.roots?.e || []).map((id) => ({ id, name: ROOTS[id] || id })),
+    variants: (sim.roots?.v || []).map((id) => ({ id, name: ROOTS[id] || id })),
+    count: allRootEls.length,
+    // 融合只能拿基础灵根两两配（变异灵根不参与组合）。
+    fusion: Object.entries(FUSIONS).map(([key, F]) => {
+      const [a, b] = key.split('+')
+      return {
+        key, a, b, aName: ROOTS[a] || a, bName: ROOTS[b] || b,
+        id: F.id, name: F.name,
+        possible: (sim.roots?.e || []).includes(a) && (sim.roots?.e || []).includes(b),
+      }
+    }).filter((f) => f.possible),
+    fusionReady: Number(sim.cv?.r || 0) >= 1,                   // 筑基之后才能融合
+    fusionCost: { peiyuan: 2, stone: 200, rate: 0.55 },
+  }
+
+  // 试炼（STAGES）：首通给培元丹，但战斗是弹幕小游戏，只能真人点——
+  // xsFight/xsWin 在 FORBIDDEN_XIAN_ACTIONS 里，托管永远不会提交。
+  const stages = Object.entries(STAGES).map(([id, S]) => ({
+    id, name: S.name,
+    stone: S.stone,
+    need: S.need,
+    needRealm: REALMS[S.need] || `境界 ${S.need}`,
+    cleared: Boolean(sim.clear?.[id]),
+    canEnter: Number(sim.cv?.r || 0) >= S.need,
+    manual: true,
+  }))
+
+  // 人脉：好感档位 / 关系 / 往事进度（npc[id] = [好感, 关系, 已过章节, ...]）
+  const relations = Object.entries(sim.npc || {})
+    .map(([id, v]) => {
+      const fav = Number(v?.[0] || 0)
+      const rel = Number(v?.[1] || 0)
+      const tier = favTier(fav)
+      return {
+        id, name: NEW_NPCS[id] || id,
+        fav, tier, tierName: FAV_NAME[tier] || '',
+        rel, relName: REL[rel] || '',
+        chapters: Number(v?.[2] || 0),
+      }
+    })
+    .sort((a, b) => b.fav - a.fav || String(a.id).localeCompare(String(b.id)))
+
+  const recipes = Object.entries(PILLS).map(([id, P]) => {
+    const need = Object.entries(P.need || {}).map(([k, n]) => ({
+      id: k, name: HERBS[k]?.name || k, need: n, have: Number(sim.bag?.[k] || 0),
+    }))
+    return { id, name: P.name, sell: P.sell, need, can: need.every((x) => x.have >= x.need) }
+  })
+
+  // 田亩按作物归组（24 块逐条列太吵），只给株数、成熟数和「最早还要多久」。
+  const byHerb = {}
+  for (const p of sim.plots || []) {
+    if (!p?.c) continue
+    const e = byHerb[p.c] || (byHerb[p.c] = {
+      id: p.c, name: HERBS[p.c]?.name || p.c, count: 0, mature: 0, dry: 0, minLeft: null,
+    })
+    e.count++
+    if (p.g >= 3) { e.mature++; continue }
+    if (!p.w) { e.dry++; continue }                             // 还没浇水，没有「剩余时间」
+    const left = Math.max(0, Number(plotView(p, t).left || 0))
+    if (e.minLeft == null || left < e.minLeft) e.minLeft = left
+  }
+  const plotsByHerb = Object.values(byHerb)
+    .sort((a, b) => b.count - a.count)
+
   return {
     exists: true,
     enabled: Boolean(xc.enabled),
@@ -1044,5 +1146,18 @@ export function xianSnapshot(world, cfg = {}) {
     nextWakeIn: Number.isFinite(nextWake) ? Math.max(0, Math.round(nextWake - t)) : -1,
     reason: world?.xianReason || '',
     fight: sim.fight ? { stage: sim.fight.s, at: sim.fight.t } : null,
+    // 全量明细（GUI「资料」卡片）。字段都是纯展示，托管决策不读它们。
+    detail: {
+      combat,
+      techs: techDetail,
+      roots: rootDetail,
+      stages,
+      relations,
+      recipes,
+      plotsByHerb,
+      mats: { ...(sim.mat || {}) },
+      // 今日同门斗法（xsAb）胜场，和试炼/秘境分开统计
+      duelWins: sim.tw?.d === today ? Number(sim.tw.n || 0) : 0,
+    },
   }
 }

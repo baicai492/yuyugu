@@ -66,6 +66,12 @@ try {
   await page.setViewportSize({ width: 444, height: 720 })
   await page.goto(`chrome-extension://${id}/popup.html`)
   await page.waitForTimeout(3500)
+  // 非默认端口（比如指向假服务做 UI 自测）时，先写进 storage 再重新加载
+  if (port !== 8787) {
+    await page.evaluate((p) => chrome.storage.local.set({ port: p }), port)
+    await page.reload()
+    await page.waitForTimeout(3500)
+  }
 
   // 读关键元素
   const probe = await page.evaluate(() => ({
@@ -95,6 +101,26 @@ try {
   }))
   console.log('\n=== 市场页 ===')
   console.log(JSON.stringify(marketProbe, null, 2))
+
+  // 切到修仙页
+  await page.click('button[data-tab="xian"]')
+  await page.waitForTimeout(2500)
+  const xianProbe = await page.evaluate(() => {
+    const txt = (id) => document.getElementById(id)?.textContent
+    const count = (id) => document.querySelectorAll(`#${id} > *`).length
+    return {
+      realm: txt('xRealm'), stone: txt('xStone'), plotDetail: txt('xPlotDetail'),
+      combatRows: count('xCombat'), rootsRows: count('xRoots'),
+      stages: count('xStages'), npc: count('xNpc'), recipes: count('xRecipes'),
+      combat: txt('xCombat'),
+      stagesText: [...(document.querySelectorAll('#xStages > *') || [])].map((e) => e.textContent),
+      npcFirst: document.querySelector('#xNpc > *')?.textContent,
+      recipesText: [...(document.querySelectorAll('#xRecipes > *') || [])].map((e) => e.textContent),
+    }
+  })
+  console.log('\n=== 修仙页 ===')
+  console.log(JSON.stringify(xianProbe, null, 2))
+  await page.screenshot({ path: path.join(ROOT, 'research', 'gui-xian.png'), fullPage: true })
 
   // 切到设置页
   await page.click('button[data-tab="settings"]')

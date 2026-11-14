@@ -280,6 +280,7 @@ const SPELL_NAMES = {
   lava1: '地火', lava2: '岩浆潮', poison1: '瘴雾', poison2: '蛊潮',
 }
 const MAT_NAMES = { xuantie: '玄铁', lingyu: '灵玉', yaodan: '妖丹' }
+const FAV_NAMES = ['陌生', '熟识', '好友', '挚友', '知己']
 const nm = (map, id) => map[id] || id
 const fmtSec = (s) => {
   const n = Math.max(0, Math.round(Number(s) || 0))
@@ -292,14 +293,183 @@ const countList = (obj, map) => Object.entries(obj || {})
   .map(([id, n]) => `${nm(map, id)}×${n}`)
   .join(' ')
 
+// 修仙明细卡片的小工具：一行 label/value（可选 tooltip）
+function xRow(label, value, title) {
+  const d = document.createElement('div')
+  d.className = 'card-row'
+  const s = document.createElement('span')
+  s.textContent = label
+  const b = document.createElement('b')
+  b.textContent = value
+  d.append(s, b)
+  if (title) d.title = title
+  return d
+}
+
+// 一条明细：lines 是若干行，每行是若干 { text, cls, bold } 片段。
+// 用 DOM 拼而不是 innerHTML：存档里的 id 是服务端数据，不该当 HTML 解释。
+function xItem(lines) {
+  const el = document.createElement('div')
+  el.className = 'xitem'
+  for (const line of lines) {
+    const p = document.createElement('div')
+    for (const part of line) {
+      if (part?.text == null || part.text === '') continue
+      const s = document.createElement('span')
+      if (part.cls) s.className = part.cls
+      if (part.bold) {
+        const b = document.createElement('b')
+        b.textContent = part.text
+        s.append(b)
+      } else s.textContent = part.text
+      p.append(s)
+    }
+    if (p.childNodes.length) el.append(p)
+  }
+  return el
+}
+
+// 修仙资料卡：战力/功法、灵根/融合、试炼、人脉、丹方、地里作物。
+// 数据来自 xianSnapshot 的 detail 字段（全部按本地规则算，不额外发请求）。
+function renderXianDetail(D) {
+  const ids = ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes']
+  if (!D) {
+    for (const id of ids) $(id).replaceChildren()
+    $('xPlotDetail').textContent = '—'
+    return
+  }
+
+  // ---------- 战力与功法 ----------
+  const c = D.combat || {}
+  const combatRows = [
+    xRow('战力', Number(c.power || 0).toFixed(2), '（境界 + 层数）× 灵根效率 × 功法倍率，和战斗模拟同一套'),
+    xRow('气血', fmt(c.hp || 0)),
+    xRow('灵根效率', '×' + (c.rootEffect ?? 1), '单灵根 ×1.5；多灵根 ×1'),
+    xRow('修炼倍率', '×' + (c.cultivateMul ?? 1), '根数越少前期越快、越多后期越强；变异灵根每个再 +12%'),
+    xRow('打坐加成', '×' + (c.meditateMul ?? 1), '心境越高、结为师父/道侣的人越多，打坐收益越高'),
+    xRow('突破成功率', Math.round((c.breakRate ?? 0) * 100) + '%', '失败会掉修为，心境/气运越高越稳'),
+    xRow('心境 / 气运', `${c.mind ?? 0} / ${c.luck ?? 0}`),
+    xRow('今日斗法胜场', String(D.duelWins ?? 0)),
+    xRow('技能槽', (c.slots || []).map((s) => s.name).join(' → ') || '—'),
+  ]
+  const techList = document.createElement('div')
+  techList.className = 'xlist'
+  for (const t of D.techs || []) {
+    const full = t.layer >= t.maxLayer
+    techList.append(xItem([
+      [
+        { text: t.name, bold: true },
+        ...(t.main ? [{ text: ' 主修', cls: 'tag' }] : []),
+        { text: `  ${t.element} · 第 ${t.layer}/${t.maxLayer} 层`, cls: 'dim' },
+      ],
+      [
+        { text: `熟练 ${t.mastery}/${t.nextNeed}`, cls: 'dim' },
+        { text: full ? ' · 已满层' : ` · 再 ${t.nextIn} 到下一层`, cls: full ? 'ok' : 'dim' },
+        { text: `  ·  被动：${t.buff}`, cls: 'dim' },
+      ],
+    ]))
+  }
+  if (!(D.techs || []).length) techList.append(xItem([[{ text: '还没学功法（去藏经阁学一部）', cls: 'dim' }]]))
+  $('xCombat').replaceChildren(...combatRows, techList)
+
+  // ---------- 灵根与融合 ----------
+  const R = D.roots || {}
+  const rootRows = [
+    xRow('基础灵根', (R.elements || []).map((e) => e.name).join(' ') || '—'),
+    xRow('变异灵根', (R.variants || []).map((e) => e.name).join(' ') || '无'),
+    xRow('根数', `${R.count ?? 0} 根`, '融合会减一根，且不可逆'),
+  ]
+  const fuseList = document.createElement('div')
+  fuseList.className = 'xlist'
+  for (const f of R.fusion || []) {
+    fuseList.append(xItem([
+      [
+        { text: `${f.aName}+${f.bName} → ${f.name}灵根`, bold: true },
+        { text: '  成功率 55%', cls: 'dim' },
+      ],
+      [{
+        text: R.fusionReady ? '可融合：需培元丹 ×2 + 灵石 200' : '需筑基之后才能融合（当前未到）',
+        cls: R.fusionReady ? 'ok' : 'dim',
+      }],
+    ]))
+  }
+  if (!(R.fusion || []).length) fuseList.append(xItem([[{ text: '当前灵根没有可融合的组合', cls: 'dim' }]]))
+  $('xRoots').replaceChildren(...rootRows, fuseList)
+
+  // ---------- 试炼 ----------
+  const stageList = document.createElement('div')
+  stageList.className = 'xlist'
+  for (const st of D.stages || []) {
+    stageList.append(xItem([
+      [
+        { text: st.name, bold: true },
+        { text: st.cleared ? '  已首通' : '  未通关', cls: st.cleared ? 'ok' : 'dim' },
+        { text: `  ${st.needRealm}可进 · 基础 ${st.stone} 灵石`, cls: 'dim' },
+        ...(st.canEnter ? [] : [{ text: '  （境界不足）', cls: 'bad' }]),
+      ],
+      [{ text: '首通给培元丹 ×1；战斗是弹幕小游戏，托管不会提交，只能手动点', cls: 'dim' }],
+    ]))
+  }
+  $('xStages').replaceChildren(stageList)
+
+  // ---------- 人脉 ----------
+  const rel = D.relations || []
+  const tiers = [0, 0, 0, 0, 0]
+  for (const r of rel) tiers[r.tier] = (tiers[r.tier] || 0) + 1
+  const npcRows = [
+    xRow('已结识', `${rel.length} 位`),
+    xRow('好感分布', FAV_NAMES.map((n, i) => `${n} ${tiers[i] || 0}`).join(' · '), '好感：陌生 <100 · 熟识 100 · 好友 300 · 挚友 600 · 知己 900'),
+  ]
+  const npcList = document.createElement('div')
+  npcList.className = 'xlist'
+  for (const r of rel) {
+    npcList.append(xItem([[
+      { text: r.name, bold: true },
+      { text: `  ${r.tierName} ${r.fav}`, cls: 'dim' },
+      ...(r.relName ? [{ text: `  ${r.relName}`, cls: 'ok' }] : []),
+      ...(r.chapters ? [{ text: `  往事 ${r.chapters} 章`, cls: 'dim' }] : []),
+    ]]))
+  }
+  if (!rel.length) npcList.append(xItem([[{ text: '还没结识任何人', cls: 'dim' }]]))
+  $('xNpc').replaceChildren(...npcRows, npcList)
+
+  // ---------- 丹方 ----------
+  const recList = document.createElement('div')
+  recList.className = 'xlist'
+  for (const p of D.recipes || []) {
+    recList.append(xItem([
+      [
+        { text: p.name, bold: true },
+        { text: p.can ? '  材料齐' : '  缺材料', cls: p.can ? 'ok' : 'bad' },
+        { text: `  参考卖价 ${p.sell} 灵石`, cls: 'dim' },
+      ],
+      [{
+        text: (p.need || []).map((n) => `${n.name} ${n.have}/${n.need}`).join(' · '),
+        cls: 'dim',
+      }],
+    ]))
+  }
+  $('xRecipes').replaceChildren(recList)
+
+  // ---------- 地里作物（按作物归组） ----------
+  const ph = D.plotsByHerb || []
+  $('xPlotDetail').textContent = ph.length
+    ? ph.map((e) => `${e.name}×${e.count}` +
+        (e.mature ? `（熟 ${e.mature}）` : '') +
+        (e.dry ? `（待浇 ${e.dry}）` : '') +
+        (e.minLeft != null ? `（最早 ${fmtSec(e.minLeft)}）` : '')).join(' · ')
+    : '—'
+}
+
 function renderXian() {
   const x = xian
   const on = !!config?.xian?.enabled
   $('xEnabled').checked = on
   if (!x || !x.exists) {
     $('xStatus').textContent = x?.error ? '读取失败：' + x.error : '读取中…'
-    for (const id of ['xRealm', 'xCv', 'xStone', 'xGarden', 'xEnergy', 'xCan', 'xPlots', 'xGround', 'xBag', 'xBrew', 'xMed', 'xTech', 'xWake',
+    for (const id of ['xRealm', 'xCv', 'xStone', 'xGarden', 'xEnergy', 'xCan', 'xPlots', 'xGround', 'xPlotDetail', 'xBag', 'xBrew', 'xMed', 'xTech', 'xWake',
       'xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
+    for (const id of ['xCombat', 'xRoots', 'xStages', 'xNpc', 'xRecipes']) $(id).replaceChildren()
     return
   }
   $('xRealm').textContent = `${x.realm}${x.stage ? x.stage + ' 层' : ''}`
@@ -345,6 +515,9 @@ function renderXian() {
   } else {
     for (const id of ['xAssets', 'xAssetHerbs', 'xAssetPills', 'xAssetDaily', 'xAssetClears']) $(id).textContent = '—'
   }
+
+  // 资料卡：战力/功法、灵根/融合、试炼、人脉、丹方、地里作物
+  renderXianDetail(x.detail)
 
   // 控件回填（避免用户刚点完又被轮询覆盖时跳回去）
   if (document.activeElement !== $('xBreak') && config?.xian?.breakMode && $('xBreak').value !== config.xian.breakMode) {
