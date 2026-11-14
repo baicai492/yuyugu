@@ -771,6 +771,91 @@ console.log('\n[新] 站宠护理')
   }
 }
 
-console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
+console.log('\n[新] HTTP 重试边界')
+{
+  const { createClient } = await import('../core/http.mjs')
+  const realFetch = globalThis.fetch
+  const mkRes = (status, body = {}) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => JSON.stringify(body),
+  })
+  let calls = 0
+  const stub = (fn) => { calls = 0; globalThis.fetch = async (...a) => { calls++; return fn(calls, ...a) } }
+  const c = createClient({ baseUrl: 'http://x', cookie: 'c', minGap: 0, timeoutMs: 1000 })
+  try {
+    // 1) 非幂等 + 网络错误：服务端可能已经执行了，绝不能重发
+    stub(() => { throw new Error('ECONNRESET') })
+    let err = null
+    try { await c.post('/api/pet/battle/chest', {}) } catch (e) { err = e }
+    ok('非幂等网络失败不重试', calls === 1 && Boolean(err), `calls=${calls}`)
 
+    // 2) 幂等（带 operation UUID）：服务端会去重，可以安全重发
+    stub((n) => { if (n === 1) throw new Error('ECONNRESET'); return mkRes(200, { ok: 1 }) })
+    const r = await c.post('/api/pet/world/act', { operation: 'u1', actions: [] })
+    ok('带 operation 的网络失败会重试', calls === 2 && r.ok === 1, `calls=${calls}`)
+
+    // 3) 非幂等 + 5xx：同样可能已执行
+    stub(() => mkRes(500, { error: 'boom' }))
+    err = null
+    try { await c.post('/api/pet/world/help', {}) } catch (e) { err = e }
+    ok('非幂等 5xx 不重试', calls === 1 && err?.message === 'boom', `calls=${calls}`)
+
+    // 4) 429 是服务端明确拒绝（没执行），任何请求都可以退避重试
+    stub((n) => (n === 1 ? mkRes(429, { retry: 1 }) : mkRes(200, { ok: 2 })))
+    const r2 = await c.post('/api/pet/world/help', {})
+    ok('429 对非幂等也重试', calls === 2 && r2.ok === 2, `calls=${calls}`)
+
+    // 5) GET 不受影响
+    stub(() => mkRes(200, { ok: 3 }))
+    const r3 = await c.get('/api/pet/world')
+    ok('GET 正常返回', r3.ok === 3 && calls === 1, `calls=${calls}`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+console.log('\n[新] 服务端时钟校准')
+{
+  const { createClient } = await import('../core/http.mjs')
+  const realFetch = globalThis.fetch
+  const mkJson = (body) => ({ status: 200, ok: true, text: async () => JSON.stringify(body) })
+  // skewSec > 0 表示服务端比本机快
+  const clientWithSkew = (skewSec) => {
+    const c = createClient({ baseUrl: 'http://x', cookie: 'c', minGap: 0, timeoutMs: 1000 })
+    globalThis.fetch = async () => mkJson({ now: Math.floor(Date.now() / 1000) + skewSec, ok: 1 })
+    return c
+  }
+  try {
+    // 1) 无样本：偏移为 0（不要凭空猜）
+    const c0 = createClient({ baseUrl: 'http://x', cookie: 'c', minGap: 0, timeoutMs: 1000 })
+    ok('没有样本时偏移为 0', c0.serverOffsetMs === 0, `offset=${c0.serverOffsetMs}`)
+
+    // 2) 服务端比本机快 5 秒：偏移必须为正且量级对（秒截断最多吃掉 999ms）
+    const ahead = clientWithSkew(5)
+    await ahead.get('/api/pet/world')
+    const dAhead = ahead.estimatedServerNowMs() - Date.now()
+    ok('服务端快 5 秒时偏移为正且量级对', dAhead > 3800 && dAhead < 5600, `Δ=${Math.round(dAhead)}ms`)
+
+    // 3) 服务端比本机慢 5 秒：偏移为负；取靠近 0 的端点（宁可早醒，不能晚到）
+    const behind = clientWithSkew(-5)
+    await behind.get('/api/pet/world')
+    const dBehind = behind.estimatedServerNowMs() - Date.now()
+    ok('服务端慢 5 秒时偏移为负', dBehind < -3800 && dBehind > -5600, `Δ=${Math.round(dBehind)}ms`)
+
+    // 4) 两边基本同步：区间含 0，偏移归零（避免无意义抖动）
+    const synced = clientWithSkew(0)
+    await synced.get('/api/pet/world')
+    ok('本地与服务端同步时偏移归零', synced.serverOffsetMs === 0, `offset=${synced.serverOffsetMs}`)
+
+    // 5) 秒、毫秒两个版本一致
+    const s1 = ahead.estimatedServerNowSec()
+    const ms1 = Math.floor(ahead.estimatedServerNowMs() / 1000)
+    ok('estimatedServerNowSec 与 ms 版本一致', Math.abs(s1 - ms1) <= 1, `sec=${s1} ms=${ms1}`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)

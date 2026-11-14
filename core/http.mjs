@@ -22,6 +22,41 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
   let lastRttMs = 600
   const stats = { get: 0, post: 0, errors: 0, lastError: '', lastOkAt: 0, lastPostAt: 0 }
 
+  // 服务端时钟区间校准：每拿到一次带 now 的回执就收窄一次偏移区间。
+  // 单次估计的误差上限是一整个 RTT（服务端是在请求发出到响应读完之间某一刻处理的），
+  // 直接写成 serverNow − 本地收到时刻 会系统性偏小 RTT/2，实测能差 1.1 秒——
+  // 而偷菜掐点是按秒抢的，晚 1 秒就是「目标数据 0 秒前拿到，0 处」。
+  // 多个样本取交集后区间会收敛到几十毫秒。
+  let offsetLoMs = null, offsetHiMs = null, lastClockSampleAtMs = 0
+  function observeServerSec(serverSec, startMs, endMs) {
+    const s = Number(serverSec)
+    if (!Number.isFinite(s) || s <= 0) return
+    // serverSec = floor(serverTrueMs / 1000) 发生在 t ∈ [startMs, endMs]
+    // → s*1000 − endMs ≤ 真实偏移 ≤ s*1000 + 999 − startMs
+    const lo = s * 1000 - endMs
+    const hi = s * 1000 + 999 - startMs
+    if (offsetLoMs == null) { offsetLoMs = lo; offsetHiMs = hi }
+    else {
+      // 允许本地时钟自身漂移（每小时 ≤ 1.8 秒），否则交集会被漂移锁死
+      const elapsed = Math.max(0, endMs - lastClockSampleAtMs)
+      const drift = Math.min(250, Math.ceil(elapsed * 0.0005))
+      const nlo = Math.max(offsetLoMs - drift, lo)
+      const nhi = Math.min(offsetHiMs + drift, hi)
+      // 交集空了说明本地时钟跳变过（休眠/校时），重新开始
+      if (nlo <= nhi) { offsetLoMs = nlo; offsetHiMs = nhi }
+      else { offsetLoMs = lo; offsetHiMs = hi }
+    }
+    lastClockSampleAtMs = endMs
+  }
+  function serverOffsetMs() {
+    if (offsetLoMs == null) return 0
+    // 区间含 0：本地时钟就在误差内；否则取离 0 最近的端点——
+    // 宁可早醒等一会儿，也不能晚到（晚到货就没了）。
+    if (offsetLoMs <= 0 && 0 <= offsetHiMs) return 0
+    const near = 0 < offsetLoMs ? offsetLoMs : offsetHiMs
+    return Math.abs(near) <= 120 ? 0 : near
+  }
+
   // POST 串行化：保证同一时刻只有一个 POST 在飞，且间隔 ≥ minGap
   function serialize(fn) {
     const run = queueTail.then(async () => {
@@ -51,8 +86,12 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
         signal: AbortSignal.timeout(timeoutMs),
       })
       const text = await res.text()
+      const endMs = Date.now()
       let json = {}
       try { json = text ? JSON.parse(text) : {} } catch { json = { raw: text.slice(0, 500) } }
+      // 回执里的 now（秒）是服务端处理请求的时刻。只认合理时间戳范围，
+      // 免得把某些接口里同名的布尔/小数值当成时钟。
+      if (Number.isFinite(json?.now) && json.now > 1e9) observeServerSec(json.now, t0, endMs)
       return { res, json, text }
     } finally {
       // 失败也记：抢解禁时要按「最近一次真实往返」估提前量，不是理想值。
@@ -64,6 +103,12 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
   async function request(path, { method = 'GET', body, retries = 3, keepalive = false } = {}) {
     const doOnce = () => once(path, { method, body, keepalive })
     const call = method === 'POST' ? () => serialize(doOnce) : doOnce
+    // 重试边界：网络失败和 5xx 都可能意味着「服务端已经执行了，只是回执没回来」。
+    // 带 operation UUID 的 POST 服务端会按它去重，重发安全（世界动作 / 擂台 / 站宠存档）；
+    // 其它 POST（buy / sell / harvest / chest / visit / equip…）重发就是重复买、
+    // 重复卖、重复领奖 —— 宁可让这一条失败，等下一轮用最新世界状态重来。
+    // 429 是例外：服务端明确拒绝了，没执行，任何请求都可以退避后重试。
+    const idempotent = method !== 'POST' || Boolean(body && typeof body.operation === 'string' && body.operation)
 
     let lastErr
     for (let attempt = 0; attempt <= retries; attempt++) {
@@ -71,7 +116,7 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
       try { out = await call() }
       catch (e) {
         lastErr = e
-        if (attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue }
+        if (idempotent && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue }
         stats.errors++; stats.lastError = e.message
         throw new Error(`请求失败：${e.message}（${path}）`)
       }
@@ -91,7 +136,7 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
       }
       if (res.status >= 500) {
         lastErr = new Error(json.error || `HTTP ${res.status}`)
-        if (attempt < retries) { await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); continue }
+        if (idempotent && attempt < retries) { await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); continue }
         stats.errors++; stats.lastError = lastErr.message
         throw lastErr
       }
@@ -117,6 +162,11 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
     //   actPrep = 剩余 act 冷却 + minGap + 2×RTT
     // 用它才能保证「解禁前把口粮吃完、道具买好」，而不是解禁后才排队。
     get lastRttMs() { return lastRttMs },
+    // 服务端时钟：毫秒精度的「此刻」估计 + 当前偏移（毫秒）。
+    // clockNowMs() 型调用一律走这里，别再拿 Date.now() 直接跟服务端时刻比。
+    get serverOffsetMs() { return serverOffsetMs() },
+    estimatedServerNowMs: () => Date.now() + serverOffsetMs(),
+    estimatedServerNowSec: () => Math.floor((Date.now() + serverOffsetMs()) / 1000),
     getRemainingPostCooldownMs: () => Math.max(0, minGap * 1000 - (Date.now() - lastPostAt)),
     // 世界状态 / 动作
     world: () => request('/api/pet/world'),

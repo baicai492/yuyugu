@@ -1019,7 +1019,10 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
       // 就对不上了。线上 11-13 的 33 次偷菜失败里有 21 次是
       // 「目标数据 0~8 秒前拿到，1 处」——访问刚拿到最新数据，提交时却用旧条目。
       const SNIPE_WAIT_MAX_SEC = 20
-      const realNow = Date.now() / 1000
+      // 掐点一律用服务端时钟（client 用每次带 now 的回执校准，误差几十毫秒），
+      // 不能用 Date.now()：实测本地比服务端慢 1.10 秒，晚 1 秒就是「货 0 秒前被人拿走」。
+      const serverNowSec = () => world.clockNowMs() / 1000
+      const realNow = serverNowSec()
       const out = []
       const skipped = []
       for (const c of cands) {
@@ -1065,7 +1068,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
         // steal=false 直接拒掉，所以宁可在这里等到点，也不发无效请求。
         const waveAt = Math.min(...out.map((o) => o.at).filter((x) => Number.isFinite(x)))
         const waitMs = Number.isFinite(waveAt)
-          ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+          ? Math.round((waveAt - serverNowSec() + 0.3) * 1000)
           : 0
 
         // 战前准备：拉装备页 + 用对手档案模拟这一波每家的守家胜率。
@@ -1087,7 +1090,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
           try { await ensureThiefItems(world, cfg, log) } catch {}
           const sleepUntilUnlock = async () => {
             const ms = Number.isFinite(waveAt)
-              ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+              ? Math.round((waveAt - serverNowSec() + 0.3) * 1000)
               : 0
             if (ms > 0) {
               log(`偷菜：换好守家装，距解禁还有 ${(ms / 1000).toFixed(1)} 秒，等到点再动手`)
@@ -1132,7 +1135,7 @@ export async function stealRound(world, cfg, log = () => {}, memo = {}, { forceS
         // 别让一次买道具的 POST 把提交拖到窗口之后。
         if (waitMs > 3000) await ensureThiefItems(world, cfg, log)
         const leftMs = Number.isFinite(waveAt)
-          ? Math.round((waveAt - Date.now() / 1000 + 0.3) * 1000)
+          ? Math.round((waveAt - serverNowSec() + 0.3) * 1000)
           : 0
         if (leftMs > 0) {
           log(`偷菜：访问完 ${out.length} 家，距解禁还有 ${(leftMs / 1000).toFixed(1)} 秒，等到点再动手`)

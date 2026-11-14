@@ -87,7 +87,8 @@ export class Engine {
       this.memo.stealState = st.stealState
     } else {
       const legacy = {}
-      const now = Math.floor(Date.now() / 1000)
+      // 迁移时间戳也走服务端时钟：这些 cooldown/until 之后会和服务端时刻比较
+      const now = Math.floor((this.world?.clockNowMs?.() ?? Date.now()) / 1000)
       for (const [id, at] of Object.entries(st.stealLoseAt || {})) {
         legacy[id] = { lossCount: 1, lastLossAt: Number(at) || 0, needSync: false, cooldownUntil: 0, blockedUntil: 0, blockedReason: '' }
       }

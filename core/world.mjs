@@ -119,9 +119,22 @@ export class World {
    *
    * 只往前推，不往回退：服务端快照里的时间永远是下界。
    */
+  /**
+   * 毫秒精度的「服务端此刻」。
+   *
+   * 掐点决策必须用它，不能用 Date.now()：两者的差值实测能到 1.1 秒，
+   * 而偷菜解禁是按秒抢的。客户端会用每次带 now 的回执收窄偏移区间
+   * （见 core/http.mjs 的 observeServerSec），比单次「now − 收到时刻」准得多。
+   */
+  clockNowMs() {
+    const c = this.client
+    if (typeof c?.estimatedServerNowMs === 'function') return c.estimatedServerNowMs()
+    return Date.now() + (this.clockOffset || 0) * 1000
+  }
+
   tickClock() {
     if (!this.snapshotNow) return this.now
-    const est = Math.floor(Date.now() / 1000 + (this.clockOffset || 0))
+    const est = Math.floor(this.clockNowMs() / 1000)
     if (est > this.now) this.now = est
     return this.now
   }
