@@ -169,7 +169,7 @@ function chooseLoadout(x, opts) {
 // ---------------- 秘境 ----------------
 
 function planRealm(A_, x, now, opts) {
-  // 已在秘境里：直接续；否则先选一处进（优先没通关过的、越靠后越好）
+  // 已在秘境里：接着走；否则先选一处进（优先没通关过的、越靠后越好）
   let acts = []
   let sim
   const hadRlm = Boolean(x.rlm)
@@ -191,49 +191,73 @@ function planRealm(A_, x, now, opts) {
   }
 
   const base = bagValue(sim)
-  const start = { x: sim, acts, val: 0 }
-  let beam = [start]
-  const finished = []
-  for (let step = 0; step < 18; step++) {
+  const z0 = sim.rlm
+  // 剩余步数：每层 4 行（3 个普通节点 + 1 个精英/首领），共 3 层；
+  // 从 (L,R) 出发刚好是 (2−L)×4 + (3−R) 步，不必拿固定 18 硬跑到底。
+  const maxSteps = Math.max(1, (2 - (Number(z0.L) || 0)) * 4 + (3 - (Number(z0.R) || 0)))
+  const width = Math.max(1, Math.min(24, Number(opts.beam) || 6))
+  let beam = [{ x: sim, acts, val: 0 }]
+  const wins = []
+  for (let step = 0; step < maxSteps && beam.length; step++) {
     const next = []
     for (const st of beam) {
       const z = st.x.rlm
-      if (!z) { finished.push(st); continue }
-      const cands = [{ rout: true }, ...A.rlmNext(A.rlmMap(z.sd), z).map((n) => ({ i: n.c }))]
-      // 行商节点：气血低于七成时买一包回春散（25 灵石回一半血）。
-      // 这笔永远划算——多撑过一个战斗节点就多几十灵石和材料。
+      if (!z) continue
+      const cands = A.rlmNext(A.rlmMap(z.sd), z).map((n) => ({ i: n.c }))
+      // 行商节点：气血低于八成且灵石够「回春散 + 40」时买一包（25 灵石回一半血）。
+      // 多撑过一个战斗节点就多几十灵石和材料，这笔永远划算；
       // 玄铁/灵玉（80 灵石换一份材料）按相对价值是亏的，不买。
-      if (z.R >= 0 && z.hp < z.mx * 0.7 && (st.x.stone || 0) >= 25) {
+      if (z.R >= 0 && z.hp < z.mx * 0.8 && (st.x.stone || 0) >= 25 + 40) {
         const m = A.rlmMap(z.sd)
         const node = m[z.L]?.[z.R]?.find((n) => n.c === z.c)
         if (node?.k === 'shop' && !(z.bought || []).includes(`${z.L}.${z.R}.0`)) cands.push({ buy: 0 })
       }
       for (const c of cands) {
         const cw = structuredClone(st.x)
-        const act = c.rout ? { a: 'rout' } : c.buy != null ? { a: 'rbuy', i: c.buy } : { a: 'rgo', i: c.i }
-        const r = A.act(cw, act, now, () => 0.99)
+        const act = c.buy != null ? { a: 'rbuy', i: c.buy } : { a: 'rgo', i: c.i }
+        let r
+        try { r = A.act(cw, act, now, () => 0.99) } catch { continue }
         if (!r?.ok) continue
         const na = [...st.acts, act]
         const zz = cw.rlm
+        if (!zz) {
+          // 秘境结束：只有通关（end=win）才算达成目标。
+          // 战败 / 被仇人截杀（end=lose）会把本趟收获砍半甚至全丢，
+          // 旧版把它们也收进 finished，结果 beam 会主动选一条「打不过首领」的路径。
+          if (r.end === 'win') wins.push({ x: cw, acts: na, val: bagValue(cw) - base })
+          continue
+        }
         const val = bagValue(cw) - base +
-          (zz ? lootValue(zz.lt) + 40 * Math.max(0, zz.hp / Math.max(1, zz.mx)) : 0)
-        const node = { x: cw, acts: na, val }
-        if (!zz) finished.push(node)
-        else next.push(node)
+          lootValue(zz.lt) + 40 * Math.max(0, zz.hp / Math.max(1, zz.mx))
+        next.push({ x: cw, acts: na, val })
       }
     }
     if (!next.length) break
-    next.sort((p, q) => q.val - p.val)
-    beam = next.slice(0, Math.max(1, opts.beam ?? 6))
+    // 同一位置（同层/同行/同列）只留估值最高的一条：地图是确定性的，
+    // 重复路径除了白占 beam 宽度没有别的用（参考实现也是这么去重的）。
+    const seen = new Map()
+    for (const item of next) {
+      const z = item.x.rlm
+      const key = `${z.L}:${z.R}:${z.c}`
+      const prev = seen.get(key)
+      if (!prev || item.val > prev.val) seen.set(key, item)
+    }
+    beam = [...seen.values()].sort((p, q) => q.val - p.val).slice(0, width)
   }
-  const all = [...finished, ...beam].sort((p, q) => q.val - p.val)
-  const best = all[0]
-  if (!best) return null
-  // 开局那一步没得到任何收益、还立刻撤出 → 这趟不划算，别浪费次数。
-  // 但「本来就在秘境里」的情况必须把 rout 发出去：否则那个存档会一直卡着
-  // （6 小时内进不了别的秘境），还会让唤醒时间一直很短。
-  if (!hadRlm && best.acts.length <= 2 && best.val < 30) return null
-  return best.acts
+
+  if (wins.length) {
+    wins.sort((p, q) => q.val - p.val)
+    return wins[0].acts
+  }
+  // 找不到任何通关路径：
+  //   · 还没进 → 不浪费这 15 点灵力和一次今日额度，这趟别进；
+  //   · 已经在里面 → 必须把 rout 发出去，否则存档会卡 6 小时
+  //     （规则里 rin 的守卫是「6 小时内动过就报错」），唤醒时间也会被拖死。
+  if (hadRlm) {
+    const best = beam.sort((p, q) => q.val - p.val)[0]
+    return best ? [...best.acts, { a: 'rout' }] : [{ a: 'rout' }]
+  }
+  return null
 }
 
 // ---------------- 主规划 ----------------
@@ -297,6 +321,13 @@ export function planXian2Actions(world, now, opts = {}) {
   if (raw.fight && t - Number(raw.fight.t || 0) < 1800) {
     return { actions: [], reason: 'manual-fight-in-progress' }
   }
+  // 玩家自己在秘境里：没开自动秘境 + 最近 6 小时内还在走图（规则里每次 rgo
+  // 都会刷新 x.rlm.t），那这个秘境一定是玩家手操的。整批让位——我们插一脚
+  // 会改掉他的路径和血量，发 rout 还会把「主动撤出」变成少拿一半收获的败退。
+  // 开了自动秘境（默认）就等于授权托管接管，不做这道判断。
+  if (opts.realm === false && raw.rlm && t - Number(raw.rlm.t || 0) < 6 * 3600) {
+    return { actions: [], reason: 'manual-realm-in-progress' }
+  }
   const sim = structuredClone(raw)
   try { A.tick(sim, t) } catch { }
   const d = xsDay(t)
@@ -328,15 +359,41 @@ export function planXian2Actions(world, now, opts = {}) {
   // 3) 交委托（本地能判断的条件都先预演）。刚刷新出来的列表服务端可能不同，
   //    这一轮不交，等下一批拿到真实列表再说。
   //    交之前过一遍安全线：交完还得够今天炼丹/突破用（见 canTurnInSectTask）。
-  if (!tasksJustRolled && sim.tk?.d === d && Array.isArray(sim.tk.list)) {
+  //
+  //    抽成函数是因为斗法之后还要再来一次：胜利类委托要的是「今天赢过 n 场」，
+  //    斗法本批就发生在后面，只在批次开头交的话，刚打赢的这一场要等下一批才结算。
+  const turnInSectTasks = () => {
+    if (tasksJustRolled || sim.tk?.d !== d || !Array.isArray(sim.tk.list)) return
     sim.tk.list.forEach((it, n) => {
       if (!it || it[1]) return
       if (!canTurnInSectTask(sim, t, opts, it)) return
       emit({ a: 'task', n })
     })
   }
+  turnInSectTasks()
 
-  // 4) 秘境：能量花在收益最高的地方，放在对战之前
+  // 4) 配招：学习到的技能变了才重算（比较昂贵）。
+  //
+  //    必须排在秘境和斗法之前——秘境束搜索用的就是 x.sl（当前配招），
+  //    用旧配招算出来的路径可能只差一点战力就过不了首领；先换好再算，
+  //    才不会「明明有更好的配招，却因为排在后面而判定无解、白白放弃」。
+  {
+    const key = `${sim.tech}|${(sim.techs || []).join(',')}`
+    const cur = Array.isArray(sim.sl) ? sim.sl.join(',') : ''
+    const memoOk = opts.memo?.xian2SlotKey === key && opts.memo?.xian2SlotVal === cur
+    if (sim.tech && !memoOk && acts.length < maxN) {
+      const best = chooseLoadout(sim, opts)
+      if (best && best.join(',') !== cur) {
+        emit({ a: 'slots', herb: best.join(',') })
+      }
+      if (opts.memo) {
+        opts.memo.xian2SlotKey = key
+        opts.memo.xian2SlotVal = Array.isArray(sim.sl) ? sim.sl.join(',') : cur
+      }
+    }
+  }
+
+  // 5) 秘境：能量花在收益最高的地方，放在对战之前
   if (opts.realm !== false) {
     for (let round = 0; round < 3; round++) {
       const before = acts.length
@@ -352,7 +409,7 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 5) 人脉：先把 30 次叙话用满（优先需要推好感的往事角色）
+  // 6) 人脉：先把 30 次叙话用满（优先需要推好感的往事角色）
   {
     const talked = sim.ch?.d === d ? sim.ch.ids : []
     const needFav = Object.entries(A.CHAPTERS)
@@ -366,7 +423,7 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 6) 赠礼：只送对方喜欢的**草药**（+40 好感），而且留够自家炼丹的余量。
+  // 7) 赠礼：只送对方喜欢的**草药**（+40 好感），而且留够自家炼丹的余量。
   //
   //    绝不送丹药：回灵丹是灵力（每天最多吃 3 颗，一炉才 3~4 颗）、
   //    培元丹是突破/融合/药园经验的硬通货，一颗 60~90 灵石，
@@ -388,7 +445,7 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 7) 往事：按顺序推进，两个选项本地各模拟一次，取估值高的
+  // 8) 往事：按顺序推进，两个选项本地各模拟一次，取估值高的
   {
     for (const [id, chapters] of Object.entries(A.CHAPTERS)) {
       if (acts.length >= maxN) break
@@ -409,23 +466,6 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 8) 配招：学习到的技能变了才重算（比较昂贵）
-  {
-    const key = `${sim.tech}|${(sim.techs || []).join(',')}`
-    const cur = Array.isArray(sim.sl) ? sim.sl.join(',') : ''
-    const memoOk = opts.memo?.xian2SlotKey === key && opts.memo?.xian2SlotVal === cur
-    if (sim.tech && !memoOk && acts.length < maxN) {
-      const best = chooseLoadout(sim, opts)
-      if (best && best.join(',') !== cur) {
-        emit({ a: 'slots', herb: best.join(',') })
-      }
-      if (opts.memo) {
-        opts.memo.xian2SlotKey = key
-        opts.memo.xian2SlotVal = Array.isArray(sim.sl) ? sim.sl.join(',') : cur
-      }
-    }
-  }
-
   // 9) 自动对战：只打「预演能赢」的（输一场 10 灵力只换 3 好感，不值）
   {
     let n = sim.df?.d === d ? (sim.df.n || 0) : 0
@@ -439,6 +479,19 @@ export function planXian2Actions(world, now, opts = {}) {
     // 已在秘境里时 rgo/rout 不耗灵力，不需要再留门票。
     const realmLeft = sim.rlm ? 0 : (sim.rd?.d === d ? Math.max(0, A.RLM_DAILY - (sim.rd.n || 0)) : A.RLM_DAILY)
     const fightFloor = realmLeft > 0 ? A.RLM_EN + 10 : 10
+    // 「胜利类」宗门委托还差几场？差着的时候斗法优先级抬到最高：
+    // 门槛从 40 点体力降到 22（参考实现的算法），并且允许重打今天已经赢过的对手——
+    // 规则里 tw.n 只数「今天赢了几场」，重复赢同一个 NPC 也算，委托是能靠它做完的。
+    // 没这道判断时，体力 30 点左右会整天把重打全跳过，4 场胜利的委托永远交不掉。
+    const winTaskLeft = () => {
+      if (sim.tk?.d !== d || !Array.isArray(sim.tk.list)) return false
+      const got = sim.tw?.d === d ? Number(sim.tw.n || 0) : 0
+      return sim.tk.list.some((it) => {
+        if (!it || it[1]) return false
+        const def = A.TASK_KINDS?.[it[0]]
+        return Array.isArray(def) && def[0] === 'win' && got < Number(def[2] || 0)
+      })
+    }
     const all = Object.entries(A.NPC_FIGHT)
       .map(([id]) => ({ id, f: A.npcFighter(id) }))
       .filter((c) => c.f)
@@ -452,8 +505,9 @@ export function planXian2Actions(world, now, opts = {}) {
       if (acts.length >= maxN) break
       if ((sim.en || 0) < fightFloor) break
       // 再赢一次只有 +3 好感 +1 熟练，性价比低于种地/钓鱼；体力不宽裕时让给 1.0。
-      // 首胜有灵石，不受这道门槛限制。
-      if (wonToday.includes(c.id) && (sim.en || 0) < 40) continue
+      // 首胜有灵石，不受这道门槛限制；胜利委托差着时也放宽（见 winTaskLeft）。
+      const wonGap = winTaskLeft() ? 22 : 40
+      if (wonToday.includes(c.id) && (sim.en || 0) < wonGap) continue
       // 先克隆预演一次，确认能赢再真的 emit
       const cw = structuredClone(sim)
       const r = A.act(cw, { a: 'ab', el: c.id }, t, () => 0.99)
@@ -461,6 +515,8 @@ export function planXian2Actions(world, now, opts = {}) {
       if (!emit({ a: 'ab', el: c.id })) break
       n++
     }
+    // 斗法赢完立刻回头交委托，别等下一批才领奖
+    turnInSectTasks()
   }
 
   // 10) 机缘：已抽到就选最优选项；没抽过且冷却好了就抽

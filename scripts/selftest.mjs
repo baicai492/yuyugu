@@ -521,6 +521,104 @@ console.log('\n[新] 多波次偷菜')
   }
 }
 
+console.log('\n[新] 修仙2.0 · 秘境只认通关 / 手动让位 / 配招优先')
+{
+  const A = await import('../core/xian-rules.mjs')
+  const { planXian2Actions } = await import('../core/xian2.mjs')
+  const { fromWireXsAction } = await import('../core/xian.mjs')
+  const now = 1794643200
+  const mk = (over = {}) => {
+    const x = A.newXs(now)
+    Object.assign(x, {
+      tech: 'fire', techs: ['fire'], en: 100, stone: 0, lv: 1, st: 4,
+      root: 'fire', roots: { e: ['fire'], v: [] }, cv: { r: 0, s: 1, xp: 0 }, ...over,
+    })
+    return { state: { xs: x }, now }
+  }
+  // 重放一批动作，记录「本批主动 rin 的秘境」最后是怎么结束的。
+  // 旧实现把战败也当成 finished 候选，beam 会主动挑一条打不过首领的路径——
+  // 花了 15 灵力 + 一次额度只带回半个背包。这条断言就是钉死这个回归。
+  const replayRealms = (world, actions) => {
+    const x = world.state.xs
+    const out = []
+    let cur = null
+    for (const wire of actions) {
+      const a = fromWireXsAction(wire)
+      if (a.a === 'rin') cur = { fromUs: true }
+      const r = A.act(x, a, now, () => 0.99)
+      if (r?.end) { out.push({ fromUs: Boolean(cur?.fromUs), end: r.end }); cur = null }
+      else if (!r?.ok) return out
+    }
+    return out
+  }
+
+  // 1) 主动进入的秘境必须以通关收尾
+  {
+    const w = mk()
+    const p = planXian2Actions(w, now, { memo: {}, realm: true })
+    ok('会主动进秘境', p.actions.some((a) => a.a === 'xsRin'), `动作 ${p.actions.length} 条`)
+    const rs = replayRealms(w, p.actions)
+    ok('主动进入的秘境全部通关（不选打输/撤出的路径）',
+      rs.every((r) => !r.fromUs || r.end === 'win'), JSON.stringify(rs))
+    ok('至少通关一次', rs.some((r) => r.end === 'win'), JSON.stringify(rs))
+  }
+
+  // 2) 已在秘境里且已经打不过 → 必须 rout，绝不能卡 6 小时
+  {
+    const w = mk({ rlm: { a: 'bamboo', sd: 123, L: 0, R: 1, c: 1, hp: 1, mx: 60, lt: {}, t: now - 100 } })
+    const p = planXian2Actions(w, now, { memo: {}, realm: true })
+    ok('残血秘境会撤出', p.actions.some((a) => a.a === 'xsRout'), p.actions.map((a) => a.a).join(','))
+  }
+
+  // 3) 手动秘境让位：realm=false 且 6 小时内还在走图
+  {
+    const w = mk({ rlm: { a: 'bamboo', sd: 123, L: 0, R: 1, c: 1, hp: 40, mx: 60, lt: {}, t: now - 100 } })
+    const p = planXian2Actions(w, now, { memo: {}, realm: false })
+    ok('手动秘境整批让位', p.actions.length === 0 && p.reason === 'manual-realm-in-progress', p.reason)
+    const o = mk({ rlm: { a: 'bamboo', sd: 123, L: 0, R: 1, c: 1, hp: 40, mx: 60, lt: {}, t: now - 6 * 3600 - 10 } })
+    const p2 = planXian2Actions(o, now, { memo: {}, realm: false })
+    ok('超过 6 小时不再算手操', p2.reason !== 'manual-realm-in-progress', p2.reason)
+  }
+
+  // 4) 配招排在秘境之前：秘境束搜索要用最新配招
+  {
+    const p = planXian2Actions(mk(), now, { memo: {}, realm: true })
+    const iSlots = p.actions.findIndex((a) => a.a === 'xsSlots')
+    const iRin = p.actions.findIndex((a) => a.a === 'xsRin')
+    ok('配招在秘境之前', iSlots === -1 || iRin === -1 || iSlots < iRin, `slots=${iSlots} rin=${iRin}`)
+  }
+
+  // 5) 斗法 ↔ 胜利类宗门委托联动
+  //    叙话每天 30 次会把一批动作额度吃满，这里先把「今天都聊过」填好，
+  //    否则测的就不是斗法而是一屏 xsTalk。
+  {
+    const { xsDay } = await import('../core/xian.mjs')
+    const d = xsDay(now)
+    const talked = [...Object.keys(A.CHAPTERS), ...A.OLD_NPCS, ...Object.keys(A.NEW_NPCS)]
+    const w = mk({ tk: { d, list: [[5, 0]] }, tw: { d, n: 0 }, ch: { d, ids: talked } })
+    const p = planXian2Actions(w, now, { memo: {}, realm: false })
+    const iLastAb = p.actions.map((a) => a.a).lastIndexOf('xsAb')
+    const iTask = p.actions.findIndex((a) => a.a === 'xsTask')
+    ok('斗法后有胜利可交', iLastAb >= 0 && iTask > iLastAb, `ab=${iLastAb} task=${iTask}`)
+  }
+
+  // 6) 体力 30（低于重打门槛 40）：有胜利委托时仍要重打，没委托时不打
+  {
+    const { xsDay } = await import('../core/xian.mjs')
+    const d = xsDay(now)
+    const talked = [...Object.keys(A.CHAPTERS), ...A.OLD_NPCS, ...Object.keys(A.NEW_NPCS)]
+    const wonAll = Object.keys(A.NPC_FIGHT)
+    const wTask = mk({ tk: { d, list: [[5, 0]] }, tw: { d, n: 0 }, en: 30, dd: { d, w: wonAll }, ch: { d, ids: talked } })
+    const pTask = planXian2Actions(wTask, now, { memo: {}, realm: false })
+    ok('有胜利委托时体力 30 也重打', pTask.actions.some((a) => a.a === 'xsAb'),
+      pTask.actions.map((a) => a.a).join(','))
+    const wNo = mk({ tk: { d, list: [[0, 0]] }, tw: { d, n: 0 }, en: 30, dd: { d, w: wonAll }, ch: { d, ids: talked } })
+    const pNo = planXian2Actions(wNo, now, { memo: {}, realm: false })
+    ok('没有委托、都赢过、体力 30 → 不重打', !pNo.actions.some((a) => a.a === 'xsAb'),
+      pNo.actions.map((a) => a.a).join(','))
+  }
+}
+
 console.log('\n[新] 站宠护理')
 {
   const { petDay, levelOfTotal, totalOfState, applyPetDecay, planPetCare } = await import('../core/pet-care.mjs')

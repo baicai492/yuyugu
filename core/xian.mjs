@@ -115,6 +115,9 @@ export function normalizeXianOptions(raw = {}) {
       : MAX_XS_BATCH,
     // 给修仙 2.0 预留的灵力（见 xian2EnergyReserve）
     reserveEnergy: Number.isFinite(reserveRaw) ? Math.max(0, Math.min(EN_MAX, Math.floor(reserveRaw))) : 0,
+    // 是否授权托管接管秘境（= xian2 开着且 realm 没关）。
+    // 只有明确关掉时，planXianActions 才会在检测到玩家手操秘境时整批让位。
+    autoRealm: raw?.autoRealm !== false,
   }
 }
 
@@ -501,6 +504,13 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
   // 有人在网页端斗法，先别插手
   if (rawXs.fight && t - Number(rawXs.fight.t || 0) < 1800) {
     return { enabled: true, actions: [], followUpSoon: false, reason: 'manual-fight-in-progress' }
+  }
+  // 没开自动秘境时，玩家手操的秘境正在走（6 小时内动过）：1.0 也整批让位。
+  // 农事动作本身不碰秘境，但灵力是两边的公共池——托管一边锄地一边让玩家
+  // 攒不出下一步的灵力，体验就是「我手动玩，脚本还在抢资源」。
+  // 2.0 的 planXian2Actions 有同一道闸（那边是纯函数，这里是执行层的双保险）。
+  if (opts.autoRealm === false && rawXs.rlm && t - Number(rawXs.rlm.t || 0) < 6 * 3600) {
+    return { enabled: true, actions: [], followUpSoon: false, reason: 'manual-realm-in-progress' }
   }
 
   const sim = structuredClone(rawXs)
@@ -937,6 +947,8 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
     // 引擎现在也是先跑 2.0 再跑 1.0，但光靠顺序不够：1.0 只要还有 3 点灵力
     // 就会锄地，灵力永远攒不到 15，2.0 还是排不进动作。
     reserveEnergy: xian2EnergyReserve(world.state?.xs, cfg, t),
+    // xian2 关掉或 realm 关掉 = 没人接管秘境 → 检测到玩家手操就让位
+    autoRealm: cfg.xian2?.enabled !== false && cfg.xian2?.realm !== false,
   })
   const first = planXianActions(world, t, opts)
 
