@@ -251,7 +251,7 @@ async function fightOne(world, cfg, opponent, { storePath, lockRoot, accountKey 
  * 擂台日常：打满有掉落的场次、开宝箱、穿静止装、加点、同步战报档案。
  * 每场之间必须间隔 8 秒（服务端限制），这里用 8.5 秒留余量。
  */
-export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } = {}) {
+export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo, shouldAbort } = {}) {
   const a = cfg.arena || {}
   if (!a.enabled) return { battles: 0 }
 
@@ -330,6 +330,13 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
     let idx = 0
     let equipFails = 0
     for (let k = 0; k < need && opponents.length; k++) {
+      // 一场要 8.5 秒，一批 5 场就是 40 秒。如果期间偷菜解禁窗口打开，
+      // 打完这批再走就晚了——每场开始前问一次，该让路就让路（参考实现
+      // runSingleArenaBout 的 shouldAbortFn 也是这个用意）。
+      if (k > 0 && shouldAbort?.()) {
+        log(`擂台：偷菜解禁窗口临近，本批先打到 ${battles} 场，剩下的下一轮再打`)
+        break
+      }
       const o = opponents[idx++ % opponents.length]
       try {
         let r

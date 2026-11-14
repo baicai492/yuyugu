@@ -776,6 +776,9 @@ export class Engine {
           // 擂台每场 8.5 秒，30 场要 4 分钟。逐场回报进度，GUI 才不会看着像卡死。
           onBattle: (n, need) => this.setStep(`擂台 · 第 ${n}/${need} 场`),
           memo: this.memo,
+          // 一场 8.5 秒、一批 5 场 40 秒。偷菜解禁窗口在批次途中打开时，
+          // 打完这批再走就晚了——每场开打前问一次，该让路就让路。
+          shouldAbort: () => Boolean(this.snipeDueNow(w, snipeLead)),
         })
         // 今日已打场次只在这里拿得到（要发 /battle/gear）。存进 memo，
         // nextWake 才能判断「擂台是不是也打完了」，进而决定要不要长睡。
