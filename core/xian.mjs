@@ -1251,10 +1251,17 @@ export function xianSnapshot(world, cfg = {}) {
   //     rules.js 里写的是 `if (f.s !== 'duel' && !x.clear[f.s])` —— 明确把切磋排除在首通之外。
   // 所以 x.clear.duel 永远是 undefined，列出来只能一直显示「未通关」，纯误导。
   //
-  // 三关和「秘境」的关系（别搞混，名字不一样、门票池也不一样）：
-  //   · 论剑台直接打这三关 → 扣斗法池（每天 8 场）
-  //   · 进秘境走到首领「亲自出手」→ 打的是同一个 stage，但扣秘境池（每天 3 次）
-  //   两条路共用同一个首通标记 x.clear[stage]，所以走哪边都算通关。
+  // 三关和「秘境」的关系（2026-11-14 对着 new4/xs/game.js、xs3.js、rules 核过）：
+  //   · 论剑台对话框里就是三关 + 一条「🗺 秘境探索」入口（game.js:129），是同一个界面；
+  //   · 论剑台直接打这三关 → 走 fight 动作，扣斗法池（每天 8 场）；
+  //   · 秘境走到首领选「🎯 亲自出手」→ x.fight.s 设成该地图的 stage（rules 的 rlmGo），
+  //     弹幕关卡和论剑台那一关是同一个，但它走 rgo、不扣 x.df（每天 8 场照旧）。
+  //
+  // 通关标记是**两套**，别混：
+  //   · x.clear[stage]：关卡首通，win 里写，不看从哪进来的。
+  //     所以秘境亲自出手打赢，论剑台的「已通关」也会亮；
+  //   · x.rc[area]：秘境地图通关，rlmEnd 里写。必须走完这张地图（自动或亲自）才记，
+  //     在论剑台打赢秘境竹林**不会**让竹海迷踪变成已通关。
   const areaOfStage = Object.fromEntries(
     Object.values(AREAS).filter((a) => a.stage).map((a) => [a.stage, a.n]),
   )
@@ -1266,7 +1273,8 @@ export function xianSnapshot(world, cfg = {}) {
     needRealm: REALMS[S.need] || `境界 ${S.need}`,
     cleared: Boolean(sim.clear?.[id]),
     canEnter: Number(sim.cv?.r || 0) >= S.need,
-    // 同名首领所在的秘境地图（竹海迷踪 / 地火洞窟 / 古修洞府），论剑台是它的快捷入口
+    // 对应 stage 的秘境地图（竹海迷踪 / 地火洞窟 / 古修洞府）。
+    // 这关的另一个入口就是那张地图的首领「亲自出手」。
     areaName: areaOfStage[id] || '',
     manual: true,
   }))
