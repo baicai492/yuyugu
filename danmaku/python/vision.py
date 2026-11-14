@@ -269,7 +269,7 @@ def detect_objects(field_img, player=None, cal=CAL):
                 continue
             cx = (x + bw / 2) / cal
             cy = (y + bh / 2) / cal
-            if (cx - px) ** 2 + (cy - py) ** 2 < 42.0 ** 2:
+            if (cx - px) ** 2 + (cy - py) ** 2 < 26.0 ** 2:
                 continue                        # 自机雪碧图没挖干净的边角
             hazards.append((cx, cy, max(9.0, min(26.0, 0.28 * max(sw, sh)))))
     hazards = (np.array(hazards, np.float32) if hazards
