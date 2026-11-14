@@ -536,7 +536,8 @@ function renderXianDetail(D) {
         ...(st.canEnter ? [] : [{ text: '  （境界不足）', cls: 'bad' }]),
       ],
       [{
-        text: '首通给培元丹 ×1。入口：宗门广场 → 藏经阁 → 论剑台；战斗是弹幕小游戏，托管不会提交，只能手动点',
+        text: '首通给培元丹 ×1。入口：宗门广场上的论剑台（和丹房、藏经阁的门并列，不在藏经阁里）；' +
+          '战斗是弹幕小游戏，托管不会提交，只能手动点',
         cls: 'dim',
       }],
     ]))
@@ -733,9 +734,14 @@ function renderXian2() {
     ? '有事件待选（本轮会处理）'
     : `${ev.n || 0}/${ev.max || 3} 次` + (ev.gapIn > 0 ? ` · ${fmtSec(ev.gapIn)}后可再抽` : '')
   $('x2Duel').textContent = `${s.duels || 0}/${s.duelsMax || 8} 场`
+  // 8 场这个池子只由「论剑台三关」和「同门切磋（自动/弹幕）」共用一个计数
+  // （站点 rules.js 的 fight / ab 两个动作各 x.df.n++）。秘境有自己的一天 3 次，
+  // 连首领「亲自出手」也不动 x.df（rlmGo 直接写 x.fight，没走 fight 动作）。
+  $('x2Duel').title = '今天已用 / 每天 8 场。论剑台三关和同门切磋共用这个池子；秘境单独算（每天 3 次）'
   $('x2Realm').textContent = s.inRealm
     ? `探索中：${s.inRealm.area} 第 ${s.inRealm.floor || 1} 层（气血 ${Math.round(s.inRealm.hp)}/${s.inRealm.mx}）`
     : `${s.realms || 0}/${s.realmsMax || 3} 次`
+  $('x2Realm').title = '秘境每天 3 次，每次 15 灵力；和斗法的 8 场是分开的'
   const areas = Object.values(s.areas || {})
   $('x2Areas').textContent = areas.length
     ? areas.map((a) => `${a.name}${a.cleared ? '✓' : a.unlocked ? '' : '🔒'}`).join(' · ')
