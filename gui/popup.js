@@ -544,11 +544,13 @@ function renderXianDetail(D) {
           '战斗是弹幕小游戏，托管不会提交，只能手动点',
         cls: 'dim',
       }],
-      ...(st.areaName ? [{
+      // 注意外层还要再套一层数组：xItem 的每个「行」本身是片段数组，
+      // 少套一层就会把一个 {text} 对象当成行去 for...of，抛 "line is not iterable"。
+      ...(st.areaName ? [[{
         text: `同一个首领也在秘境「${st.areaName}」里，走到那里点「亲自出手」打的是这一关；` +
           '通关标记两边共用（论剑台打过了，秘境里也显示通关）。',
         cls: 'dim',
-      }] : []),
+      }]] : []),
     ]))
   }
   $('xStages').replaceChildren(stageList)
@@ -714,15 +716,20 @@ function renderXian() {
 }
 
 async function loadXian() {
+  let j
   try {
-    const j = await getXian()
-    xian = j.xian
-    if (config?.xian && j.enabled != null) config.xian.enabled = !!j.enabled
-    renderXian()
+    j = await getXian()
   } catch (e) {
     xian = { exists: false, error: e.message }
     renderXian()
+    return
   }
+  xian = j.xian
+  if (config?.xian && j.enabled != null) config.xian.enabled = !!j.enabled
+  // 渲染异常不能把已经拿到的数据一起丢掉：原来 getXian 和 renderXian 共用
+  // 一个 try，渲染里抛一次就把 xian 换成 {exists:false}，整页变「—」，
+  // 真实原因只剩状态栏那一行字（2026-11-14 的 "line is not iterable" 就是这样）。
+  try { renderXian() } catch (e) { $('xStatus').textContent = '面板渲染出错：' + e.message }
 }
 
 // ---------- 渲染：修仙 2.0 与游乐馆（数据在 /api/status 里） ----------
