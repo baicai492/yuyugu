@@ -182,6 +182,12 @@ export class World {
     for (const batch of batches) {
       const j = await this.client.act(this.rev, batch, randomUUID())
       this.accept(j)
+      // 服务端按 operation UUID 去重：HTTP 层重试撞上「已经执行过」时回 duplicate:true。
+      // 05a5c445 前端也加了这个分支（提示「操作已保存，已同步最新结果」）——
+      // 回执里可能没有 out，所以不能把这批动作当失败重发；账本差额由每日营收榜补账。
+      if (j.duplicate) {
+        this.log('服务端回执：这批操作此前已提交过（operation 去重命中），本次不会二次执行')
+      }
       // 站内管家代替我们跑了巡视：它会和托管抢体力。
       // 05a5c445 起 AUTO.fee=0、surcharge=0（cache/rules-05a5c445.mjs:1021），
       // 管家已不抽成；旧版日志里的「抽 20% 代卖费」不再成立。

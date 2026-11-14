@@ -37,7 +37,11 @@ async function main() {
     const idx = args.indexOf('--test-gomoku')
     const lv = Number(args[idx + 1]) || 3
     const total = Number(args[idx + 2]) || 5
-    const R = await loadRules({ cookie: '' })
+    // 有登录态就带上：未登录的 /pets 不渲染带 ?v= 的 script 标签，
+    // fetchVersion 会拿到空串，日志里多一行「规则模块联网失败」的噪音。
+    let ck = ''
+    try { ck = readSession(resolve(import.meta.dirname || '.', cfg.cookieFile)).cookie || '' } catch {}
+    const R = await loadRules({ baseUrl: cfg.baseUrl, cookie: ck })
     const { solveGomoku, verifyGomoku } = await import('./core/gomoku.mjs')
     let win = 0, ms = 0
     for (let i = 0; i < total; i++) {

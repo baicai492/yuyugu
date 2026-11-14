@@ -464,6 +464,29 @@ console.log('\n[新] 游乐馆手操让位')
   ok('arcadeRound 手操时跳过', r.played === 0 && posts === 0, `posts=${posts}`)
 }
 
+console.log('\n[新] 服务端 operation 去重回执')
+{
+  const { World } = await import('../core/world.mjs')
+  const now = 1794629000
+  const mkClient = (resp) => ({
+    act: async (rev) => ({ state: { log: 1 }, rev: rev + 1, coins: 0, now, ...resp }),
+    post: async () => ({}),
+    world: async () => ({ state: {}, rev: 1, coins: 0, now }),
+    get: async () => ({}),
+  })
+  const w = new World(mkClient({ duplicate: true }))
+  w.now = now
+  w.state = {}
+  w.rev = 5
+  const logs = []
+  w.log = (m) => logs.push(m)
+  const r = await w.act([{ a: 'plant', i: 0, c: 'turnip' }])
+  ok('duplicate 回执不抛错', Array.isArray(r.out), `out=${r.out.length}`)
+  ok('duplicate 没有 out 时按 0 条结果处理', r.out.length === 0 && r.earn === 0)
+  ok('duplicate 会留一行日志（便于对账）', logs.some((m) => /去重命中/.test(m)), logs.join(' | ').slice(0, 80))
+  ok('duplicate 回执里的快照照样生效', w.rev === 6 && w.state.log === 1, `rev=${w.rev}`)
+}
+
 console.log('\n[新] 多波次偷菜')
 {
   const { updateIsleSchedule, advanceIsleWave } = await import('../core/steal-schedule.mjs')
