@@ -51,6 +51,8 @@ nav.tabs button.on { background: var(--accent); border-color: var(--accent); col
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-bottom: 8px; }
 .card.big b { font-size: 22px; }
 .card small { display: block; color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+/* 卡片标题带悬停说明时给个虚线下划线提示，和「策略」里的 has-hint 一套 */
+.card small.has-hint { display: inline-block; border-bottom: 1px dotted var(--line); cursor: help; }
 .card b { font-variant-numeric: tabular-nums; }
 .card .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .card-row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 12px; }
