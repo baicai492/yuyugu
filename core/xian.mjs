@@ -102,6 +102,8 @@ export function normalizeXianOptions(raw = {}) {
   const fuseTarget = ['auto', 'ice', 'thunder', 'wind', 'lava', 'poison'].includes(fuseRaw) ? fuseRaw : 'auto'
   const maxRaw = Number(raw?.maxActions ?? raw?.maxActionsPerBatch ?? MAX_XS_BATCH)
   const reserveRaw = Number(raw?.reserveEnergy)
+  const manualRaw = Number(raw?.reserveManual ?? raw?.reserveEnergy)
+  const clampEn = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(EN_MAX, Math.floor(n))) : 0)
   return {
     enabled: Boolean(raw?.enabled),
     breakMode,
@@ -111,7 +113,11 @@ export function normalizeXianOptions(raw = {}) {
       ? Math.max(1, Math.min(MAX_XS_BATCH, Math.floor(maxRaw)))
       : MAX_XS_BATCH,
     // 给修仙 2.0 预留的灵力（见 xian2EnergyReserve）
-    reserveEnergy: Number.isFinite(reserveRaw) ? Math.max(0, Math.min(EN_MAX, Math.floor(reserveRaw))) : 0,
+    reserveEnergy: clampEn(reserveRaw),
+    // 用户在「修仙 → 策略」里手动设的预留（0 = 没设）。
+    // 和 reserveEnergy 分开存：reserveEnergy 会被 2.0 门票顶上去，
+    // 而手动预设要「严格按这个数」——低于它就只补灵力、不做别的。
+    reserveManual: clampEn(manualRaw),
     // 是否授权托管接管秘境（= xian2 开着且 realm 没关）。
     // 只有明确关掉时，planXianActions 才会在检测到玩家手操秘境时整批让位。
     autoRealm: raw?.autoRealm !== false,
@@ -608,7 +614,12 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     // 给 2.0 留出门票灵力（见 xian2EnergyReserve）。
     // 只拦扩张/维护类动作：收获是田块周转的保底，每块只要 2 点，而且修仙作物
     // 不会烂（规则 tick 里 g 到 3 就停住），晚收只是占着田，不会亏。
-    if (reserve > 0 && RESERVE_GATED.has(internalAct?.a)) {
+    //
+    // 但用户手动设了预留（reserveManual > 0）时，这是硬阈值：所有耗灵力的动作
+    // 都受它管，包括收获。否则一口气收 23 块菜会把灵力从 40 直接抽到 0，
+    // 等于预留形同虚设。
+    const gated = opts.reserveManual > 0 || RESERVE_GATED.has(internalAct?.a)
+    if (reserve > 0 && gated) {
       const cost = xsEnergyCost(internalAct, sim)
       if (cost > 0 && Math.max(0, Number(sim.en || 0) - cost) < reserve) return false
     }
@@ -616,6 +627,28 @@ export function planXianActions(world, nowSec = Number(world?.now || 0), rawOpti
     if (!res?.ok) return false
     actions.push(toWireXsAction(internalAct))
     return true
+  }
+
+  // 用户手动设了预留灵力：这是硬阈值，严格按它来。
+  // 低于预设值时不再做任何耗灵力的农事，只「补」——有回灵丹就先吃一颗，
+  // 没丹就等自然回复（每 6 分钟回 1 点，唤醒时间由 nextXianWakeSec 算准）。
+  //
+  // 和 2.0 门票那个预留的区别：那个只拦锄地/播种/浇水，收了照样收；
+  // 这里是「灵力不到数就不动」，连收菜也停——用户要的是把灵力攒住，
+  // 作物不会烂，晚收只是占着田。
+  const manualReserve = opts.reserveManual || 0
+  if (manualReserve > 0 && Number(sim.en || 0) < manualReserve) {
+    const heal = huilingHeal(sim)
+    const canEat = Number(sim.pills?.huiling || 0) >= 1 && dpUsedToday(sim, t) < PILL_DAILY
+    // 吃了会溢出一大截就不吃（预留 100、当前 95 时吃一颗浪费 25 点），
+    // 等到那个数再吃也没意义——所以直接放着等回复。
+    if (canEat && Number(sim.en || 0) + heal <= EN_MAX) emit({ a: 'use', herb: 'huiling' })
+    return {
+      enabled: true,
+      actions,
+      followUpSoon: actions.length > 0,
+      reason: actions.length ? 'reserve-energy-refill' : 'reserve-energy-waiting',
+    }
   }
 
   const isHoldingMedShieldForBreak = () =>
@@ -948,6 +981,16 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
   xsTick(sim, t)
   const cands = [nextCstMidnightSec(t) + 3]
 
+  // 手动预留还没补够：直接睡到灵力回到预设值。
+  // 不这样处理的话，田里有熟地会让 waitingOnPlotEnergy 每 6 分钟把托管叫醒一次，
+  // 醒来还是不够（照样不做动作），白转几十轮。
+  const mr = opts.reserveManual || 0
+  if (mr > 0 && Number(sim.en || 0) < mr) {
+    const rg = regenSec(sim)
+    const backAt = Number(sim.enAt || t) + (mr - Number(sim.en || 0)) * rg + 1
+    return backAt > t ? backAt : t + rg
+  }
+
   if (sim.brew) {
     const readyAt = Number(sim.brew.t || t) + BREW_READY_SEC
     if (readyAt > t) cands.push(readyAt)
@@ -978,6 +1021,13 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
     const to88 = Math.max(1, 88 - Number(sim.en || 0))
     const nearCapAt = enBase + to88 * rg + 1
     if (nearCapAt > t) cands.push(nearCapAt)
+    // 手动预留：正好在灵力回到预设值的那一刻醒来。精度到 1 点（rg 秒），
+    // 中途起来也没事，只是空转一轮。
+    const mr = opts.reserveManual || 0
+    if (mr > Number(sim.en || 0)) {
+      const backAt = enBase + (mr - Number(sim.en || 0)) * rg + 1
+      if (backAt > t) cands.push(backAt)
+    }
   }
 
   if (sim.med) {
@@ -1055,6 +1105,9 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
   }
   memo.xsRoots = rootsNow
 
+  // 用户手动设的预留：严格按这个数，不和 2.0 门票取 max。
+  // 设 0 时才退回原来的「够 2.0 下一张门票」的自动值。
+  const userReserve = Math.max(0, Math.min(EN_MAX, Math.floor(Number(xc.reserveEnergy) || 0)))
   const opts = normalizeXianOptions({
     ...xc,
     enabled: true,
@@ -1062,13 +1115,10 @@ export async function xianRound(world, cfg, log = () => {}, memo = {}) {
     // 引擎现在也是先跑 2.0 再跑 1.0，但光靠顺序不够：1.0 只要还有 3 点灵力
     // 就会锄地，灵力永远攒不到 15，2.0 还是排不进动作。
     //
-    // 再并上用户在「修仙 → 策略」里手动设的预留（xian.reserveEnergy）。取 max，
-    // 是为了让两种意图都不被破坏：设 0 时仍然是「刚好够 2.0 门票」，
-    // 设 40 时药园就真的停在 40 以上，不管 2.0 今天还剩多少额度。
-    reserveEnergy: Math.max(
-      xian2EnergyReserve(world.state?.xs, cfg, t),
-      Number(xc.reserveEnergy) || 0,
-    ),
+    // 手动预留（xian.reserveEnergy > 0）时以它为准：用户说了留多少就留多少，
+    // 哪怕比 2.0 门票低（那等于主动放弃这一轮 2.0 的门票，由用户自己负责）。
+    reserveEnergy: userReserve > 0 ? userReserve : xian2EnergyReserve(world.state?.xs, cfg, t),
+    reserveManual: userReserve,
     // xian2 关掉或 realm 关掉 = 没人接管秘境 → 检测到玩家手操就让位
     autoRealm: cfg.xian2?.enabled !== false && cfg.xian2?.realm !== false,
   })

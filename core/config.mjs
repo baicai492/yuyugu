@@ -147,8 +147,9 @@ export const DEFAULTS = {
     // 融合灵根不可逆（根数 −1），默认关。开了才会在修为损耗最小的窗口融合。
     autoFuse: false,
     fuseTarget: 'auto',          // auto / ice / thunder / wind / lava / poison
-    // 手动预留的灵力（0 = 不额外留）。药园的锄地/播种/浇水不会把灵力花到这个数以下。
-    // 实际预留取「这个数」和「秘境/斗法下一次门票」里较大的那个，见 core/xian.mjs 的 xianRound。
+    // 手动预留的灵力（0 = 不手动锁）。严格按这个数：
+    // 灵力低于它就停掉所有耗灵力的动作（含收菜、炼丹），先吃回灵丹补，
+    // 没丹就等自然回复。0 时交给系统按秘境/斗法下一次门票自动留。
     reserveEnergy: 0,
   },
 
