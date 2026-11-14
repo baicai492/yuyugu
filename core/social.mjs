@@ -5,7 +5,8 @@
 //       输了按市价 1.2 倍赔（单次上限 5000，每日 20000）。
 import { randomUUID } from 'node:crypto'
 import {
-  updateIsleSchedule, stealEV, nextUnlock, nextWave, physicalPrepLeadSec, stealGearSwaps,
+  updateIsleSchedule, stealEV, nextUnlock, nextWave, advanceIsleWave,
+  physicalPrepLeadSec, stealGearSwaps,
   WAKE_GRACE_SEC, SNIPE_MIN_GAP_SEC,
 } from './steal-schedule.mjs'
 import { energyActions } from './planner.mjs'
@@ -21,6 +22,15 @@ async function wget(world, path) {
   return world.client.get('/api/pet/world/' + path)
 }
 async function wpost(world, path, body) {
+  // 手动游乐馆让位：串门/帮忙也是写请求，同样会让玩家的 arcEnd 因 rev 过期 409。
+  // 主循环开头已经整轮停写，这里兜住「巡视途中玩家开始玩」的情况。
+  const ma = world.manualArcade?.(world.now)
+  if (ma?.active && !world.ourArcadeHeld?.()) {
+    const err = new Error(`游乐馆手操中（${ma.game}，剩 ${ma.remainingSec} 秒），跳过串门`)
+    err.name = 'ManualArcadeError'
+    err.manualArcade = ma
+    throw err
+  }
   return world.client.post('/api/pet/world/' + path, body)
 }
 
@@ -237,6 +247,11 @@ function scheduleArgs(R, world, cfg, info, memo, level) {
     checkEvery: st.checkEvery ?? 1800,
     prepLeadSec: st.prepLeadSec || 15,
     horizonSec: st.horizonSec ?? 7200,
+    // 多波次：同一座岛的作物分批成熟时，把后续 EV 达标的组也排进表里。
+    // left.owner 是「这座岛主今天还能被偷几次」，服务端按它封顶；拿不到就按 3 算。
+    ownerLeft: Number.isFinite(Number(info.left?.owner)) ? Number(info.left.owner) : null,
+    maxWaves: st.maxWaves ?? 2,
+    waveGapSec: st.waveGapSec ?? 20,
   }
 }
 
@@ -482,13 +497,13 @@ function sweepStaleUnlocks(schedule, now, leadSec = 8) {
     const list = Array.isArray(rec.upcoming) ? rec.upcoming : []
     const keep = list.filter((u) => u.unlockAt > now - leadSec)
     if (keep.length !== list.length) {
-      rec.upcoming = keep
-      if (!keep.length) {
-        // 这一波没赶上（被别人抢 / 体力不够）。别立刻重试，下一次巡逻再看。
-        rec.nextAt = 0
-        rec.nextGroup = []
-        rec.nextEV = 0
-        rec.checkAt = now + 60
+      if (keep.length) {
+        rec.upcoming = keep
+      } else {
+        // 这一波没赶上（被别人抢 / 体力不够 / 被守家打跑）。
+        // 多波次：把排好的下一波提上来继续盯；没有下一波才真正清空。
+        // 以前这里无条件清空，第二批成熟就彻底丢失了。
+        advanceIsleWave(rec, now)
       }
     }
     // 过期的明细只留着占内存，一小时前的记录没有参考价值。
@@ -496,6 +511,10 @@ function sweepStaleUnlocks(schedule, now, leadSec = 8) {
       for (const [k, v] of Object.entries(map || {})) {
         if ((v?.unlockAt || 0) < now - 3600) delete map[k]
       }
+    }
+    // 后续波次同样要清理，否则表会随着访问过的岛无限增长。
+    if (Array.isArray(rec.waves) && rec.waves.length) {
+      rec.waves = rec.waves.filter((w) => (Number(w?.at) || 0) > now - 3600)
     }
   }
 }
@@ -1378,18 +1397,18 @@ async function stealFromTargets(world, cfg, log, memo, targets, { tactical = tru
         log(`偷 ${tg.name} 出错${e.status ? `（HTTP ${e.status}）` : ''}：${e.message}` +
           `｜目标数据 ${age} 秒前拿到，${tg.targets?.length || 0} 处`)
       }
-      // 这座岛已经处理过了：清掉它这一个「解禁时刻」。
+      // 这座岛已经处理过了：推进到排好的下一波（多波次），没有就清空。
       // 不清的话 nextWake 会一直把它当成「马上要解禁」来唤醒。
-      // 下次真正扫到这座岛时 updateIsleSchedule 会重新算出新的解禁点。
+      // 以前这里直接 `rec.upcoming = []`——第二批成熟的作物因此只能等
+      // 下一次全量巡逻（默认 30 分钟）才会被重新发现，通常早被别人偷了。
       if (memo.stealSchedule && memo.stealSchedule[tg.id]) {
         const rec = memo.stealSchedule[tg.id]
-        rec.upcoming = []
-        rec.nextGroup = []
-        rec.nextAt = 0
-        rec.nextEV = 0
-        // 60 秒后让巡逻重新访问一次：这次拿到的可能是「下一块地的解禁时刻」，
-        // 它可能就在几分钟后。直接用 checkEvery（30 分钟）会把它整段错过。
-        rec.checkAt = world.now + 60
+        const completedAt = Number(rec.nextAt) || 0
+        const more = advanceIsleWave(rec, world.now, { completedAt })
+        if (more && rec.upcoming?.length) {
+          log(`  ${tg.name} 还有下一波：${rec.upcoming.length} 处，` +
+            `${Math.max(0, Math.round(rec.nextAt - world.now))} 秒后解禁（已排进调度表）`)
+        }
       }
       await sleep(1500)
     }

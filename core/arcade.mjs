@@ -230,6 +230,17 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
   const A = arcadeRules()
   if (!A?.GAMES) return { played: 0, results: [] }
   const R = world.R
+  // 有人在浏览器里手操：整轮跳过。我们的任何 arcStart 都会抢占他的 cur
+  // （服务端同一时刻只允许一局），更别说别的写入会让他 arcEnd 409。
+  const ma = world.manualArcade?.(world.now, cfg.arcade?.manualTtlSec)
+  if (ma?.active && !world.ourArcadeHeld?.()) {
+    if (world.arcadeManualNote !== ma.startedAtSec) {
+      world.arcadeManualNote = ma.startedAtSec
+      log(`游乐馆：检测到手操中的 ${ma.game}（剩 ${ma.remainingSec} 秒），本轮让位`)
+    }
+    return { played: 0, results: [], standby: ma }
+  }
+  world.arcadeManualNote = 0
   const order = (cfg.arcade?.games || ['pool', 'bowl', 'bounce']).filter((g) => A.GAMES[g])
   const perTick = Math.max(1, cfg.arcade?.perTick ?? 2)
   const solveMs = cfg.arcade?.solveMs ?? 20000
@@ -253,8 +264,18 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
         seed = o.seed
         startedAt = Date.now()
         startOk = true
+        // 这局归我们：arcStart → arcEnd 之间 cur 是我们自己的，
+        // world.act 的手操让位门控要放行（否则托管会被自己刚开的局挡住）。
+        world.ourArcade = { g, seed }
       } catch (e) {
         log(`游乐馆 · ${A.GAMES[g].name}：开局出错 ${e.message}`)
+        break
+      }
+      if (world.manualArcade?.(world.now)?.active && !world.ourArcadeHeld?.()) {
+        // 开局回执成功但 state 里的 cur 不是我们的 seed（极小概率的并发手操），
+        // 说明有人抢先开了局；此时我们的 arcEnd 会覆盖掉他的局，直接放弃这一局。
+        world.ourArcade = null
+        log(`游乐馆 · ${A.GAMES[g].name}：cur 已被另一局占用，放弃本轮（不覆盖手操）`, 'warn')
         break
       }
 
@@ -298,6 +319,8 @@ export async function arcadeRound(world, cfg, log = () => {}, memo = {}) {
           break
         }
       }
+      // arcEnd 已提交（无论成败），cur 不再属于我们
+      world.ourArcade = null
       if (counted) {
         results.push({ g, score: counted.score, best: counted.best, dayBest: counted.dayBest, newBest: !!counted.newBest, left: counted.left })
         log(`游乐馆 · ${A.GAMES[g].name}：${counted.score} 分${counted.newBest ? '（刷新个人纪录）' : ''}｜今日剩 ${counted.left} 次`)

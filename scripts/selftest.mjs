@@ -379,5 +379,147 @@ console.log('\n[新] 修仙 2.0 规划器')
   ok('绝不产生手动斗法', !['xsFight', 'xsWin', 'xsLose', 'xsRoot', 'xsStory'].some((k) => bad.includes(k)))
 }
 
+console.log('\n[新] 游乐馆手操让位')
+{
+  const { World } = await import('../core/world.mjs')
+  const { arcadeRound } = await import('../core/arcade.mjs')
+  const now = 1794629000
+  let posts = 0
+  const mkClient = () => ({
+    act: async (rev, actions) => {
+      posts++
+      return { state: { arc: { cur: null, n: {} } }, rev: rev + 1, out: actions.map(() => ({ ok: true })), coins: 0, now }
+    },
+    post: async () => { posts++; return { result: {} } },
+    world: async () => ({ state: { arc: { cur: null, n: {} } }, rev: 1, coins: 0, now }),
+    get: async () => ({}),
+  })
+
+  const w = new World(mkClient())
+  w.now = now
+
+  // 1) 没有手操局
+  w.state = { arc: { cur: null } }
+  ok('cur=null 时不算手操', w.manualArcade(now).active === false)
+
+  // 2) 正在手操：cur 存在，t 在 10 秒前
+  w.state = { arc: { cur: { g: 'pool', seed: 4242, t: now - 10 } } }
+  const ma = w.manualArcade(now)
+  ok('cur 存在时判定手操中', ma.active && ma.game === 'pool', `剩 ${ma.remainingSec} 秒`)
+  ok('剩余时间 = TTL − 已过', ma.remainingSec === 170, `${ma.remainingSec}`)
+
+  // 3) 写入被拦
+  let blocked = null
+  try { await w.act([{ a: 'water', i: 0 }]) } catch (e) { blocked = e }
+  ok('手操中 act() 抛 ManualArcadeError', blocked?.name === 'ManualArcadeError', blocked?.message)
+  ok('拦下时一个请求都没发', posts === 0, `posts=${posts}`)
+
+  // 4) 自己的局放行
+  w.ourArcade = { g: 'pool', seed: 4242 }
+  let passed = true
+  try { await w.act([{ a: 'water', i: 0 }]) } catch { passed = false }
+  ok('ourArcade 匹配时放行', passed && posts === 1, `posts=${posts}`)
+  w.ourArcade = null
+
+  // 5) seed 不匹配（别人的新局）→ 重新拦
+  w.state = { arc: { cur: { g: 'pool', seed: 4242, t: now - 10 } } }
+  w.ourArcade = { g: 'pool', seed: 9999 }
+  blocked = null
+  try { await w.act([{ a: 'water', i: 0 }]) } catch (e) { blocked = e }
+  ok('ourArcade 不匹配时仍然让位', blocked?.name === 'ManualArcadeError')
+  w.ourArcade = null
+
+  // 6) TTL 过期（Esc 退出没发 arcEnd）
+  w.state = { arc: { cur: { g: 'bowl', seed: 1, t: now - 200 } } }
+  ok('超过 TTL 自动恢复', w.manualArcade(now).active === false)
+
+  // 7) arcadeRound 整轮跳过
+  posts = 0
+  w.state = { arc: { cur: { g: 'bounce', seed: 7, t: now - 5 }, n: {} } }
+  const r = await arcadeRound(w, { arcade: { enabled: true } }, () => {}, {})
+  ok('arcadeRound 手操时跳过', r.played === 0 && posts === 0, `posts=${posts}`)
+}
+
+console.log('\n[新] 多波次偷菜')
+{
+  const { updateIsleSchedule, advanceIsleWave } = await import('../core/steal-schedule.mjs')
+  const now = 1794629000
+  // 一座岛上的地块分批成熟（同一茬 total=600 秒，保护期 1800 秒）。
+  // cropStage 用 stub 而不是线上规则：这里验的是「排几波 / 怎么推进」，与作物表无关。
+  const stubR = {
+    isleDay: () => '2300-01-01',
+    weatherOf: () => 0,
+    sprinkled: () => false,
+    cropStage: (raw, t) => {
+      const total = 600
+      const el = t - raw.t
+      return el >= total
+        ? { stage: 3, left: 0, total }
+        : { stage: Math.min(2, Math.floor((el / total) * 3)), left: total - el, total }
+    },
+    b12StealCost: (_s, _t, spots, base) => Math.min(15, base + Math.max(0, spots - 1)),
+    BASE_PRICE: { a: 10000 },
+    ANIMALS: [],
+  }
+  const rules = { protect: 1800, perPlot: 2, perPen: 2, energy: 5, energyMax: 15, fineMax: 5000, perSpot: 1 }
+  // matureIn 秒后成熟 → 解禁 = 成熟 + 1800
+  const plot = (matureIn) => ({ t: now + matureIn - 600, c: 'a', w: 0, g: 0, h: 0 })
+  const mkIsle = (matures) => ({
+    isle: {
+      plots: matures.map(() => ({ c: 'a', stage: 1, left: 45, steal: false, stolen: 0 })),
+      barn: [],
+    },
+    state: { plots: matures.map(plot), barn: [], tools: { spr: 0 } },
+  })
+  const base = { R: stubR, rules, now, prices: {}, minEV: 3000, energyValue: 300 }
+
+  // 1) 两块地 45 秒后成熟、一块 200 秒后 → 第二波被排进 rec.waves
+  {
+    const { isle, state } = mkIsle([45, 45, 200])
+    const { rec } = updateIsleSchedule({ ...base, isle, state, ownerLeft: 5, maxWaves: 2 })
+    ok('第一波取最早的一组', rec.nextAt === now + 45 + 1800, `nextAt=+${rec.nextAt - now}`)
+    ok('排了后续一波', rec.waves.length === 1 && rec.waves[0].entries[0].i === 2,
+      `waves=${rec.waves.length}`)
+    // 偷完第一波 → 第二波提上来
+    const more = advanceIsleWave(rec, now + 45 + 1800, { completedAt: rec.nextAt })
+    ok('advanceIsleWave 提升第二波', more && rec.nextAt === now + 200 + 1800 && rec.upcoming[0].i === 2,
+      `nextAt=+${rec.nextAt - now}`)
+    ok('提升后回访时刻不早于 60 秒', rec.checkAt >= now + 45 + 1800 + 60, `checkAt=+${rec.checkAt - now}`)
+    ok('最后一波推进后清空', advanceIsleWave(rec, now + 200 + 1800) === false && !rec.upcoming.length)
+  }
+
+  // 2) 失败路径：第一波没偷成（被抢 / 体力不够），sweepStaleUnlocks 等价场景
+  {
+    const { isle, state } = mkIsle([45, 200])
+    const { rec } = updateIsleSchedule({ ...base, isle, state, ownerLeft: 5, maxWaves: 2 })
+    const more = advanceIsleWave(rec, now + 45 + 1800 + 30)
+    ok('第一波错过后仍能推进', more && rec.nextAt === now + 200 + 1800, `nextAt=+${rec.nextAt - now}`)
+  }
+
+  // 3) ownerLeft 封顶：今天只能偷 1 次 → 不排后续波
+  {
+    const { isle, state } = mkIsle([45, 200])
+    const r1 = updateIsleSchedule({ ...base, isle, state, ownerLeft: 1, maxWaves: 2 }).rec
+    ok('ownerLeft=1 只排一波', r1.waves.length === 0 && r1.nextAt === now + 45 + 1800)
+    const r0 = updateIsleSchedule({ ...base, isle, state, ownerLeft: 0, maxWaves: 2 }).rec
+    ok('ownerLeft=0 仍保留第一波（不因字段语义变化整家放弃）', r0.waves.length === 0 && r0.nextAt > 0)
+  }
+
+  // 4) maxWaves=3 → 三波（两处 45 秒、200 秒、400 秒）
+  {
+    const { isle, state } = mkIsle([45, 45, 200, 400])
+    const { rec } = updateIsleSchedule({ ...base, isle, state, ownerLeft: 9, maxWaves: 3 })
+    ok('maxWaves=3 排两波后续', rec.waves.length === 2, `waves=${rec.waves.length}`)
+  }
+
+  // 5) 两波间隔小于 waveGapSec 时跳过中间那组（45 秒与 50 秒算同一批）
+  {
+    const { isle, state } = mkIsle([45, 45, 50, 200])
+    const { rec } = updateIsleSchedule({ ...base, isle, state, ownerLeft: 9, maxWaves: 2, waveGapSec: 20 })
+    ok('间隔不足的波次被跳过', rec.waves.length === 1 && rec.waves[0].entries[0].i === 3,
+      `i=${rec.waves[0]?.entries?.[0]?.i}`)
+  }
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`)
 process.exit(fail ? 1 : 0)

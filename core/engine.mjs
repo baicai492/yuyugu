@@ -70,6 +70,9 @@ export class Engine {
     if (st.arenaDay) this.memo.arenaDay = st.arenaDay
     if (st.arenaToday != null) this.memo.arenaToday = st.arenaToday
     if (st.arenaMax) this.memo.arenaMax = st.arenaMax
+    if (st.arenaChest != null) this.memo.arenaChest = st.arenaChest
+    if (st.arenaChestEarned != null) this.memo.arenaChestEarned = st.arenaChestEarned
+    if (st.arenaChestMax) this.memo.arenaChestMax = st.arenaChestMax
     if (st.arenaSpendDay) this.memo.arenaSpendDay = st.arenaSpendDay
     if (st.arenaCostDay) this.memo.arenaCostDay = st.arenaCostDay
     if (st.arenaCost != null) this.memo.arenaCost = st.arenaCost
@@ -140,6 +143,10 @@ export class Engine {
         arenaDay: this.memo.arenaDay || '',
         arenaToday: this.memo.arenaToday || 0,
         arenaMax: this.memo.arenaMax || 0,
+        // 擂台每日宝箱进度（同样只从 /battle/gear 拿得到）
+        arenaChest: this.memo.arenaChest || 0,
+        arenaChestEarned: this.memo.arenaChestEarned || 0,
+        arenaChestMax: this.memo.arenaChestMax || 0,
         // 擂台养成：今天做没做过、花了多少。不存的话每次重启都会重新花一份预算。
         arenaSpendDay: this.memo.arenaSpendDay || '',
         arenaCostDay: this.memo.arenaCostDay || '',
@@ -328,6 +335,37 @@ export class Engine {
     this.savePersist()
   }
 
+  /**
+   * 「游乐馆手操中」的让位轮次：不发任何写请求，只刷新状态、安排下次唤醒。
+   *
+   * 玩家一局最长 MIN_PLAY+操作，通常几十秒；TTL 兜底 180 秒（Esc 退出时
+   * state.arc.cur 不会清）。每 10~20 秒回来看一次，cur 一空就恢复正常托管。
+   * 修仙/擂台走独立接口、不改 world rev，本来可以不暂停；但一次手操只有
+   * 几十秒，统一停掉更简单，也避免「托管还在后台换装/斗法」的观感问题。
+   */
+  standbyTick(w, ma, cfg) {
+    const key = `${ma.game}@${ma.startedAtSec}`
+    if (this.memo.arcadeStandbyKey !== key) {
+      this.memo.arcadeStandbyKey = key
+      this.log(`游乐馆手动游玩中（${ma.game}，剩 ${ma.remainingSec} 秒）：本轮暂停所有提交——` +
+        '后台写入会让本轮 arcEnd 因 rev 过期被判 409 丢掉', 'warn')
+    }
+    const sleep = Math.max(10, Math.min(ma.remainingSec + 2, cfg.loop?.manualArcadePollSec ?? 20))
+    this.status = {
+      state: 'waiting',
+      step: '游乐馆手操中，暂停写入',
+      round: (this.status.round || 0) + 1,
+      nextAt: Date.now() + sleep * 1000,
+      sleep,
+      lastError: '',
+      lastRun: Date.now(),
+      arcadeStandby: ma,
+    }
+    this.busy = false
+    try { this.snapshot() } catch {}
+    return { sleep, plan: { actions: [] }, standby: ma }
+  }
+
   /** 一轮完整的巡视 */
   async tick() {
     const w = this.world
@@ -343,6 +381,18 @@ export class Engine {
     this.busy = true
     this.setStep('读取世界状态')
     await w.refresh()
+    // 手动游乐馆让位（v1.4.6 移植）：/isle-arcade.js 提交 arcEnd 时用的是 arcStart
+    // 那一刻的旧 rev，前端不会重试 409。后台任何写入都会让玩家这一局作废（次数还照扣），
+    // 所以检测到 state.arc.cur 就整轮停写，只保留状态刷新，等 cur 清掉再恢复。
+    {
+      const ma = w.manualArcade(w.now, cfg.arcade?.manualTtlSec)
+      if (ma.active) return this.standbyTick(w, ma, cfg)
+      if (this.memo.arcadeStandbyKey) {
+        this.memo.arcadeStandbyKey = ''
+        this.status.arcadeStandby = null
+        this.log('游乐馆手操结束，恢复托管')
+      }
+    }
     // 新人礼：账号还没有 gift 状态时领一次（旧版 page.mjs 在 world() 里做）。
     // 领完要重新拉世界状态，否则这一轮的动作都是基于「没领礼」的旧快照。
     if (!cfg.dry && !w.state.gift && !this.memo.welcomeTried) {
@@ -489,6 +539,13 @@ export class Engine {
           this.log('小岛状态在别处变了，按最新状态重新规划')
           continue
         }
+        // 中途有人开始手操游乐馆：世界级的写入门控会拦住后面的提交。
+        // 这时直接结束本轮，别再让偷菜/五子棋/擂台接着发请求。
+        if (e?.name === 'ManualArcadeError') {
+          if (totalActions === 0) return this.standbyTick(w, e.manualArcade, cfg)
+          this.log(e.message, 'warn')
+          break
+        }
         this.log('提交失败：' + e.message, 'err')
         break
       }
@@ -621,6 +678,10 @@ export class Engine {
           this.memo.arenaDay = ar.day
           this.memo.arenaToday = ar.today ?? 0
           this.memo.arenaMax = ar.maxBattles ?? 30
+          // 每日宝箱：每 3 场发一个，最多 5 个。earned 是「已挣到」，chest 是「已开」。
+          this.memo.arenaChest = ar.chest ?? 0
+          this.memo.arenaChestEarned = ar.chestEarned ?? 0
+          this.memo.arenaChestMax = ar.chestMax ?? 5
           // 偷菜算守家战胜率要用（旧版每 10 分钟拉一次我的等级）
           if (ar.level) this.memo.arenaLevel = ar.level
         }
@@ -1114,6 +1175,8 @@ export class Engine {
     return {
       state: this.status.state,
       step: this.status.step || '',
+      // 游乐馆手操让位：GUI 显示「玩家在玩，托管暂停」，避免误以为程序卡死
+      arcadeStandby: this.status.arcadeStandby || null,
       running: this.running,
       dry: this.cfg.dry,
       round: this.status.round || 0,
@@ -1152,6 +1215,9 @@ export class Engine {
           coffee: { used: s.cnt?.coffee || 0, max: R.WORLD.daily.coffee },
           npc: { used: s.cnt?.npc || 0, max: R.NPC.daily },
           gomokuPaid: { used: s.cnt?.gomokuPaid || 0, max: R.GOMOKU_PAID },
+          // 擂台每日宝箱：已开 / 已挣到（每 3 场发一个，最多 5 个）。
+          // 和别的额度不同，这里是「已开/可开」，进度条满 = 今天的箱子都开完了。
+          arenaChest: { used: this.memo?.arenaChest || 0, max: Math.max(this.memo?.arenaChest || 0, this.memo?.arenaChestEarned || 0) },
         },
       } : null,
       ledger: {

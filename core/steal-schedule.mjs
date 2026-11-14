@@ -153,6 +153,9 @@ function penUnlockAt(R, raw, now, protect) {
  *   checkEvery 多久至少回访一次（秒）
  *   prepLeadSec 解禁前多少秒回访
  *   horizonSec 只看未来多久内的解禁
+ *   ownerLeft   这座岛主今天还能被偷几次（visit 回执的 left.owner；null = 未知）
+ *   maxWaves    一座岛最多排几波（默认 2；同一批地分几次成熟时才有用）
+ *   waveGapSec  两波之间至少隔多久（秒）
  * @returns {{ rec, upcoming }}
  */
 export function updateIsleSchedule({
@@ -160,6 +163,7 @@ export function updateIsleSchedule({
   prices = {}, level = 1, myLevel = 1, guard = false, detect = 0.55, sack = false,
   minEV = 3000, energyValue = 300, groupSpanSec = 2, checkEvery = 1800,
   prepLeadSec = 15, horizonSec = DEFAULT_HORIZON_SEC,
+  ownerLeft = null, maxWaves = 2, waveGapSec = 20,
 }) {
   const protect = Number(rules?.protect) || 1800
   const perPlot = Number(rules?.perPlot) || 2
@@ -239,20 +243,30 @@ export function updateIsleSchedule({
     candidates.push({ kind: 'pen', i, at: unlockAt, item: def.product, value, unit })
   })
 
-  // —— 按时刻分组，选第一个 EV 达标的组 ——
+  // —— 按时刻分组，挑出 EV 达标的前几波 ——
   //
   // 旧版 v1 的做法：把 60 秒内的解禁并成一组算总 EV，取第一组过线的。
   // 这里用 groupSpanSec（默认 2 秒）——解禁时刻是精确值，差 2 秒以上的
   // 就是两批货，把它们并在一起会推迟第一批。
+  //
+  // 多波次（v1.4.4 的移植）：同一座岛的作物是分批成熟的，只排第一波的话，
+  // 第二批只能在下次巡逻（默认 30 分钟后）才重新发现，通常早就被别人偷了。
+  // 所以继续往后找 EV 达标的组，最多 maxWaves 个；两波之间至少隔 waveGapSec
+  // （准备 + 提交 + 换装的物理时间，15~20 秒），否则两波的准备窗口会重叠。
+  // 波数还受 ownerLeft 限制：服务端按「岛主今天还能被偷几次」封顶。
   candidates.sort((a, b) => a.at - b.at)
-  let nextAt = 0
-  let nextGroup = []
-  let nextEV = 0
-  for (let k = 0; k < candidates.length; k++) {
+  const ownerCap = ownerLeft == null ? 3 : Math.max(0, Math.floor(Number(ownerLeft) || 0))
+  // ownerLeft=0 时只排第一波（等同于老行为）：宁可多试一次，也不要因为
+  // 这个字段的语义以后变了就把整家岛放弃掉。
+  const capWaves = Math.max(1, Math.min(3, Math.floor(maxWaves) || 2, ownerCap || 1))
+  const waves = []
+  const waveGap = Math.max(0, Number(waveGapSec) || 20)
+  for (let k = 0; k < candidates.length && waves.length < capWaves; k++) {
     const at = candidates[k].at
     const group = []
     for (let j = k; j < candidates.length && candidates[j].at <= at + groupSpanSec; j++) group.push(candidates[j])
     k += group.length - 1
+    if (waves.length && at < waves[waves.length - 1].at + waveGap) continue
     const value = group.reduce((a, c) => a + c.value, 0)
     const spots = group.length
     // 打赢每处多拿 1 个 → 额外收益 = 各处的单件价之和
@@ -266,22 +280,72 @@ export function updateIsleSchedule({
       energy = Math.min(energyMax, energyBase + Math.max(0, spots - 1))
     }
     const ev = stealEV({ value, bonus, targets: group, detect, guard, level, fineMax, energy }, myLevel, energyValue)
-    if (ev >= minEV) { nextAt = at; nextGroup = group; nextEV = ev; break }
+    if (ev >= minEV) waves.push({ at, group, ev, value })
   }
 
-  rec.nextAt = nextAt
-  rec.nextGroup = nextGroup
-  rec.nextEV = nextEV
-  rec.upcoming = nextGroup.map((c) => ({
+  const w0 = waves[0] || null
+  rec.nextAt = w0 ? w0.at : 0
+  rec.nextGroup = w0 ? w0.group : []
+  rec.nextEV = w0 ? w0.ev : 0
+  rec.upcoming = w0 ? w0.group.map((c) => ({
     kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item, unit: c.unit || 0,
+  })) : []
+  // 后续波次（不含当前这一波）。偷成功后由 advanceIsleWave 逐波提升，
+  // 不能像以前那样整段清空——那样第二批成熟时就再也想不起来了。
+  rec.waves = waves.slice(1).map((w) => ({
+    at: w.at, ev: Math.round(w.ev), value: Math.round(w.value || 0),
+    entries: w.group.map((c) => ({
+      kind: c.kind, i: c.i, unlockAt: c.at, exact: true, item: c.item, unit: c.unit || 0,
+    })),
   }))
+  rec.ownerLeft = ownerLeft == null ? null : Math.max(0, Math.floor(Number(ownerLeft) || 0))
   // 回访时刻：
   //   · 有未来目标 → 解禁前 prepLeadSec 秒去（但不早于 60 秒后，也不晚于一个 patrol 周期）
   //   · 没有 → 一个 patrol 周期后再看
-  rec.checkAt = nextAt
-    ? Math.max(now + 60, Math.min(nextAt - Math.max(2, prepLeadSec || 0), now + checkEvery))
+  rec.checkAt = rec.nextAt
+    ? Math.max(now + 60, Math.min(rec.nextAt - Math.max(2, prepLeadSec || 0), now + checkEvery))
     : now + checkEvery
   return { rec, upcoming: rec.upcoming }
+}
+
+/**
+ * 这一波偷完之后把下一波提升上来。
+ *
+ * 旧版在 stealFromTargets 里直接 `rec.upcoming = []`，等于「这座岛以后没有解禁时刻」，
+ * 第二批成熟要么等下一次全量巡逻（默认 30 分钟，早被别人抢了），要么被
+ * sweepStaleUnlocks 当成过期记录删掉。现在按 waveGap 排好的后续波次留在 rec.waves 里，
+ * 这里只做「删掉刚处理完的这一波、把后面的提上来」。
+ *
+ * @param rec    调度记录
+ * @param now    当前时间
+ * @param opts.completedAt 刚刚处理完的那一波的解禁时刻（过滤掉比它更早的波）
+ * @returns {boolean} 是否还有后续波次
+ */
+export function advanceIsleWave(rec, now, { completedAt = 0, graceSec = 5 } = {}) {
+  if (!rec) return false
+  const base = Math.max(Number(now) || 0, Number(completedAt) || 0)
+  // 已经到点或过点的后续波次不再等：它们和刚处理完的这一波几乎同时，
+  // 再去也只会撞上同一个窗口。留一点余量给「提交刚回来」的延迟。
+  const rest = (rec.waves || []).filter((w) => w && Number(w.at) > base - graceSec)
+  const next = rest[0] || null
+  if (!next) {
+    rec.waves = []
+    rec.upcoming = []
+    rec.nextGroup = []
+    rec.nextAt = 0
+    rec.nextEV = 0
+    rec.checkAt = base + 60
+    return false
+  }
+  rec.waves = rest.slice(1)
+  rec.nextAt = Number(next.at) || 0
+  rec.nextGroup = (next.entries || []).map((e) => ({
+    kind: e.kind, i: e.i, at: e.unlockAt, item: e.item, unit: e.unit, value: 0,
+  }))
+  rec.nextEV = Number(next.ev) || 0
+  rec.upcoming = (next.entries || []).slice()
+  rec.checkAt = Math.max(base + 60, rec.nextAt - 15)
+  return true
 }
 
 /**

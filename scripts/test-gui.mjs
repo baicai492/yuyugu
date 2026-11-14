@@ -84,6 +84,7 @@ try {
     energy: document.getElementById('energy')?.textContent,
     scale: document.getElementById('scale')?.textContent,
     quotaCount: document.getElementById('quotas')?.children.length,
+    quotasText: [...(document.querySelectorAll('#quotas .quota') || [])].map((e) => e.textContent),
     statusLine: document.getElementById('statusline')?.textContent,
     tabs: [...document.querySelectorAll('nav.tabs button')].map((b) => b.textContent),
     dayNet: document.getElementById('dayNet')?.textContent,

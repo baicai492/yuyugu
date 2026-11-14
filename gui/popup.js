@@ -59,10 +59,24 @@ async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST',
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
 
 // ---------- 连接 ----------
+// 上一次看到的进程身份。重启交棒失败时旧进程会重新监听——端口一直通、
+// 版本号也没变，只有 bootId 能说明「现在跑的还是旧代码」。
+let lastBootId = ''
+
 async function connect() {
   try {
     const p = await api('/api/ping')
     alive = !!p.ok
+    if (alive && p.bootId) {
+      if (lastBootId && p.bootId !== lastBootId) {
+        // 换了进程：清掉本地的日志游标，让新进程的日志从头拉一遍
+        // （旧进程的 logSince 可能大于新进程的起始时间，会把新日志全滤掉）
+        logSince = 0
+        logLines = []
+        $('statusline').textContent = '主程序已换新进程（PID ' + p.pid + '），正在重新加载'
+      }
+      lastBootId = p.bootId
+    }
   } catch { alive = false }
   $('connBox').hidden = alive
   $('dot').className = 'dot ' + (alive ? 'on' : 'err')
@@ -172,7 +186,7 @@ function renderOverview() {
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
 
   const q = w.quotas || {}
-  const names = { fish: '钓鱼', mine: '挖矿', craft: '加工', bomb: '炸矿', coffee: '咖啡', npc: '52弟', gomokuPaid: '五子棋计奖' }
+  const names = { fish: '钓鱼', mine: '挖矿', craft: '加工', bomb: '炸矿', coffee: '咖啡', npc: '52弟', gomokuPaid: '五子棋计奖', arenaChest: '擂台宝箱' }
   $('quotas').replaceChildren(...Object.entries(q).map(([k, v]) => {
     const p = v.max ? Math.min(1, v.used / v.max) : 0
     const el = document.createElement('div')
@@ -209,11 +223,18 @@ function renderOverview() {
 
   const st = status.state
   const bits = []
-  if (st === 'paused') bits.push('总开关已关，未在做任何事')
+  // 手动游乐馆：后台整轮停写（写入会让玩家这一局的 arcEnd 因 rev 过期 409 丢掉）。
+  // 必须显式说明，否则「不动了」看起来像程序卡死。
+  const msb = status.arcadeStandby
+  if (msb?.active) {
+    $('linkState').textContent = '手操让位'
+    $('linkState').className = 'pill bad'
+    bits.push(`🎪 你在玩${msb.game === 'pool' ? '鲸鱼桌球' : msb.game === 'bowl' ? '鲸鱼保龄' : msb.game === 'bounce' ? '弹弹乐' : '游乐馆'}，托管已暂停（剩 ${Math.max(0, msb.remainingSec || 0)} 秒）`)
+  } else if (st === 'paused') bits.push('总开关已关，未在做任何事')
   else if (st === 'working') bits.push(status.step ? `正在${status.step}` : '正在巡视')
   else if (st === 'waiting') bits.push(`第 ${status.round} 轮已完成`)
   else if (st === 'error') bits.push('出错')
-  if (waiting && status.nextAt) {
+  if (!msb?.active && waiting && status.nextAt) {
     const left = Math.max(0, Math.round((status.nextAt - Date.now()) / 1000))
     bits.push(left > 90 ? `${Math.round(left / 60)} 分钟后巡视` : `${left} 秒后巡视`)
   }

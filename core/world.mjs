@@ -5,6 +5,10 @@ import * as RL from './rules.mjs'
 
 const fmt = (n) => Math.round(n).toLocaleString('en-US')
 
+// 手动游乐馆的兜底 TTL：Esc 退出时前端不会发 arcEnd，state.arc.cur 会永久残留。
+// 180 秒和站点 MIN_PLAY（最长 8 秒）+ 正常一局时长相比已经很宽松。
+const MANUAL_ARCADE_TTL = 180
+
 export class World {
   constructor(client, log = () => {}) {
     this.client = client
@@ -32,6 +36,52 @@ export class World {
   get season() { return this.R.seasonOf(this.isleDay) }
   get weather() { return this.R.weatherOf(this.isleDay) }
   get energyMax() { return this.R.energyMax(this.state) }
+
+  /**
+   * 有没有人在浏览器里手操游乐馆。
+   *
+   * `/isle-arcade.js` 在 arcStart 时把当时的 world.rev 记在前端，arcEnd 用这个**旧 rev**
+   * 提交；期间只要后台有任何写入推进了 rev，服务端就回 409 world_conflict，而前端
+   * **不会自动重试**——玩家这一局直接作废（次数还照扣）。所以检测到 state.arc.cur
+   * 时后台必须停止一切写入，等 cur 被 arcEnd 清掉再恢复。
+   *
+   * t 是服务端 arcStart 的处理时刻；Esc 退出不会发 arcEnd，用 TTL 兜底。
+   * @returns {{active:boolean,game:string,startedAtSec:number,elapsedSec:number,remainingSec:number,resumeAtSec:number,ttlSec:number}}
+   */
+  manualArcade(now = this.now, ttlSec = this.manualArcadeTtlSec ?? MANUAL_ARCADE_TTL) {
+    const ttl = Math.max(10, Number(ttlSec) || MANUAL_ARCADE_TTL)
+    const idle = { active: false, game: '', startedAtSec: 0, elapsedSec: 0, remainingSec: 0, resumeAtSec: 0, ttlSec: ttl }
+    const cur = this.state?.arc?.cur
+    const startedAtSec = Math.floor(Number(cur?.t || 0))
+    if (!cur || typeof cur !== 'object' || startedAtSec <= 0) return idle
+    const refNow = Math.floor(Number(now ?? this.now ?? startedAtSec) || startedAtSec)
+    const resumeAtSec = startedAtSec + ttl
+    const remainingSec = Math.max(0, resumeAtSec - refNow)
+    return {
+      active: refNow < resumeAtSec,
+      game: typeof cur.g === 'string' && cur.g ? cur.g : 'unknown',
+      startedAtSec,
+      elapsedSec: Math.max(0, refNow - startedAtSec),
+      remainingSec,
+      resumeAtSec,
+      ttlSec: ttl,
+    }
+  }
+
+  /**
+   * 当前 arc.cur 是不是**我们自己开的**那一局。
+   * arcadeRound 在 arcStart 之后、arcEnd 之前设置 this.ourArcade；这期间写入必须放行，
+   * 否则托管会被自己刚开的局挡住。
+   */
+  ourArcadeHeld() {
+    const ours = this.ourArcade
+    if (!ours) return false
+    const cur = this.state?.arc?.cur
+    // 刚 start、快照还没同步到 cur：按自己的局处理（求解只要几十秒，
+    // 这段时间不可能有第二个人在同一账号上开局）
+    if (!cur) return true
+    return cur.g === ours.g && Number(cur.seed) === Number(ours.seed)
+  }
 
   /** 应用服务端返回的世界快照 */
   accept(j) {
@@ -98,6 +148,15 @@ export class World {
   async act(actions, { silent = false } = {}) {
     const R = this.R
     if (!actions.length) return { out: [], spend: 0, earn: 0 }
+    // 手动游乐馆：别人正在手操时，任何写入都会让他的 arcEnd 因 rev 过期被判 409
+    // （前端不重试，这局白玩）。托管自己开的局（ourArcade）放行。
+    const ma = this.manualArcade(this.now)
+    if (ma.active && !this.ourArcadeHeld()) {
+      const err = new Error(`游乐馆手操中（${ma.game}，剩 ${ma.remainingSec} 秒），后台暂停写入`)
+      err.name = 'ManualArcadeError'
+      err.manualArcade = ma
+      throw err
+    }
     // 刚串门/帮过忙：手里的 state 和 rev 都是对方岛的，直接发动作必被 409 打回。
     // 先重新拉一次自家世界状态（一次 GET，代价远小于一轮动作全部作废）。
     if (this.revDirty) await this.refresh()

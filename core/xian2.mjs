@@ -14,15 +14,27 @@
 // 也绝不给 rgo 传 n=1（那会进入手动斗法并写 xsFight）。
 
 import * as A from './xian-rules.mjs'
-import { assertSafeXianBatch, toWireXsAction, xsDay } from './xian.mjs'
+import {
+  assertSafeXianBatch, computeAlchemyHerbTargets, computeDesiredPeiyuanStock,
+  dpUsedToday, normalizeXianOptions, toWireXsAction, xsDay,
+} from './xian.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // 效果估值（全部折算成「灵石当量」）。数值只是相对排序用，不追求绝对准确。
+//
+// 权重背后的事实（规则 xian-rules.mjs）：
+//   · 心境：medBonus = .8 + mind/250（打坐修为 +0.4%/点），突破率也 +0.4%/点；
+//     想升到 100 还要靠章节/机缘，是长期乘数，不能按 1 灵石/点算。
+//   · 气运：突破率 +luck/500、机缘成功率 +luck/500，上限 ±50，也是长期乘数。
+//   · 关系：rel1 师父 = 打坐 ×1.1（永久）、rel2 道侣 ×1.15、rel3 结拜 = 斗法灵石 +10%（永久）；
+//     rel4 仇人 = 斗法有 30% 概率被截杀、输了本趟全丢 —— 这是负无穷，必须硬躲。
+//     以前 rel 只记 20 点，flower 第二章会为了 10 气运丢掉结拜（永久 +10% 斗法灵石）。
 const VAL = {
-  stone: 0.5, cv: 1, luck: 8, mind: 1, fav: 2, rep: 1, en: 0.6,
+  stone: 0.5, cv: 1, luck: 15, mind: 20, fav: 2, rep: 1, en: 0.6,
   peiyuan: 30, huiling: 10, otherPill: 15, herb: 6, seed: 6, mat: 15,
 }
+const REL_VAL = { 1: 800, 2: 1000, 3: 500, 4: -1e6 }
 const PILL_VAL = (id) => (id === 'peiyuan' ? VAL.peiyuan : id === 'huiling' ? VAL.huiling : VAL.otherPill)
 
 function effectValue(e) {
@@ -39,7 +51,7 @@ function effectValue(e) {
   for (const [id, n] of Object.entries(e.pill || {})) v += n * PILL_VAL(id)
   for (const n of Object.values(e.herb || {})) v += n * VAL.herb
   for (const n of Object.values(e.seed || {})) v += n * VAL.seed
-  if (e.rel) v += 20
+  if (e.rel) v += REL_VAL[e.rel] ?? 0
   return v
 }
 
@@ -50,11 +62,11 @@ function bagValue(x) {
   for (const [id, n] of Object.entries(x.bag || {})) v += n * VAL.herb
   for (const [id, n] of Object.entries(x.mat || {})) v += n * VAL.mat
   for (const [id, n] of Object.entries(x.seeds || {})) v += n * VAL.seed
-  // 好感和关系也是资产（和 effectValue 同一口径：好感 2/点、关系 20/层）。
+  // 好感和关系也是资产（和 effectValue 同一口径：好感 2/点、关系按 REL_VAL）。
   // 往事的选项常常只给 fav/rel 不给物资，不折进来就会一律判成「没收益」而永远不选，
   // 章节推进跟着卡死。
   for (const row of Object.values(x.npc || {})) {
-    v += Number(row?.[0] || 0) * VAL.fav + Number(row?.[1] || 0) * 20
+    v += Number(row?.[0] || 0) * VAL.fav + (REL_VAL[Number(row?.[1] || 0)] ?? 0)
   }
   return v
 }
@@ -227,6 +239,52 @@ function planRealm(A_, x, now, opts) {
 // ---------------- 主规划 ----------------
 
 /**
+ * 委托能不能安全交。
+ *
+ * 旧版只要本地预演通过就交，等于把「今天还缺的丹药」直接送出去换贡献：
+ * 培元丹被交掉，突破就少一颗；回灵丹被交掉，当天灵力就少 30 点。
+ * 委托奖励是贡献 + 声望 + 灵石（草药类 20+4n，丹药类 40），
+ * 交掉 5 个灵草 = 40 贡献 + 40 声望 + 20 灵石，通常是值的——
+ * 但前提是交完还够今天用。这里按「今天还缺什么」留一条底线：
+ *   · 回灵丹：留够今天还没吃的额度（PILL_DAILY − 已吃）
+ *   · 培元丹：留 computeDesiredPeiyuanStock（药园未满级时是 6，满级后是突破/融合所需）
+ *   · 草药：只在「马上能起炉、且这炉料已经齐」时留一整份回灵丹配方
+ *     （单纯缺料时留几个也没用，反而让委托永远交不了）
+ */
+function canTurnInSectTask(sim, t, opts, row) {
+  const def = A.TASK_KINDS?.[row?.[0]]
+  if (!Array.isArray(def)) return false
+  const [kind, key, n] = def
+  const d = xsDay(t)
+  if (kind === 'win') return sim.tw?.d === d && Number(sim.tw.n || 0) >= n
+  if (kind === 'herb') {
+    const have = Number(sim.bag?.[key] || 0)
+    if (have < n) return false
+    let keep = 0
+    const recipe = A.PILLS.huiling.need || {}
+    if (!sim.brew && key in recipe) {
+      const needToday = Math.max(0, A.PILL_DAILY - dpUsedToday(sim, t))
+      const haveHuiling = Number(sim.pills?.huiling || 0)
+      const canBrewNow = Object.entries(recipe)
+        .every(([h, q]) => Number(sim.bag?.[h] || 0) >= q)
+      if (haveHuiling < needToday && canBrewNow) keep = Number(recipe[key] || 0)
+    }
+    return have >= n + keep
+  }
+  if (kind === 'pill') {
+    const have = Number(sim.pills?.[key] || 0)
+    if (have < n) return false
+    if (key === 'huiling') {
+      const rem = Math.max(0, A.PILL_DAILY - dpUsedToday(sim, t))
+      return have - n >= rem
+    }
+    if (key === 'peiyuan') return have - n >= computeDesiredPeiyuanStock(sim, t, opts)
+    return true
+  }
+  return false
+}
+
+/**
  * 规划一批 2.0 动作。返回内部动作（已转成线上 xsXxx 形式）。
  * 只在本地预演成功（或明确要提交给服务端判定）的动作才会出现在结果里。
  */
@@ -269,9 +327,11 @@ export function planXian2Actions(world, now, opts = {}) {
 
   // 3) 交委托（本地能判断的条件都先预演）。刚刷新出来的列表服务端可能不同，
   //    这一轮不交，等下一批拿到真实列表再说。
+  //    交之前过一遍安全线：交完还得够今天炼丹/突破用（见 canTurnInSectTask）。
   if (!tasksJustRolled && sim.tk?.d === d && Array.isArray(sim.tk.list)) {
     sim.tk.list.forEach((it, n) => {
       if (!it || it[1]) return
+      if (!canTurnInSectTask(sim, t, opts, it)) return
       emit({ a: 'task', n })
     })
   }
@@ -306,15 +366,23 @@ export function planXian2Actions(world, now, opts = {}) {
     }
   }
 
-  // 6) 赠礼：只送对方喜欢的（+40），而且留够自家用的余量
+  // 6) 赠礼：只送对方喜欢的**草药**（+40 好感），而且留够自家炼丹的余量。
+  //
+  //    绝不送丹药：回灵丹是灵力（每天最多吃 3 颗，一炉才 3~4 颗）、
+  //    培元丹是突破/融合/药园经验的硬通货，一颗 60~90 灵石，
+  //    换 +40 好感不划算。每个 NPC 的喜好表里都至少有一种草药，
+  //    禁掉丹药不会让任何人送不了礼。
   {
+    const { bagReserve } = computeAlchemyHerbTargets(sim, t, opts)
     for (const id of Object.keys(A.CHAPTERS)) {
       if (acts.length >= maxN) break
       const liked = A.PREF[id]?.[0] || []
       for (const k of liked) {
-        const isPill = !!A.PILLS[k]
-        const have = isPill ? (sim.pills?.[k] || 0) : (sim.bag?.[k] || 0)
-        if (have < (isPill ? 2 : 3)) continue
+        if (A.PILLS[k]) continue
+        const have = Number(sim.bag?.[k] || 0)
+        // 送一颗之后还要够今天炼丹用的（bagReserve 是炼丹预留）
+        if (have - 1 < Number(bagReserve[k] || 0)) continue
+        if (have < 1) continue
         if (emit({ a: 'gift', el: id, herb: k })) break
       }
     }
@@ -487,14 +555,20 @@ export function nextXian2WakeSec(world, now) {
  * 返回 { ran, actions, reason, nextWakeAt }
  */
 export async function xian2Round(world, cfg, log = () => {}, memo = {}) {
-  const xc = cfg?.xian || {}
+  const xcRaw = cfg?.xian || {}
   const x2 = cfg?.xian2 || {}
-  if (xc.enabled === false || x2.enabled === false) return { ran: false, actions: 0, reason: 'disabled' }
+  if (xcRaw.enabled === false || x2.enabled === false) return { ran: false, actions: 0, reason: 'disabled' }
+  // 交委托/挑主修这些判断要读 breakMode、autoFuse —— 用 1.0 同一套归一化，
+  // 免得两个模块对「现在是 smart 还是 manual」的理解不一致。
+  const xc = normalizeXianOptions({ ...xcRaw, enabled: true })
   const opts = {
-    maxActionsPerBatch: Math.max(1, Math.min(30, x2.maxActions ?? xc.maxActions ?? 24)),
+    maxActionsPerBatch: Math.max(1, Math.min(30, x2.maxActions ?? xc.maxActionsPerBatch ?? 24)),
     beam: x2.realmBeam ?? 6,
     loadoutMs: x2.loadoutMs ?? 900,
     realm: x2.realm !== false,
+    breakMode: xc.breakMode,
+    autoFuse: xc.autoFuse,
+    fuseTarget: xc.fuseTarget,
     memo,
   }
   const first = planXian2Actions(world, world.now, opts)

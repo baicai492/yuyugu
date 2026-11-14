@@ -223,7 +223,7 @@ function countOpenSoilPlots(x) {
   return { open, empty }
 }
 
-function dpUsedToday(x, nowSec) {
+export function dpUsedToday(x, nowSec) {
   const d = xsDay(nowSec)
   return x.dp?.d === d ? Number(x.dp.n || 0) : 0
 }
@@ -273,7 +273,7 @@ function computeHeldPeiyuanFloorWhileSubLv5(x, nowSec, opts) {
   return hold
 }
 
-function computeDesiredPeiyuanStock(x, nowSec, opts) {
+export function computeDesiredPeiyuanStock(x, nowSec, opts) {
   const r = Number(x.cv?.r || 0)
   const breakNeed = r < REALMS.length - 1 ? r + 1 : 0
   if ((x.lv || 1) < 5) return Math.max(6, breakNeed + 3)   // 药园没满级就一直炼
@@ -286,7 +286,7 @@ function computeDesiredPeiyuanStock(x, nowSec, opts) {
   return breakNeed * retryMultiplier + fuseReserve
 }
 
-function computeAlchemyHerbTargets(x, nowSec, opts) {
+export function computeAlchemyHerbTargets(x, nowSec, opts) {
   const usedDp = dpUsedToday(x, nowSec)
   const targetHuilingPills = (PILL_DAILY - usedDp) + PILL_DAILY
   // 炉里那炉要出几颗按「可能的最大值」估：q 要出炉才知道，

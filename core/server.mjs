@@ -3,6 +3,7 @@
 import { createServer } from 'node:http'
 import { createConnection } from 'node:net'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { openSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,6 +13,12 @@ import { readLogHistory, logInventory, findLegacyExtensionStores, readLegacyDir 
 // 主程序版本号：GUI 标题栏显示为 v<版本>。
 // 这套是 v2（Node 主程序 + Chrome 仅 GUI）。加战斗内核那次误升到 3，已改回。
 export const VERSION = 2
+
+// 本次进程的身份。GUI 用它区分「端口后面换了个进程」和「还是原来那个」：
+// 重启交棒失败时旧进程会重新 listen，端口始终在、版本号也可能没变，
+// 只有 bootId 变了才能断定已经换了进程（反之则说明还在跑旧代码）。
+const BOOT_ID = randomUUID()
+const BOOT_AT = Date.now()
 
 const ALLOW_ORIGIN = [
   'chrome-extension://',
@@ -281,7 +288,17 @@ export function startServer({ engine, cfg, port = 8787, token = '', onConfigChan
       }
 
       // ---------- 健康检查 ----------
-      if (path === '/api/ping') return send(res, 200, { ok: true, name: 'yuyugu', version: VERSION })
+      if (path === '/api/ping') {
+        return send(res, 200, {
+          ok: true, name: 'yuyugu', version: VERSION,
+          // bootId / pid / startedAt：GUI 靠它识别「端口后面换了一个进程」。
+          // 重启交棒失败时旧进程会重新监听（见下方 revive），此时端口一直通、
+          // 版本号也可能没变，只有 bootId 能证明跑的还是旧代码。
+          pid: process.pid,
+          bootId: BOOT_ID,
+          startedAt: BOOT_AT,
+        })
+      }
 
       return send(res, 404, { error: '未知路径：' + path })
     } catch (e) {

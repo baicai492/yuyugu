@@ -97,10 +97,24 @@ export async function applyRestingLoadout(world, cfg, gear, log = () => {}, { ro
   return { gear: g, changed, points: lastPoints }
 }
 
-/** 开可用的宝箱 */
+/**
+ * 开可用的宝箱。
+ *
+ * 不能只看 chestMax − chest：那个差值是「今天总共能开几个」，不是「现在能开几个」。
+ * 服务端按每 need 场战斗（默认 3 场）发一个宝箱，`daily.earned` 才是已挣到的数量。
+ * 例如 0 点时 chest=0/chestMax=5，直接 POST 5 次只会被拒 5 次。
+ * 有 earned 就按 earned 算；老版本没这个字段时退回旧算法。
+ */
 export async function openChests(world, gear, log = () => {}) {
   const d = gear.daily || {}
-  let left = Math.max(0, (d.chestMax || 5) - (d.chest || 0))
+  const max = Math.max(0, Number(d.chestMax ?? 5) || 0)
+  const have = Math.max(0, Number(d.chest ?? 0) || 0)
+  const earned = d.earned == null ? null : Math.max(0, Number(d.earned) || 0)
+  const ready = d.ready === true
+  // ready=true 但 earned 落后（服务端可能提前给）时，至少给一次机会
+  let left = earned == null
+    ? Math.max(0, max - have)
+    : Math.max(0, Math.min(max, earned) - have) + (ready && earned <= have ? 1 : 0)
   let opened = 0
   while (left-- > 0) {
     try {
@@ -383,11 +397,17 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
     }
   }
 
-  // 开宝箱
+  // 开宝箱。开出来的装备要立刻穿上：守家是静止装，晚一轮就白挨一轮打。
+  // 开箱会返回新的 catalog，直接拿来重算静止装（applyRestingLoadout 自己会再拉一次 gear）。
   if (a.openChests) {
     try {
       gear = await arenaGear(world)
-      await openChests(world, gear, log)
+      const opened = await openChests(world, gear, log)
+      if (opened && a.autoEquip) {
+        gear = await arenaGear(world)
+        const rl = await applyRestingLoadout(world, cfg, gear, log)
+        if (rl.gear) gear = rl.gear
+      }
     } catch {}
   }
 
@@ -415,5 +435,12 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo } 
   // today / maxBattles 一起返回：这两个数只在这里拿得到（要发 /battle/gear 请求），
   // nextWake 是纯函数不能发请求，只能靠调用方把它们缓存进 memo。
   // level 给偷菜用（对手档案缺失时退回等级差估算）。
-  return { battles, spend, today: gear.daily?.battles ?? 0, maxBattles: a.battles ?? 30, day: world.R.worldDay(world.now), level: gear.level || 1 }
+  // chest*：每日宝箱进度（每 need 场战斗发一个，最多 chestMax 个），GUI 概览用。
+  const gd = gear.daily || {}
+  return {
+    battles, spend, today: gd.battles ?? 0, maxBattles: a.battles ?? 30,
+    day: world.R.worldDay(world.now), level: gear.level || 1,
+    chest: Number(gd.chest ?? 0), chestMax: Number(gd.chestMax ?? 5),
+    chestEarned: Number(gd.earned ?? 0), chestNeed: Number(gd.need ?? 3),
+  }
 }
