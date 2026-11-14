@@ -1243,7 +1243,15 @@ export function xianSnapshot(world, cfg = {}) {
 
   // 试炼（STAGES）：首通给培元丹，但战斗是弹幕小游戏，只能真人点——
   // xsFight/xsWin 在 FORBIDDEN_XIAN_ACTIONS 里，托管永远不会提交。
-  const stages = Object.entries(STAGES).map(([id, S]) => ({
+  //
+  // 「切磋」这个条目是站点的死数据，不能列出来（2026-11-14 对着线上源码核过）：
+  //   · 论剑台的可选列表是 STAGES.filter(([k]) => k !== 'duel')，根本不提供；
+  //   · 切磋走 NPC 对话，自动对战调的是 act3 的 'ab'（只记 x.dd/x.df，不碰 clear）；
+  //   · 就算点「亲自出手（弹幕）」走 x sFight('duel') 再 xsWin，
+  //     rules.js 里写的是 `if (f.s !== 'duel' && !x.clear[f.s])` —— 明确把切磋排除在首通之外。
+  // 所以 x.clear.duel 永远是 undefined，列出来只能一直显示「未通关」，纯误导。
+  const TRIAL_STAGES = Object.entries(STAGES).filter(([id]) => id !== 'duel')
+  const stages = TRIAL_STAGES.map(([id, S]) => ({
     id, name: S.name,
     stone: S.stone,
     need: S.need,
@@ -1346,8 +1354,9 @@ export function xianSnapshot(world, cfg = {}) {
       // 今日已拿过首胜灵石的同门（每人每天一次）；总胜场是 fightUse，两个口径分开显示
       duelPrize: ddWon.length,
       duelPrizeNames: ddWon.map(npcName),
-      cleared: Object.keys(sim.clear || {}).length,
-      stageTotal: Object.keys(STAGES).length,
+      // 首通数要和列表里的条目数同口径（上面已经剔掉永远记不上 clear 的 duel）
+      cleared: TRIAL_STAGES.filter(([id]) => sim.clear?.[id]).length,
+      stageTotal: TRIAL_STAGES.length,
     },
     // 累计值（纯展示）：hv 是从头开始的收获次数，log 是成功动作总数。
     // 规则里每 4 个动作的那次收获多给 1 株，bonusIn=0 表示下一次收获就能多拿。

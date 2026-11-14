@@ -535,7 +535,10 @@ function renderXianDetail(D) {
         { text: `  ${st.needRealm}可进 · 基础 ${st.stone} 灵石`, cls: 'dim' },
         ...(st.canEnter ? [] : [{ text: '  （境界不足）', cls: 'bad' }]),
       ],
-      [{ text: '首通给培元丹 ×1；战斗是弹幕小游戏，托管不会提交，只能手动点', cls: 'dim' }],
+      [{
+        text: '首通给培元丹 ×1。入口：宗门广场 → 藏经阁 → 论剑台；战斗是弹幕小游戏，托管不会提交，只能手动点',
+        cls: 'dim',
+      }],
     ]))
   }
   $('xStages').replaceChildren(stageList)
