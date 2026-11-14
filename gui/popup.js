@@ -309,16 +309,23 @@ function xRow(label, value, title) {
 // 技能槽的悬停明细。4 个槽的具体数值一行放不下，塞进 tooltip；
 // 卡片上只保留「技能槽  A → B → C → D」一行，和改造前一致。
 // （修仙没有装备系统，能「穿」的只有功法、技能槽和灵根。）
+//
+// 箭头不是「固定循环」，是优先级：战斗里每 0.1 秒从槽 1 开始找第一个
+// 「冷却好且条件满足」的技能放（xian-rules.mjs:262），所以靠前的更常用，
+// 槽 4 只在其他三个都冷却时才出场。托管的配招是枚举 24 种排列、
+// 逐套模拟战斗挑出来的，所以这个顺序本身就是最优顺序。
 function slotHint(slots) {
   if (!(slots || []).length) return ''
-  return '同门切磋和秘境战斗共用这套配招：\n' + slots.map((s) => {
-    const nums = []
-    if (s.dmg) nums.push(`伤害 ${s.dmg}`)
-    if (s.shield) nums.push(`护盾 ${s.shield}`)
-    if (s.heal) nums.push(`回血 ${s.heal}`)
-    if (s.cd) nums.push(`冷却 ${s.cd}s`)
-    return `· ${s.name}（${s.element}）${nums.length ? '　' + nums.join(' · ') : ''}`
-  }).join('\n')
+  return '按优先级从左到右：每次出手从槽 1 往后找第一个冷却好的技能，靠前的更常用。\n' +
+    '（回血类在血量 75% 以上、护盾类在已有护盾时会跳过）\n' +
+    '同门切磋和秘境战斗共用这套配招：\n' + slots.map((s) => {
+      const nums = []
+      if (s.dmg) nums.push(`伤害 ${s.dmg}`)
+      if (s.shield) nums.push(`护盾 ${s.shield}`)
+      if (s.heal) nums.push(`回血 ${s.heal}`)
+      if (s.cd) nums.push(`冷却 ${s.cd}s`)
+      return `· ${s.name}（${s.element}）${nums.length ? '　' + nums.join(' · ') : ''}`
+    }).join('\n')
 }
 
 // 一条明细：lines 是若干行，每行是若干 { text, cls, bold } 片段。
