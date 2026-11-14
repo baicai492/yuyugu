@@ -946,7 +946,12 @@ export class Engine {
     // 说明「看起来有活其实干不了」（体力/材料/现金卡住）。
     // 这时必须退避，否则就是每几秒醒一次的刷屏循环——
     // 之前体力 0 收不了地那次就是这种表现。
-    if (!cfg.dry && sleep < 10 && totalActions === 0 && !didWork) {
+    //
+    // snipeWindow 例外：这一轮是**主动让路**给解禁窗口才什么都没做的，
+    // 不是干不了。线上 15:09:31 就是「6 秒内解禁 → 跳过所有后台任务」，
+    // 紧接着被判空转退避 300 秒，下一处解禁只能靠 idleWait 的 30 秒巡检
+    // 碰运气赶回来。让路时必须准时在解禁时刻醒来。
+    if (!cfg.dry && sleep < 10 && totalActions === 0 && !didWork && !snipeWindow) {
       const cool = cfg.loop?.stuckCool ?? 300
       this.log(`本轮没有做成任何动作但唤醒间隔只有 ${sleep} 秒，退避到 ${cool} 秒`, 'warn')
       sleep = cool
