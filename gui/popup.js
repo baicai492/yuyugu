@@ -532,7 +532,7 @@ function renderXianDetail(D) {
   const stageList = document.createElement('div')
   stageList.className = 'xlist'
   for (const st of D.stages || []) {
-    stageList.append(xItem([
+    const item = xItem([
       [
         { text: st.name, bold: true },
         { text: st.cleared ? '  已首通' : '  未通关', cls: st.cleared ? 'ok' : 'dim' },
@@ -544,15 +544,15 @@ function renderXianDetail(D) {
           '战斗是弹幕小游戏，托管不会提交，只能手动点',
         cls: 'dim',
       }],
-      // 注意外层还要再套一层数组：xItem 的每个「行」本身是片段数组，
-      // 少套一层就会把一个 {text} 对象当成行去 for...of，抛 "line is not iterable"。
-      ...(st.areaName ? [[{
-        text: `秘境「${st.areaName}」走到首领选「🎯 亲自出手（弹幕）」，打的就是这一场（同一关卡）。` +
-          '它会同时记下这一关的首通和该地图的通关，但两套标记是独立的：' +
-          `在论剑台打赢这里，不会让${st.areaName}地图变成已通关（那张地图得自己走完）。`,
-        cls: 'dim',
-      }]] : []),
-    ]))
+    ])
+    // 和秘境的关系放在悬停提示里，列表本身只留两行。
+    // 行内片段必须是数组（[[{text}]]），往这里塞对象会抛 "line is not iterable"。
+    if (st.areaName) {
+      item.title = `秘境「${st.areaName}」走到首领选「🎯 亲自出手（弹幕）」，打的就是这一场（同一关卡）。\n` +
+        '它会同时记下这一关的首通和该地图的通关，但两套标记是独立的：' +
+        `在论剑台打赢这里，不会让${st.areaName}地图变成已通关（那张地图得自己走完）。`
+    }
+    stageList.append(item)
   }
   $('xStages').replaceChildren(stageList)
 

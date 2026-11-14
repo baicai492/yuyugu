@@ -71,6 +71,8 @@ nav.tabs button.on { background: var(--accent); border-color: var(--accent); col
 .xitem .ok { color: var(--up); }
 .xitem .bad { color: var(--down); }
 .xitem .tag { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 999px; background: var(--card); color: var(--accent); font-size: 10px; }
+/* 带悬停说明的条目给个 help 光标，暗示还有话没显示 */
+.xitem[title] { cursor: help; }
 .note { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 6px; }
 .note b { color: var(--fg); }
 
