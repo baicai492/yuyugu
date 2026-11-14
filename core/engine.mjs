@@ -579,6 +579,11 @@ export class Engine {
     let rounds = 0
     let totalEarn = 0, totalSpend = 0, totalTax = 0
     let totalActions = 0        // 本轮真正提交成功的动作数（判断「有没有推进」用）
+    // 不走 world.act 的模块（偷菜/帮忙/擂台/五子棋/游乐馆/站宠护理）有自己的回执，
+    // 上面那个计数抓不到。它们做成事同样算「本轮有推进」——否则会出现
+    // 「刚偷到 6 处，却因为 totalActions=0 被判成空转、退避 300 秒、错过下一波解禁」
+    // （线上 2026-11-14 15:09 就是这个表现）。
+    let didWork = false
     // 本轮巡视已经投过资就不再评估新的投资。配合 planner 的 maxPerRound=1，
     // 保证一次巡视最多只买一项；是否继续投，等下次巡视重新看现金和规则。
     let investedThisTick = false
@@ -666,7 +671,7 @@ export class Engine {
         // fine 是打输守家战真扣的 D（现金动了，要按支出记，否则账本少一笔）。
         this.credit(r.value || 0, 0, 0, { cash: false })
         if (r.fine > 0) { totalSpend += r.fine; this.credit(0, r.fine) }
-        if ((r.stolen || 0) > 0) noteSnipeResult(this.memo, r.stolen)
+        if ((r.stolen || 0) > 0) { noteSnipeResult(this.memo, r.stolen); didWork = true }
         else if (this.memo.stealWakePending && !r.staleWake) {
           const before = this.memo.stealWakeGap || 60
           noteSnipeResult(this.memo, 0)
@@ -744,7 +749,7 @@ export class Engine {
           const r = await playGomoku(w, cfg, this.log.bind(this))
           totalEarn += r.coins || 0
           this.credit(r.coins || 0)
-          if (r.games > 0) this.memo.gomokuStall = 0
+          if (r.games > 0) { this.memo.gomokuStall = 0; didWork = true }
           else if (r.fails > 0) this.memo.gomokuStall = (this.memo.gomokuStall || 0) + 1
         }
         if (cfg.npc.rps || cfg.npc.card || cfg.npc.box) {
@@ -752,6 +757,7 @@ export class Engine {
           const r = await playOther(w, cfg, this.log.bind(this))
           totalEarn += r.coins || 0
           this.credit(r.coins || 0)
+          if (r.games > 0) didWork = true
         }
       } catch (e) { this.log('52弟出错：' + e.message, 'err') }
     }
@@ -765,6 +771,7 @@ export class Engine {
         this.setStep('站宠护理')
         const r = await petCareRound(w, cfg, this.log.bind(this), this.memo)
         if (r?.pet) this.status.pet = r.pet
+        if (r?.saved > 0) didWork = true
       } catch (e) { this.log('站宠护理出错：' + e.message, 'err') }
     }
 
@@ -780,6 +787,7 @@ export class Engine {
           // 打完这批再走就晚了——每场开打前问一次，该让路就让路。
           shouldAbort: () => Boolean(this.snipeDueNow(w, snipeLead)),
         })
+        if (ar?.battles > 0) didWork = true
         // 今日已打场次只在这里拿得到（要发 /battle/gear）。存进 memo，
         // nextWake 才能判断「擂台是不是也打完了」，进而决定要不要长睡。
         if (ar) {
@@ -810,7 +818,7 @@ export class Engine {
         totalEarn += r.coins || 0
         this.credit(r.coins || 0)
         // 没帮到人就累加 stall，连续几次后 nextWake 会退避，避免空转
-        if (r.helped > 0) this.memo.helpStall = 0
+        if (r.helped > 0) { this.memo.helpStall = 0; didWork = true }
         else if (this.memo.helpCount < (cfg.social.help.perDay ?? 10)) this.memo.helpStall = (this.memo.helpStall || 0) + 1
       } catch (e) { this.log('帮忙出错：' + e.message, 'err') }
     }
@@ -850,7 +858,7 @@ export class Engine {
         if (left > 0) {
           this.setStep('游乐馆')
           const ar = await arcadeRound(w, cfg, this.log.bind(this), this.memo)
-          if (ar.played > 0) this.memo.arcadeStall = 0
+          if (ar.played > 0) { this.memo.arcadeStall = 0; didWork = true }
           else this.memo.arcadeStall = (this.memo.arcadeStall || 0) + 1
         }
       } catch (e) { this.log('游乐馆出错：' + e.message, 'err') }
@@ -869,6 +877,7 @@ export class Engine {
         // 偷到了就恢复 60 秒的敏锐节奏，白醒一趟就放宽一倍（封顶 15 分钟）。
         if ((r.stolen || 0) > 0) {
           noteSnipeResult(this.memo, r.stolen)
+          didWork = true
         } else if (this.memo.stealWakePending && !r.staleWake) {
           const before = this.memo.stealWakeGap || 60
           noteSnipeResult(this.memo, 0)
@@ -937,7 +946,7 @@ export class Engine {
     // 说明「看起来有活其实干不了」（体力/材料/现金卡住）。
     // 这时必须退避，否则就是每几秒醒一次的刷屏循环——
     // 之前体力 0 收不了地那次就是这种表现。
-    if (!cfg.dry && sleep < 10 && totalActions === 0) {
+    if (!cfg.dry && sleep < 10 && totalActions === 0 && !didWork) {
       const cool = cfg.loop?.stuckCool ?? 300
       this.log(`本轮没有做成任何动作但唤醒间隔只有 ${sleep} 秒，退避到 ${cool} 秒`, 'warn')
       sleep = cool
