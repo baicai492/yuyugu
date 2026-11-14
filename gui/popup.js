@@ -306,6 +306,21 @@ function xRow(label, value, title) {
   return d
 }
 
+// 技能槽的悬停明细。4 个槽的具体数值一行放不下，塞进 tooltip；
+// 卡片上只保留「技能槽  A → B → C → D」一行，和改造前一致。
+// （修仙没有装备系统，能「穿」的只有功法、技能槽和灵根。）
+function slotHint(slots) {
+  if (!(slots || []).length) return ''
+  return '同门切磋和秘境战斗共用这套配招：\n' + slots.map((s) => {
+    const nums = []
+    if (s.dmg) nums.push(`伤害 ${s.dmg}`)
+    if (s.shield) nums.push(`护盾 ${s.shield}`)
+    if (s.heal) nums.push(`回血 ${s.heal}`)
+    if (s.cd) nums.push(`冷却 ${s.cd}s`)
+    return `· ${s.name}（${s.element}）${nums.length ? '　' + nums.join(' · ') : ''}`
+  }).join('\n')
+}
+
 // 一条明细：lines 是若干行，每行是若干 { text, cls, bold } 片段。
 // 用 DOM 拼而不是 innerHTML：存档里的 id 是服务端数据，不该当 HTML 解释。
 function xItem(lines) {
@@ -376,6 +391,7 @@ function renderXianDetail(D) {
     xRow('突破所需', `培元丹 ×${cv.pillsNeed ?? 0}（现有 ${cv.pillsHave ?? 0}）`,
       '修为到 9 层满线后，突破要吃掉 (境界+1) 颗培元丹'),
     xRow('今日斗法胜场', String(D.duelWins ?? 0)),
+    xRow('技能槽', (c.slots || []).map((s) => s.name).join(' → ') || '—', slotHint(c.slots)),
   ]
   const techList = document.createElement('div')
   techList.className = 'xlist'
@@ -395,24 +411,7 @@ function renderXianDetail(D) {
     ]))
   }
   if (!(D.techs || []).length) techList.append(xItem([[{ text: '还没学功法（去藏经阁学一部）', cls: 'dim' }]]))
-
-  // 技能槽 = 修仙里的「装备」：4 个，同门切磋和秘境战斗共用这一套。
-  const slotList = document.createElement('div')
-  slotList.className = 'xlist'
-  for (const s of c.slots || []) {
-    const nums = []
-    if (s.dmg) nums.push(`伤害 ${s.dmg}`)
-    if (s.shield) nums.push(`护盾 ${s.shield}`)
-    if (s.heal) nums.push(`回血 ${s.heal}`)
-    if (s.cd) nums.push(`冷却 ${s.cd}s`)
-    slotList.append(xItem([[
-      { text: s.name, bold: true },
-      { text: `  ${s.element}`, cls: 'dim' },
-      { text: nums.length ? `  ${nums.join(' · ')}` : '', cls: 'dim' },
-    ]]))
-  }
-  if (!(c.slots || []).length) slotList.append(xItem([[{ text: '还没配招', cls: 'dim' }]]))
-  $('xCombat').replaceChildren(...combatRows, techList, slotList)
+  $('xCombat').replaceChildren(...combatRows, techList)
 
   // ---------- 灵根与融合 ----------
   const R = D.roots || {}

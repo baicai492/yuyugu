@@ -1046,8 +1046,8 @@ export function xianSnapshot(world, cfg = {}) {
     mind: xsMind(sim),
     luck: xsLuck(sim),
     breakRate: Number(breakRate(sim).toFixed(2)),              // 突破成功率
-    // 配招就是修仙里的「装备」：4 个技能槽。带上伤害/冷却等数值，
-    // 否则面板只有技能名，看不出这套配招强在哪。
+    // 配招：4 个技能槽（修仙没有装备系统，能「穿」的只有功法、技能槽和灵根）。
+    // 带上伤害/冷却等数值，面板把它们放进技能槽那一行的 tooltip。
     slots: slotIds.map((id) => {
       const k = skill(id) || {}
       return {

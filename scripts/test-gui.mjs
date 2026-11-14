@@ -113,6 +113,10 @@ try {
       combatRows: count('xCombat'), rootsRows: count('xRoots'),
       stages: count('xStages'), npc: count('xNpc'), recipes: count('xRecipes'),
       combat: txt('xCombat'),
+      slotRow: [...document.querySelectorAll('#xCombat .card-row')]
+        .map((r) => r.textContent).find((t) => t.startsWith('技能槽')) || null,
+      slotHint: [...document.querySelectorAll('#xCombat .card-row')]
+        .find((r) => r.textContent.startsWith('技能槽'))?.title || null,
       rootsText: txt('xRoots'),
       stagesText: [...(document.querySelectorAll('#xStages > *') || [])].map((e) => e.textContent),
       npcFirst: document.querySelector('#xNpc > *')?.textContent,
