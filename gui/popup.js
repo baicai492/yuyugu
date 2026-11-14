@@ -1044,9 +1044,14 @@ function renderLogs() {
   const box = $('logs')
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20
   const src = logMode === 'hist' ? histLines : logMode === 'legacy' ? legacyLines : logLines
-  const out = []
+  // 「本次运行」是每 1.5 秒整块重建的滚动日志，只画尾部 600 行，免得 DOM 越滚越大。
+  // 历史记录 / 旧插件记录是一次性静态读取，拉到多少就画多少——
+  // 以前这里无差别 slice(-600)，点「显示全部」拉回 9,823 行也只画 600 行，
+  // 看着就像按钮没生效。
+  const view = logMode === 'now' ? src.slice(-600) : src
+  const frag = document.createDocumentFragment()
   let lastDay = ''
-  for (const l of src.slice(-600)) {
+  for (const l of view) {
     // 时间戳：历史日志是 "MM-DD HH:MM:SS" 字符串，实时日志是毫秒
     let day = '', clock = ''
     if (l.ts) { day = l.ts.slice(0, 10); clock = l.ts.slice(11, 19) }
@@ -1061,7 +1066,7 @@ function renderLogs() {
       const dp = document.createElement('p')
       dp.className = 'day'
       dp.textContent = day
-      out.push(dp)
+      frag.append(dp)
     }
     const p = document.createElement('p')
     const cls = l.level === 'err' ? 'bad' : logClass(l.msg || '')
@@ -1070,14 +1075,16 @@ function renderLogs() {
     t.textContent = clock
     // createTextNode 本身就是转义安全的，不能再套 escapeHtml（会变成 &lt; 显示出来）
     p.append(t, document.createTextNode(l.msg || ''))
-    out.push(p)
+    frag.append(p)
   }
-  if (!out.length) {
+  if (!view.length) {
     const p = document.createElement('p')
     p.textContent = '还没有日志。'
-    out.push(p)
+    frag.append(p)
   }
-  box.replaceChildren(...out)
+  // 用 fragment 一次换掉整块，别用 replaceChildren(...out)：
+  // 「显示全部」时是上万行，展开成上万个实参会逼近 V8 的参数上限。
+  box.replaceChildren(frag)
   if (atBottom) box.scrollTop = box.scrollHeight
 }
 
@@ -1118,9 +1125,12 @@ async function loadLogHistory() {
     const info = $('histInfo')
     const label = histDay || j.picked?.[0] || '该日'
     if (!j.days?.length) info.textContent = '没有历史日志'
+    // histShowAll 之后 total > shown 只剩一种可能：撞上服务端单次 5 万行上限
+    else if (total > shown && histShowAll) info.textContent = `${label}：共 ${total.toLocaleString()} 行，单次最多取 ${shown.toLocaleString()} 行`
     else if (total > shown) info.textContent = `${label}：共 ${total.toLocaleString()} 行，显示最后 ${shown.toLocaleString()} 行`
     else info.textContent = `${label}：共 ${total.toLocaleString()} 行`
-    $('logAll').hidden = !(total > shown)
+    // 已经拉过全部就别再显示这个按钮——再点一次也是同一份数据
+    $('logAll').hidden = histShowAll || !(total > shown)
     $('logAll').textContent = `显示全部 ${total.toLocaleString()} 行`
     if (logMode === 'hist') renderLogs()
   } catch (e) {
@@ -1155,8 +1165,10 @@ function setLogMode(mode) {
   $('logModeLegacy').classList.toggle('on', mode === 'legacy')
   $('histBar').hidden = mode !== 'hist'
   $('legacyBar').hidden = mode !== 'legacy'
-  if (mode === 'hist') loadLogHistory().then(() => renderLogs())
-  else if (mode === 'legacy') loadLegacyLogs().then(() => renderLogs())
+  // loadLogHistory / loadLegacyLogs 内部拿到数据后已经 renderLogs()，
+  // 这里不再 .then 二连渲染——「显示全部」时那是上万行，画两遍纯属白等。
+  if (mode === 'hist') loadLogHistory()
+  else if (mode === 'legacy') loadLegacyLogs()
   else renderLogs()
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) }
@@ -1283,13 +1295,13 @@ function bind() {
   $('histDay').onchange = () => {
     histDay = $('histDay').value || ''
     histShowAll = false
-    loadLogHistory().then(() => renderLogs())
+    loadLogHistory()
   }
   $('logAll').onclick = () => {
     histShowAll = true
-    loadLogHistory().then(() => renderLogs())
+    loadLogHistory()
   }
-  $('legacyRefresh').onclick = () => loadLegacyLogs().then(() => renderLogs())
+  $('legacyRefresh').onclick = () => loadLegacyLogs()
 }
 
 /** 调用 Native Messaging 宿主 */
