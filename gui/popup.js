@@ -27,6 +27,7 @@ let config = null
 let logSince = 0
 let logLines = []
 let autoTimer = 0
+let lastReconnect = 0        // 断线后自动重连的节流时间戳（见 startAuto）
 let logMode = 'now'          // 'now' 本次运行 / 'hist' 历史 / 'legacy' 旧插件
 let histLines = []
 let legacyLines = []
@@ -92,6 +93,9 @@ async function connect() {
   $('linkState').className = 'pill' + (alive ? '' : ' bad')
   if (alive) {
     await Promise.all([loadStatus(), loadLogs(), loadConfig().catch(() => {})])
+    // 断线那段时间修仙页会被刷成一片「—」（/api/xian 请求失败），
+    // 重连成功后立刻补一次，不用等下一轮自动刷新。
+    if (!$('tab-xian').hidden) await loadXian()
   }
 }
 
@@ -1571,11 +1575,22 @@ function blankOverview() {
 function startAuto() {
   clearInterval(autoTimer)
   autoTimer = setInterval(async () => {
+    // 断线后要自己重连。原来只有 main() 里连一次，alive=false 之后整个
+    // 自动刷新空转——面板会永远停在「未连接 + 修仙页全是 —」，只能手动点
+    // 「已启动，重新连接」。主程序被重启/过一会儿才拉起来时最容易撞上。
+    // 「重启」按钮有自己的 60 秒轮询，那条路上不掺和（restarting）。
+    if (!alive) {
+      if (!restarting && Date.now() - lastReconnect > 2500) {
+        lastReconnect = Date.now()
+        await connect().catch(() => {})
+      }
+      return
+    }
     if ($('logAuto').checked) await loadLogs()
     // 概览页要看到「正在做什么」和逐笔收支，1.5 秒刷一次
-    if (!$('tab-overview').hidden && alive) await loadStatus()
+    if (!$('tab-overview').hidden) await loadStatus()
     // 修仙页只在切过去时刷，免得平白多打本地请求
-    if (!$('tab-xian').hidden && alive) { await loadXian(); await loadStatus() }
+    if (!$('tab-xian').hidden) { await loadXian(); await loadStatus() }
   }, 1500)
 }
 
