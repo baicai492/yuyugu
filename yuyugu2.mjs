@@ -55,7 +55,7 @@ async function main() {
 
   // ---------- 初始化 ----------
   const session = readSession(resolve(import.meta.dirname || '.', cfg.cookieFile))
-  const client = createClient({ baseUrl: cfg.baseUrl, cookie: session.cookie, minGap: cfg.minGap })
+  const client = createClient({ baseUrl: cfg.baseUrl, cookie: session.cookie, minGap: cfg.minGap, dryRun: !!cfg.dry })
   const log0 = (m) => console.log(m)
 
   process.stdout.write('加载规则模块… ')

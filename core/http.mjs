@@ -7,11 +7,24 @@ export class AuthError extends Error { constructor(m = '登录已失效，请更
 export class ConflictError extends Error { constructor(msg, data) { super(msg); this.name = 'ConflictError'; this.data = data } }
 export class RateLimitError extends Error { constructor(m, retry) { super(m); this.name = 'RateLimitError'; this.retry = retry } }
 
+// 服务端按 operation UUID 去重的写接口（重发安全）。
+// 其它 POST 即使带了 operation（visit / help / auto / chest / equip…）也不在这里：
+// 重复执行会多帮一次忙、多偷一次、多开一个箱子——宁可让这一条失败，等下一轮重来。
+const IDEMPOTENT_POST_PATHS = new Set([
+  '/api/pet/world/act',
+  '/api/pet/battle',
+  '/api/pet/battle/buy',
+  '/api/pet/battle/enhance',
+  '/api/pet/battle/respec',
+  '/api/pet/battle/train',
+  '/api/pet/state',
+])
+
 /**
  * 创建客户端。
  * minGap：两次 POST 的最小间隔（秒）。站点要求 ≥2 秒，这里默认 2.15 留余量。
  */
-export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap = 2.15, timeoutMs = 30000 } = {}) {
+export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap = 2.15, timeoutMs = 30000, dryRun = false } = {}) {
   if (!cookie) cookie = readSession().cookie
 
   let lastPostAt = 0
@@ -101,14 +114,23 @@ export function createClient({ baseUrl = 'https://52dmeme.com', cookie, minGap =
   }
 
   async function request(path, { method = 'GET', body, retries = 3, keepalive = false } = {}) {
+    // 演练模式的最后一道保险丝：即使某个模块漏了 cfg.dry 检查，也写不出去。
+    // GET 照常（演练要读世界状态）。
+    if (dryRun && method === 'POST') {
+      const err = new Error(`演练模式：已拦截写请求 ${path}`)
+      err.name = 'DryRunError'
+      throw err
+    }
     const doOnce = () => once(path, { method, body, keepalive })
     const call = method === 'POST' ? () => serialize(doOnce) : doOnce
     // 重试边界：网络失败和 5xx 都可能意味着「服务端已经执行了，只是回执没回来」。
-    // 带 operation UUID 的 POST 服务端会按它去重，重发安全（世界动作 / 擂台 / 站宠存档）；
-    // 其它 POST（buy / sell / harvest / chest / visit / equip…）重发就是重复买、
-    // 重复卖、重复领奖 —— 宁可让这一条失败，等下一轮用最新世界状态重来。
+    // 带 operation UUID 且在白名单里的 POST 服务端会按它去重，重发安全；
+    // 其它 POST（visit / help / buy / sell / chest / equip…）重发就是重复帮忙、
+    // 重复偷、重复开箱 —— 宁可让这一条失败，等下一轮用最新世界状态重来。
     // 429 是例外：服务端明确拒绝了，没执行，任何请求都可以退避后重试。
-    const idempotent = method !== 'POST' || Boolean(body && typeof body.operation === 'string' && body.operation)
+    const idempotent = method !== 'POST' ||
+      (IDEMPOTENT_POST_PATHS.has(String(path).split('?')[0]) &&
+        Boolean(body && typeof body.operation === 'string' && body.operation))
 
     let lastErr
     for (let attempt = 0; attempt <= retries; attempt++) {

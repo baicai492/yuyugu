@@ -843,6 +843,22 @@ console.log('\n[新] HTTP 重试边界')
     stub(() => mkRes(200, { ok: 3 }))
     const r3 = await c.get('/api/pet/world')
     ok('GET 正常返回', r3.ok === 3 && calls === 1, `calls=${calls}`)
+
+    // 6) 白名单外的 POST：即使带 operation 也不重试——重复访问就是重复偷/重复帮忙。
+    //    服务端的「今天偷过」保护能兜住大部分，但不该把正确性押在它上面。
+    stub(() => { throw new Error('ECONNRESET') })
+    err = null
+    try { await c.post('/api/pet/world/visit/123', { operation: 'u2', kind: 'all' }) } catch (e) { err = e }
+    ok('visit 带 operation 也不重试', calls === 1 && Boolean(err), `calls=${calls}`)
+
+    // 7) 演练模式：HTTP 层的保险丝，任何模块漏了 cfg.dry 也写不出去
+    const cd = createClient({ baseUrl: 'http://x', cookie: 'c', minGap: 0, timeoutMs: 1000, dryRun: true })
+    stub(() => mkRes(200, { ok: 9 }))
+    err = null
+    try { await cd.post('/api/pet/world/act', { operation: 'u3', actions: [] }) } catch (e) { err = e }
+    ok('演练模式拦截写请求', err?.name === 'DryRunError' && calls === 0, `calls=${calls}`)
+    const rd = await cd.get('/api/pet/world')
+    ok('演练模式放行 GET', rd.ok === 9 && calls === 1, `calls=${calls}`)
   } finally {
     globalThis.fetch = realFetch
   }
