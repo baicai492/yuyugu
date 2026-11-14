@@ -473,6 +473,7 @@ function renderXianDetail(D) {
   for (const r of rel) {
     npcList.append(xItem([[
       { text: r.name, bold: true },
+      ...(r.title ? [{ text: `  ${r.title}`, cls: 'dim' }] : []),
       { text: `  ${r.tierName} ${r.fav}`, cls: 'dim' },
       ...(r.relName ? [{ text: `  ${r.relName}`, cls: 'ok' }] : []),
       ...(r.chapters ? [{ text: `  往事 ${r.chapters} 章`, cls: 'dim' }] : []),

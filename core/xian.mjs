@@ -14,13 +14,15 @@
 //      炼上炉就该在 19 秒后回来，不能等下一次例行巡视。
 import {
   BREW_MAX, BREW_MIN, COST, EN_MAX, EN_REGEN, FAV_NAME, FIGHT_COST, FIGHT_DAILY, FUSIONS,
-  HERBS, LV_NEED, MED_MAX, MED_MIN, NEW_NPCS, PILL_DAILY, PILLS, PLOTS, REALMS, REL,
+  HERBS, LV_NEED, MED_MAX, MED_MIN, PILL_DAILY, PILLS, PLOTS, REALMS, REL,
   RLM_DAILY, RLM_EN, ROOTS,
   ROOT_GROW, STAGES, STORY_END, TECH_BUFF, TECH_PRICE, TECHS,
   act as xsAct, breakRate, canMax, cvNeed, favTier, fuseKey, layerNeed, medBonus,
   myHp, mySlots, plotView, powerOf, rootMult, skill, techEff, techLayer,
   tick as xsTick, xsLuck, xsMind,
 } from './xian-rules.mjs'
+// 人脉的中文名。规则模块是站点原文的逐字副本，名字表单独放（见文件头注释）。
+import { npcName, npcTitle } from './xian-npc.mjs'
 
 export {
   EN_MAX, PLOTS, REALMS, HERBS, PILLS, TECHS, ROOTS, STORY_END,
@@ -1122,7 +1124,9 @@ export function xianSnapshot(world, cfg = {}) {
       const rel = Number(v?.[1] || 0)
       const tier = favTier(fav)
       return {
-        id, name: NEW_NPCS[id] || id,
+        // 名字用站点界面上的中文（52弟、法斯、执事老周…），别再露出 52d/egg 这种 id。
+        // 名字表在 xian-npc.mjs：xian-rules.mjs 是站点原文的逐字副本，不能往里加东西。
+        id, name: npcName(id), title: npcTitle(id),
         fav, tier, tierName: FAV_NAME[tier] || '',
         rel, relName: REL[rel] || '',
         chapters: Number(v?.[2] || 0),
