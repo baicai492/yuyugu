@@ -914,6 +914,11 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
   if (rawXs.fight && t - Number(rawXs.fight.t || 0) < 1800) {
     return Math.min(t + 60, Number(rawXs.fight.t) + 1802)
   }
+  // 玩家手操的秘境（没开自动秘境 + 6 小时内动过）：等到 6 小时窗口结束再看。
+  // 不返回这个点的话，托管会按农事节奏每几十秒醒一次，每次都因为让位而空转。
+  if (opts.autoRealm === false && rawXs.rlm && t - Number(rawXs.rlm.t || 0) < 6 * 3600) {
+    return Math.min(t + 120, Number(rawXs.rlm.t) + 6 * 3600 + 2)
+  }
 
   const preview = planXianActions(world, t, opts)
   // 现在就有动作 → 把尾批交接时刻放在 3 秒后（大于 2.2 秒的提交间隔）
@@ -958,7 +963,33 @@ export function nextXianWakeSec(world, nowSec = Number(world?.now || 0), rawOpti
   if (sim.med) {
     const medCapAt = Number(sim.med.t || t) + MED_MAX + 1
     if (medCapAt > t) cands.push(medCapAt)
+
+    // 精确突破就绪：打坐的修为是按秒累积、每 60 秒结算一次的。
+    // 只按 MED_MAX（30 分钟）醒，可能在「再打坐 3 分钟就到 s=9 满修为」时
+    // 白等十几分钟——而修为满了不收功，多打坐的部分会溢出浪费。
+    // 这里按剩余修为 / 每秒增速反算刚好满的时刻；前提是策略允许现在突破
+    // （smart/eager 且药园已满级之类）并备够 r+1 颗培元丹。
+    // 需要的总量 = cvNeed(r, s) 累加到 9（升到 9 层）+ cvNeed(r, 9)（突破门槛）。
+    const curR = Number(sim.cv?.r || 0)
+    if (shouldAllowBreakPolicy(sim, opts) && Number(sim.pills?.peiyuan || 0) >= curR + 1) {
+      let remXp = 0
+      const curS = Number(sim.cv?.s || 1)
+      for (let s = curS; s <= 9; s++) remXp += cvNeed(curR, s)
+      remXp -= Number(sim.cv?.xp || 0)
+      const ratePerSec = (10 * rootMult(sim) * (sim.tech === 'ice' ? 1.2 : 1) * medBonus(sim)) / 60
+      if (remXp > 0 && ratePerSec > 0) {
+        const secNeeded = Math.max(MED_MIN + 5, Math.ceil((remXp + 1) / ratePerSec))
+        if (secNeeded < MED_MAX) {
+          const breakAt = Number(sim.med.t || t) + secNeeded
+          if (breakAt > t) cands.push(breakAt)
+        }
+      }
+    }
   }
+
+  // 融合冷却好了就回来：融合会把根数 −1，只在「修为损耗最小」的窗口做，
+  // 但窗口本身受 fuseCd 限制；不掐这个点就要按打坐周期等，可能晚一整轮。
+  if (opts.autoFuse && Number(sim.fuseCd || 0) > t) cands.push(Number(sim.fuseCd) + 2)
 
   if (dpUsedToday(sim, t) < PILL_DAILY && Number(sim.pills?.huiling || 0) > 0) {
     const eveningTopUpAt = nextCstMidnightSec(t) - 4 * 3600 + 5

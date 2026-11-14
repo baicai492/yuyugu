@@ -621,11 +621,21 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     }
   }
 
-  const goals = R.dailyGoals(R.worldDay(t), s)
-  for (let k = 0; k < 4; k++) {
-    if (!s.cnt['goal' + k] && (s.cnt[goals[k]?.id] || 0) >= goals[k]?.n) push({ a: 'goal', k })
+  /**
+   * 领取已达成的每日目标（k=0..3）和全清奖励（k=4，要求四个都已领）。
+   *
+   * 抽成函数是因为它要在一轮里被调用多次：k=1/k=2 是「卖出 80k / 300k」这类
+   * 金额目标，只在轮次开头领的话，本批卖完才达成的目标要等下一轮巡视才结算，
+   * 期间仓库格数、订单都可能变。参考实现也是在卖货前后各重查一次。
+   */
+  const claimDailyGoals = () => {
+    const goals = R.dailyGoals(R.worldDay(t), s)
+    for (let k = 0; k < 4; k++) {
+      if (!s.cnt['goal' + k] && (s.cnt[goals[k]?.id] || 0) >= goals[k]?.n) push({ a: 'goal', k })
+    }
+    if (!s.cnt.goal4 && [0, 1, 2, 3].every((k) => s.cnt['goal' + k])) push({ a: 'goal', k: 4 })
   }
-  if (!s.cnt.goal4 && [0, 1, 2, 3].every((k) => s.cnt['goal' + k])) push({ a: 'goal', k: 4 })
+  claimDailyGoals()
 
   // ---------- 2. 收割 / 收产物 / 收蟹笼（成熟即收，防偷） ----------
   const weather = R.weatherOf(R.isleDay(t))
@@ -1621,6 +1631,9 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
     }
   }
 
+  // 卖完之后立刻重查每日目标：本批刚达成的「卖出 80k / 300k」要同批领掉。
+  claimDailyGoals()
+
   // ---------- 10. 货船进货 ----------
   //
   // 两种买法，旧版都有：
@@ -1676,6 +1689,10 @@ export function planRound(world, cfg, log = () => {}, opts = {}) {
       }
     }
   }
+
+  // 收尾再查一次：收割 / 钓鱼 / 加工这些目标也可能在本批达成，
+  // 同样不该等到下一轮巡视才结算。
+  claimDailyGoals()
 
   return { actions, summary, coinsAfter: coins }
 }

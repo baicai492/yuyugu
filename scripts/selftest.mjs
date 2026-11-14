@@ -562,6 +562,29 @@ console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
     const r3 = computeAlchemyHerbTargets({ ...base, bag: { chizhi: 1 }, npc: npc2 }, now, {})
     ok('今天送过的不再预留', Object.keys(r3.socialNeeds).length === 0, JSON.stringify(r3.socialNeeds))
   }
+
+  // 3) 唤醒模型：精确突破就绪 / 手动秘境让位
+  {
+    const { nextXianWakeSec, normalizeXianOptions } = await import('../core/xian.mjs')
+    // 打坐中、s=8、培元丹够、策略允许突破 → 不该干等 MED_MAX（30 分钟），
+    // 而要掐「剩余修为 / 每秒增速」算出的那一刻（这里约 1128 秒）。
+    const x = A.newXs(now)
+    Object.assign(x, {
+      v: 1, st: 4, roots: { e: ['fire'], v: [] }, root: 'fire', tech: 'fire', techs: ['fire'],
+      lv: 5, en: 100, med: { t: now - 600 }, cv: { r: 0, s: 8, xp: 0 }, pills: { peiyuan: 1 },
+      plots: [], plotN: 0, seeds: {}, bag: {}, stone: 0, log: 0,
+    })
+    const w = { state: { xs: x }, now }
+    const at = nextXianWakeSec(w, now, {}, normalizeXianOptions({ enabled: true, breakMode: 'eager' }))
+    ok('精确突破就绪会提前唤醒', at - now < 1200 && at - now > 0, `${at - now} 秒`)
+    const atManual = nextXianWakeSec(w, now, {}, normalizeXianOptions({ enabled: true, breakMode: 'manual' }))
+    ok('manual 策略不提前唤醒', atManual - now === 1201, `${atManual - now} 秒`)
+
+    // 手动秘境：等到 6 小时窗口结束，而不是每几十秒空转一次
+    const x2 = { ...x, med: null, rlm: { a: 'bamboo', sd: 1, L: 0, R: 0, c: 1, hp: 30, mx: 60, lt: {}, t: now - 100 } }
+    const at2 = nextXianWakeSec({ state: { xs: x2 }, now }, now, {}, normalizeXianOptions({ enabled: true, autoRealm: false }))
+    ok('手动秘境让位后按 2 分钟复查', at2 - now === 120, `${at2 - now} 秒`)
+  }
 }
 
 console.log('\n[新] 修仙2.0 · 秘境只认通关 / 手动让位 / 配招优先')
