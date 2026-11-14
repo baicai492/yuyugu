@@ -274,6 +274,37 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo, s
     if (sp.cost) { spend += sp.cost; gear = await arenaGear(world) }
   } catch (e) { log('擂台养成出错：' + e.message) }
 
+  // 增量同步战报：擂台 history（双方面板）+ 守家日志（来袭者面板）。
+  // 都按 lastId 增量，平时只多两个 GET；第一次运行会补几场历史。
+  //
+  // 放在开打之前：档案里的对手面板是下面战前换装（tacticalSwap）和
+  // 胜率模拟的输入，先同步才能用上「刚打完的那几场」带来的校准。
+  if (b.profileSync !== false) {
+    try {
+      const home = await arenaHome(world)
+      const hn = await syncHomeHistoryProfiles(world.client, home, accountKey, {
+        storePath, maxFetch: b.homeSyncMax ?? 6,
+      })
+      let gn = 0
+      if (b.guardSync !== false) {
+        gn = await syncGuardLogProfiles(world.client, accountKey, { storePath, maxFetch: b.guardSyncMax ?? 8 })
+      }
+      if (hn || gn) log(`战报档案：同步 ${hn} 条擂台 / ${gn} 条守家`)
+    } catch (e) {
+      log('战报同步失败：' + e.message)
+    }
+  }
+
+  // 开宝箱也放在开打之前：每 3 场发一个、每天 5 个，开出来的装备本轮就能穿上。
+  // 以前打完才开，新装备要等下一批（甚至下一个岛日）才生效，等于白打几场。
+  if (a.openChests) {
+    try {
+      gear = await arenaGear(world)
+      await openChests(world, gear, log)
+      gear = await arenaGear(world)
+    } catch (e) { log('开宝箱出错：' + e.message) }
+  }
+
   try {
     const rl = await applyRestingLoadout(world, cfg, gear, log)
     if (rl.gear) gear = rl.gear
@@ -395,7 +426,15 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo, s
         log('擂台挑战失败：' + e.message)
         break
       }
-      if (k < need - 1) await sleep(8500)
+      if (k < need - 1) {
+        // 场间 8.5 秒冷却。切片等，偷菜解禁窗口一开就立刻走：
+        // 这一场已经打完了，断掉的只是「等下一场」——不然窗口要晚 8.5 秒。
+        const until = Date.now() + 8500
+        while (Date.now() < until) {
+          if (shouldAbort?.()) break
+          await sleep(500)
+        }
+      }
     }
     if (battles) {
       const decided = wins + losses
@@ -406,39 +445,6 @@ export async function arenaDaily(world, cfg, log = () => {}, { onBattle, memo, s
 
   // 开宝箱。开出来的装备要立刻穿上：守家是静止装，晚一轮就白挨一轮打。
   // 开箱会返回新的 catalog，直接拿来重算静止装（applyRestingLoadout 自己会再拉一次 gear）。
-  if (a.openChests) {
-    try {
-      gear = await arenaGear(world)
-      const opened = await openChests(world, gear, log)
-      if (opened && a.autoEquip) {
-        gear = await arenaGear(world)
-        const rl = await applyRestingLoadout(world, cfg, gear, log)
-        if (rl.gear) gear = rl.gear
-      }
-    } catch {}
-  }
-
-  // 增量同步战报：擂台 history（双方面板）+ 守家日志（来袭者面板）。
-  // 都按 lastId 增量，平时只多两个 GET；第一次运行会补几场历史。
-  if (b.profileSync !== false) {
-    try {
-      const home = await arenaHome(world)
-      const hn = await syncHomeHistoryProfiles(world.client, home, accountKey, {
-        storePath, maxFetch: b.homeSyncMax ?? 6,
-      })
-      let gn = 0
-      if (b.guardSync !== false) {
-        gn = await syncGuardLogProfiles(world.client, accountKey, { storePath, maxFetch: b.guardSyncMax ?? 8 })
-      }
-      if (hn || gn) log(`战报档案：同步 ${hn} 条擂台 / ${gn} 条守家`)
-    } catch (e) {
-      log('战报同步失败：' + e.message)
-    }
-  }
-
-  // 训练/买装/强化已经挪到开头的 arenaSpend：那里有每日预算和 reserveCoins 保护，
-  // 而且必须在打对手之前完成，否则本轮的胜负还是按旧面板算的。
-
   // today / maxBattles 一起返回：这两个数只在这里拿得到（要发 /battle/gear 请求），
   // nextWake 是纯函数不能发请求，只能靠调用方把它们缓存进 memo。
   // level 给偷菜用（对手档案缺失时退回等级差估算）。
