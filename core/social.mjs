@@ -577,11 +577,11 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
 
   const watch = {}
   const avoid = new Set((st.avoid || []).map(Number))   // 手动排除的岛
-  let cursor = null, seen = 0, kept = 0, pages = 0
+  let cursor = null, seen = 0, kept = 0, pages = 0, failed = false
   for (let p = 0; p < (st.dirPages ?? 12); p++) {
     let d
     try { d = await neighbors(world, { cursor, limit: 20 }) }
-    catch (e) { log('偷菜：读目录失败：' + e.message); break }
+    catch (e) { log('偷菜：读目录失败：' + e.message); failed = true; break }
     pages++
     for (const o of d.neighbors || []) {
       seen++
@@ -600,9 +600,22 @@ export async function refreshWatchList(world, cfg, log = () => {}, memo = {}) {
     if (!cursor) break
     await sleep(600)
   }
+  if (failed) {
+    // 目录只扫到一半（超时 / 429 / 断线）。这份名单**不能**当成「全服现状」：
+    // 不在里面的岛不是不活跃，只是还没轮到。用它整份替换会顺手删掉几百座岛
+    // 的调度记录——下一小时本来掐点能抢到的货全没了。
+    // 所以合并进旧名单（新扫到的优先，没扫到的沿用旧的），5 分钟后再试一次；
+    // 退避而不是立刻重试：目录请求本身就会超时，立刻重扫等于每轮巡视都卡一次。
+    const merged = { ...(memo.stealWatch || {}), ...watch }
+    memo.stealWatch = merged
+    memo.stealWatchAt = now - every + 300
+    log(`偷菜：目录中断于第 ${pages + 1} 页（已见 ${seen} 座），沿用旧名单合并，5 分钟后重试`)
+    return merged
+  }
   memo.stealWatch = watch
   memo.stealWatchAt = now
-  // 名单之外的岛的调度记录没用了（旧版每次重建目录都会整份替换）
+  // 名单之外的岛的调度记录没用了（旧版每次重建目录都会整份替换）。
+  // 只有完整扫完全部页才做这一步——见上面的 failed 分支。
   const schedule = memo.stealSchedule
   if (schedule) {
     let dropped = 0

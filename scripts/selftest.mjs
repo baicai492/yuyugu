@@ -652,6 +652,63 @@ console.log('\n[新] 偷菜拒绝回执分类')
   }
 }
 
+console.log('\n[新] 巡逻名单：目录中断时保留旧名单')
+{
+  const { refreshWatchList } = await import('../core/social.mjs')
+  const now = 1794643200
+  // 旧名单 8 座岛，每座都有调度记录。目录扫到第一页后第二页超时。
+  const oldWatch = {}
+  const schedule = {}
+  for (let i = 1; i <= 8; i++) {
+    oldWatch[i] = { name: '岛' + i, level: 5 }
+    schedule[i] = { nextAt: now + 600, upcoming: [{ i: 0, unlockAt: now + 600 }] }
+  }
+  const memo = { stealWatch: oldWatch, stealWatchAt: now - 8000, stealSchedule: schedule }
+  const cfg = { social: { steal: { dirEvery: 7200, dirPages: 5, avoid: [], skipMarked: true } } }
+  let page = 0
+  const world = {
+    now,
+    client: {
+      get: async () => {
+        page++
+        if (page === 1) {
+          return {
+            neighbors: [
+              { id: 9, name: '新9', level: 3, active: now - 60, plots: 4 },
+              { id: 10, name: '新10', level: 3, active: now - 60, plots: 4 },
+            ],
+            nextCursor: 'c2',
+          }
+        }
+        throw new Error('请求超时 30s')
+      },
+    },
+  }
+  const logs = []
+  const w = await refreshWatchList(world, cfg, (m) => logs.push(m), memo)
+  ok('中断时旧岛仍在名单里', Boolean(w[1] && w[9]), `keys=${Object.keys(w).length}`)
+  ok('中断时不清调度记录', Object.keys(memo.stealSchedule).length === 8,
+    `n=${Object.keys(memo.stealSchedule).length}`)
+  ok('中断后 5 分钟重试而不是立刻重扫', memo.stealWatchAt === now - 7200 + 300,
+    `at=+${memo.stealWatchAt - now}`)
+  ok('中断会留一行日志', logs.some((m) => /目录中断/.test(m)), logs.join(' | '))
+
+  // 完整扫完才整份替换 + 清调度记录
+  const memo2 = {
+    stealWatch: { 99: { name: '旧99' } },
+    stealWatchAt: now - 8000,
+    stealSchedule: { 99: { nextAt: 1 }, 5: { nextAt: 1 } },
+  }
+  const world2 = {
+    now,
+    client: { get: async () => ({ neighbors: [{ id: 5, name: 'a', level: 1, active: now - 60 }], nextCursor: null }) },
+  }
+  const w2 = await refreshWatchList(world2, cfg, () => {}, memo2)
+  ok('完整扫描后名单只剩扫到的岛', !w2[99] && Boolean(w2[5]), JSON.stringify(Object.keys(w2)))
+  ok('完整扫描后清掉不在名单里的调度记录', !memo2.stealSchedule[99] && Boolean(memo2.stealSchedule[5]),
+    JSON.stringify(Object.keys(memo2.stealSchedule)))
+}
+
 console.log('\n[新] 修仙1.0 · 药材预留（宗门委托 / 送礼）')
 {
   const A = await import('../core/xian-rules.mjs')
