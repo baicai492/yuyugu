@@ -222,7 +222,9 @@ export async function petCareRound(world, cfg, log = () => {}, memo = {}) {
         log(`站宠：今日经验已满（${plan.dayXpBefore}/${plan.cap}），Lv${plan.before.level}` +
           `（饱食 ${plan.before.hunger} / 精力 ${plan.before.energy} / 清洁 ${plan.before.cleanliness}）`)
       }
-      memo.pet = { ...(memo.pet || {}), ...plan.before, cap: plan.cap, at: world.now }
+      // 0 动作也是有效观测（GUI 要显示当前等级和三围）；dayXp 是顶层字段，
+      // 不并进 before 的话 GUI 会一直显示「今日经验 0/1000」。
+      memo.pet = { ...(memo.pet || {}), ...plan.before, dayXp: plan.dayXpBefore, cap: plan.cap, at: world.now }
       memo.petCareGapUntil = world.now + Math.max(300, Number(pc.retryGapSec) || 900)
       break
     }

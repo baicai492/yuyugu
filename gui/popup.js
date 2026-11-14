@@ -184,6 +184,12 @@ function renderOverview() {
     ? `Lv${v.lv} · ${v.used}/${v.slots} 格 · 单格 ${fmt(v.unit)}` + (v.lv < 4 ? ` · 升级 ${wan(v.nextCost)}` : '（满级）')
     : '—'
   $('tools').textContent = `竿${w.tools.rod} 镐${w.tools.pick} 洒${w.tools.spr} 屋${w.tools.house} · 矿${w.mineMax}层`
+  // 站宠护理：等级 + 今日经验（上限 1000/天）。没有存档时显示 —。
+  const pc = status.pet
+  $('petCare').textContent = pc
+    ? `Lv${pc.level} · 今日经验 ${fmt(pc.dayXp || 0)}/${fmt(pc.cap || 1000)}` +
+      ` · 饱${Math.round(pc.hunger ?? 0)}/精${Math.round(pc.energy ?? 0)}/洁${Math.round(pc.cleanliness ?? 0)}`
+    : '—'
 
   const q = w.quotas || {}
   const names = { fish: '钓鱼', mine: '挖矿', craft: '加工', bomb: '炸矿', coffee: '咖啡', npc: '52弟', gomokuPaid: '五子棋计奖', arenaChest: '擂台宝箱' }
