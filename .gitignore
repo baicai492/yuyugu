@@ -27,6 +27,9 @@ cache/
 research/ref/
 research/pet-*.js
 research/pets.*
+research/_live-*
+research/_pets-live.html
+research/live-*/
 research/_read_*.txt
 research/sim*.txt
 research/*.png
