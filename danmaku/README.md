@@ -24,17 +24,15 @@
 1. **装插件**：Chrome → `chrome://extensions` → 打开「开发者模式」→
    「加载已解压的扩展程序」→ 选 `danmaku/` 目录。
 
-2. **装一次 Native 宿主**（只装一次，之后不用再碰命令行）：
-
-   ```
-   cd danmaku
-   D:\miniconda\envs\py311\python.exe python\install_host.py
-   ```
-
-   脚本会从浏览器的扩展列表里认出本目录对应的扩展 ID（由加载路径反查，
-   认不出时才需要加 `--ext-id=<ID>`），然后生成
+2. **装一次 Native 宿主**（只装一次）：在 `danmaku/` 目录里**双击
+   `一键安装.bat`**。脚本会从浏览器的扩展列表里认出本目录对应的扩展 ID
+   （由加载路径反查，认不出时才需要加 `--ext-id=<ID>`），生成
    `native/com.baicai492.danmaku.json`，把清单路径写进
-   `HKCU\Software\Google\Chrome\NativeMessagingHosts`（顺带注册 Edge）。
+   `HKCU\Software\Google\Chrome\NativeMessagingHosts`（顺带注册 Edge），
+   最后做一次自检。
+
+   装完如果是第一次加 `nativeMessaging` 权限，Chrome 会要求重新确认，
+   在 `chrome://extensions` 里点一下扩展上的刷新按钮即可。
 
 3. 打开斗法页面，进入战斗，点插件图标 →「开始托管」。
    **Python 服务会自己起来**，不用先双击 `启动.bat`。
@@ -75,6 +73,7 @@ mss 抓屏 ──► 找 #b77732 棕框（场地定位）──► 裁剪 + 2 �
 ```
 danmaku/
 ├── manifest.json / popup.* / content.js / background.js   插件（前台）
+├── 一键安装.bat                                            双击注册 Native 宿主（装一次）
 ├── start.py / 启动.bat                                     手动起服务的入口
 ├── native/danmaku-host.bat                                 Native 宿主的启动包装
 └── python/

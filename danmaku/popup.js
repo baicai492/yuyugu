@@ -131,10 +131,11 @@ function showStartError(r) {
   setOnline(false);
   const help = r.code === 'no-host' || r.code === 'no-native';
   $('connHelp').classList.toggle('hide', !help);
-  if (help) {
-    setConnMsg(EXT_ID
-      ? '自动启动要先注册一次 Native 宿主，按下面这行跑一次就好。'
-      : '自动启动要先注册一次 Native 宿主，按下面的说明做。');
+  if (r.code === 'no-native') {
+    setConnMsg('这个面板还是旧版（没有 nativeMessaging 权限）。去 chrome://extensions 点一下扩展上的刷新按钮。');
+    $('stateSub').textContent = '扩展需要重新加载';
+  } else if (help) {
+    setConnMsg('自动启动要先装一次 Native 宿主：双击 danmaku 目录里的「一键安装.bat」。');
     $('stateSub').textContent = '没找到 Native 宿主（' + (r.msg || '未安装') + '）';
   } else {
     setConnMsg('自动启动没成功：' + (r.msg || '未知原因'));
@@ -292,10 +293,8 @@ $('cfgHorizon').addEventListener('change', (e) => pushCfg({ horizon: parseFloat(
 $('cfgReaction').addEventListener('change', (e) => pushCfg({ reaction: parseFloat(e.target.value) }));
 $('cfgFps').addEventListener('change', (e) => pushCfg({ fps: parseInt(e.target.value, 10) }));
 
-// 安装说明里要带上本扩展的 ID（未打包加载时由目录决定，复制过去即可）
+// 安装说明里要带上本扩展的 ID（未打包加载时由目录决定，用来核对）
 $('extId').textContent = EXT_ID || '（从 chrome://extensions 里看）';
-$('installCmd').textContent =
-  `python python\\install_host.py --ext-id=${EXT_ID || '<把上面的ID粘过来>'}`;
 
 loadPrefs((v) => {
   port = v;

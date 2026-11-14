@@ -32,9 +32,33 @@ MANIFEST = os.path.join(NATIVE_DIR, HOST_NAME + '.json')
 
 
 def reg_path(edge=False):
-    base = ('HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts' if edge
-            else 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts')
+    """相对于 HKEY_CURRENT_USER 的键路径。
+
+    注意 winreg 的根键已经由参数给出，这里**不能**再带 `HKCU\\` 前缀，
+    否则会写成 HKCU\\HKCU\\Software\\...，Chrome 读不到。
+    """
+    base = ('Software\\Microsoft\\Edge\\NativeMessagingHosts' if edge
+            else 'Software\\Google\\Chrome\\NativeMessagingHosts')
     return base + '\\' + HOST_NAME
+
+
+def reg_display(edge=False):
+    return 'HKCU\\' + reg_path(edge)
+
+
+def _cleanup_legacy():
+    """清掉早期版本误写进 HKCU\\HKCU\\... 的键（那版把根键写进了路径）。"""
+    for edge in (False, True):
+        leaf = 'HKCU\\' + reg_path(edge)
+        for key in (leaf, 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts',
+                    'HKCU\\Software\\Google\\Chrome', 'HKCU\\Software\\Google',
+                    'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts',
+                    'HKCU\\Software\\Microsoft\\Edge', 'HKCU\\Software\\Microsoft',
+                    'HKCU\\Software', 'HKCU'):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+            except OSError:
+                pass          # 不存在或非空，跳过
 
 
 def find_python():
@@ -48,11 +72,28 @@ def _norm(p):
     return os.path.normcase(os.path.abspath(p)).rstrip('\\/')
 
 
+def _load_pref(path):
+    """Chrome 的 Preferences 偶尔带尾巴（不是严格 JSON），raw_decode 更宽容。"""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            text = f.read()
+    except OSError:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(text)[0]
+    except ValueError:
+        return None
+
+
 def guess_ext_id():
-    """从浏览器 Preferences 里找「加载路径正好是这个 danmaku 目录」的扩展。
+    """从浏览器偏好设置里找「加载路径正好是这个 danmaku 目录」的扩展。
 
     未打包扩展的 ID 由目录绝对路径算出来，稳定；浏览器把它记在
-    extensions.settings[ID].path 里，所以能反查。找不到就返回空串。
+    extensions.settings[ID].path 里，所以能反查。
+
+    注意新版 Chrome 把扩展设置放在 **Secure Preferences** 里，
+    `Preferences` 里的 settings 是空的——两个都要看。
+    找不到就返回空串。
     """
     want = _norm(ROOT)
     base = os.path.expandvars(r'%LOCALAPPDATA%')
@@ -61,17 +102,18 @@ def guess_ext_id():
     for name, root in browsers:
         if not os.path.isdir(root):
             continue
-        for pref in glob.glob(os.path.join(root, '*', 'Preferences')):
-            try:
-                with open(pref, 'r', encoding='utf-8', errors='ignore') as f:
-                    data = json.load(f)
-            except (OSError, ValueError):
-                continue
-            settings = (data.get('extensions') or {}).get('settings') or {}
-            for eid, v in settings.items():
-                p = v.get('path')
-                if p and _norm(p) == want:
-                    return eid, name
+        for fn in ('Secure Preferences', 'Preferences'):
+            for pref in glob.glob(os.path.join(root, '*', fn)):
+                data = _load_pref(pref)
+                if not data:
+                    continue
+                settings = (data.get('extensions') or {}).get('settings') or {}
+                for eid, v in settings.items():
+                    if not isinstance(v, dict):
+                        continue
+                    p = v.get('path')
+                    if p and _norm(p) == want:
+                        return eid, name
     return '', ''
 
 
@@ -90,27 +132,29 @@ def write_manifest(ext_id):
 
 
 def register(manifest_path):
+    _cleanup_legacy()               # 先清掉早期版本写错位置的键
     ok = []
     for edge in (False, True):
         key = reg_path(edge)
         try:
             with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_WRITE) as k:
                 winreg.SetValueEx(k, '', 0, winreg.REG_SZ, manifest_path)
-            ok.append(('Edge' if edge else 'Chrome', True, key))
+            ok.append(('Edge' if edge else 'Chrome', True, reg_display(edge)))
         except OSError as e:
             ok.append(('Edge' if edge else 'Chrome', False, str(e)))
     return ok
 
 
 def unregister():
+    _cleanup_legacy()
     for edge in (False, True):
         key = reg_path(edge)
         try:
             # 键不存在时 DeleteKey 会抛错，当作已删除
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
-            print('已删除：' + key)
+            print('已删除：' + reg_display(edge))
         except OSError:
-            print('本来就没有：' + key)
+            print('本来就没有：' + reg_display(edge))
     for p in (MANIFEST,):
         try:
             os.remove(p)
@@ -166,8 +210,8 @@ def main():
     print('扩展 ID：%s%s' % (ext_id, auto_note))
     if '--print' in args:
         print('\n将写入注册表：')
-        print('  ' + reg_path(False) + ' = ' + MANIFEST)
-        print('  ' + reg_path(True) + ' = ' + MANIFEST)
+        print('  ' + reg_display(False) + ' = ' + MANIFEST)
+        print('  ' + reg_display(True) + ' = ' + MANIFEST)
         return
 
     for name, ok, info in register(MANIFEST):
