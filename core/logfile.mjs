@@ -147,15 +147,24 @@ function parseBeijingTime(s) {
 
 /**
  * 读某一天（或最近 N 天）的日志。
- * 返回 [{ t, ts, level, msg }]，按时间正序。
- *   days    读最近几天（默认 3）
+ * 返回 { logs: [{ t, ts, level, msg }], total, day, days }
+ *   logs 按时间正序。
+ *   day      只看这一天（YYYY-MM-DD）；不传则看最近 `days` 天
+ *   days     读最近几天（默认 3，仅在 day 为空时生效）
  *   maxLines 最多返回多少行（取尾部）
+ *   total    该范围内的总行数（未截断），用于告诉界面「被截掉了多少」
+ *
+ * 注意：多天模式是「跨天合并后再取尾部」，一天的日志就上万行，
+ * 所以早期几天会被整个切掉——界面只用单天模式。
  */
-export function readLogHistory(dir, { days = 3, maxLines = 800 } = {}) {
-  const all = listLogDays(dir).slice(0, days)
+export function readLogHistory(dir, { days = 3, maxLines = 800, day = null } = {}) {
+  const avail = listLogDays(dir)
+  const picked = day
+    ? (avail.includes(day) ? [day] : [])
+    : avail.slice(0, days)
   const out = []
-  for (const day of all.reverse()) {          // 从旧到新拼
-    const file = resolve(dir, `yuyugu-${day}.log`)
+  for (const d of picked.slice().reverse()) {          // 从旧到新拼
+    const file = resolve(dir, `yuyugu-${d}.log`)
     let text = ''
     try { text = readFileSync(file, 'utf8') } catch { continue }
     for (const line of text.split(/\r?\n/)) {
@@ -167,7 +176,7 @@ export function readLogHistory(dir, { days = 3, maxLines = 800 } = {}) {
       out.push({ t, ts: m[1], level: /出错|失败|错误|⚠/.test(msg) ? 'err' : 'info', msg })
     }
   }
-  return out.slice(-maxLines)
+  return { logs: out.slice(-Math.max(1, maxLines)), total: out.length, day: day || null, days: picked }
 }
 
 /**

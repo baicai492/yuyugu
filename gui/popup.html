@@ -260,16 +260,11 @@
       <label class="chk"><input type="checkbox" id="logAuto" checked /> 自动刷新</label>
     </div>
     <div class="log-toolbar" id="histBar" hidden>
-      <label class="chk">读取最近
-        <select id="histDays">
-          <option value="1">1 天</option>
-          <option value="3" selected>3 天</option>
-          <option value="7">7 天</option>
-          <option value="14">14 天</option>
-          <option value="30">30 天</option>
-        </select>
+      <label class="chk">日期
+        <select id="histDay"></select>
       </label>
       <span class="muted" id="histInfo"></span>
+      <button id="logAll" class="ghost" hidden>显示全部</button>
       <button id="logClear" class="ghost">清屏</button>
     </div>
     <div class="log-toolbar" id="legacyBar" hidden>

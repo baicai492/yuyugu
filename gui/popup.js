@@ -53,7 +53,13 @@ async function getMarket() {
   return api(`/api/market?days=${d}&markdown=${m}`)
 }
 async function getXian() { return api('/api/xian') }
-async function getLogs(since) { return api(`/api/logs?since=${since}`) }async function getLogHistory(days) { return api(`/api/logs/history?days=${days}&max=800`) }
+async function getLogs(since) { return api(`/api/logs?since=${since}`) }
+// 历史日志按「单天」读：一天的日志就上万行，跨天合并再取尾部会把前几天整个切掉。
+// max 传 0 表示该天全部（服务端上限 50000）。
+async function getLogHistory(day, max = 2000) {
+  const q = day ? `day=${encodeURIComponent(day)}` : 'days=1'
+  return api(`/api/logs/history?${q}&max=${max}`)
+}
 async function getLegacyLogs() { return api('/api/logs/legacy?max=800') }
 async function cmd(c, extra = {}) { return api('/api/command', { method: 'POST', body: JSON.stringify({ cmd: c, ...extra }) }) }
 async function saveCfg(cfg) { return api('/api/config', { method: 'POST', body: JSON.stringify({ config: cfg }) }) }
@@ -1075,16 +1081,47 @@ function renderLogs() {
   if (atBottom) box.scrollTop = box.scrollHeight
 }
 
+let histDay = ''          // 当前选中的日期（YYYY-MM-DD）
+let histShowAll = false   // 「显示全部」是否按下
+
+/** 把服务端的日志清单填进日期下拉。只在清单变化时重建，避免打断用户选择。 */
+function fillHistDays(inv) {
+  const sel = $('histDay')
+  const want = inv.map((x) => x.day)
+  const have = [...sel.options].map((o) => o.value)
+  if (want.join() !== have.join()) {
+    const keep = histDay || sel.value
+    sel.replaceChildren(...inv.map((x) => {
+      const o = document.createElement('option')
+      o.value = x.day
+      const mb = (x.size / 1048576).toFixed(1)
+      o.textContent = x.day === inv[0].day ? `${x.day}（今天，${mb}MB）` : `${x.day}（${mb}MB）`
+      return o
+    }))
+    const pick = want.includes(keep) ? keep : want[0]
+    if (pick) sel.value = pick
+  }
+  if (!histDay) histDay = sel.value || ''
+}
+
 async function loadLogHistory() {
   if (!alive) return
-  const days = Number($('histDays').value) || 3
+  const day = histDay || $('histDay').value || ''
+  // 首次（还不知道有哪些天）先问一次清单：不带 day 就返回最新一天的尾部
+  const max = histShowAll ? 50000 : 2000
   try {
-    const j = await getLogHistory(days)
+    const j = await getLogHistory(day, max)
+    fillHistDays(j.days || [])
     histLines = j.logs || []
-    const inv = j.days || []
-    $('histInfo').textContent = inv.length
-      ? `${inv.length} 天有记录（${inv[inv.length - 1].day} ~ ${inv[0].day}），共 ${histLines.length} 行`
-      : '没有历史日志'
+    const total = Number(j.total || histLines.length)
+    const shown = histLines.length
+    const info = $('histInfo')
+    const label = histDay || j.picked?.[0] || '该日'
+    if (!j.days?.length) info.textContent = '没有历史日志'
+    else if (total > shown) info.textContent = `${label}：共 ${total.toLocaleString()} 行，显示最后 ${shown.toLocaleString()} 行`
+    else info.textContent = `${label}：共 ${total.toLocaleString()} 行`
+    $('logAll').hidden = !(total > shown)
+    $('logAll').textContent = `显示全部 ${total.toLocaleString()} 行`
     if (logMode === 'hist') renderLogs()
   } catch (e) {
     $('histInfo').textContent = '读取失败：' + e.message
@@ -1243,7 +1280,15 @@ function bind() {
   $('logModeNow').onclick = () => setLogMode('now')
   $('logModeHist').onclick = () => setLogMode('hist')
   $('logModeLegacy').onclick = () => setLogMode('legacy')
-  $('histDays').onchange = () => loadLogHistory().then(() => renderLogs())
+  $('histDay').onchange = () => {
+    histDay = $('histDay').value || ''
+    histShowAll = false
+    loadLogHistory().then(() => renderLogs())
+  }
+  $('logAll').onclick = () => {
+    histShowAll = true
+    loadLogHistory().then(() => renderLogs())
+  }
   $('legacyRefresh').onclick = () => loadLegacyLogs().then(() => renderLogs())
 }
 
