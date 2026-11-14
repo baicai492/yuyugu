@@ -4,10 +4,11 @@
     python selftest.py 400        跑 400 秒
     python selftest.py --dump D   把带标注的画面存到 D 目录，肉眼核对识别结果
 
-它验证三件事：
+它验证四件事：
   1. 场地边框定位出来的矩形和模拟器里画的一致（误差 < 2 逻辑像素）
   2. 子弹检测的漏检/误检率（对照模拟器的真实弹位）
-  3. 闭环：引擎真的在躲，统计受击次数与存活时间
+  3. Boss 在场时 HUD 文字带没有被当成子弹
+  4. 闭环：引擎真的在躲，统计受击次数与存活时间
 """
 import os
 import sys
@@ -72,11 +73,53 @@ def test_detect(rounds=40):
     return tp / max(1, tot) > 0.85
 
 
+def test_boss_hud(warmup=20.0):
+    """Boss 在场时 HUD 会往下挪（danmaku.js:266 hy=66/81），白字必须被挖掉。
+
+    2026-11-15 线上那局的「敌弹 205 颗」有一大半是这两行白字：
+    识别时把它们当成子弹，整局都在躲空气。
+
+    模拟器的字比真实画布小，白字只碎成一两颗「子弹」，所以不按绝对数量判，
+    而是**同一帧跑两遍**：boss=True（按血条挖掉文字带）必须比 boss=False 更少。
+    旧代码只挖顶部 30 像素，两遍结果一模一样，这条断言就会失败。
+    """
+    g = SimGame(seed=301)
+    g.player.inv = 1e9          # 没人操作时自机会在 14 秒左右被打光，先开无敌
+    while g.t < warmup and not g.ended:
+        g.step(1 / 30)
+    if not g.boss:
+        print('Boss HUD：模拟里没等到 Boss，跳过')
+        return True
+    img = g.render()
+    f = locate_field(img)
+    if f is None:
+        print('Boss HUD：场地没找到')
+        return False
+    crop = crop_field(img, f)
+    boss, hp = read_boss_hp(crop)
+    pl = (g.player.x, g.player.y)
+
+    def band_count(use_boss):
+        dets, _, _ = detect_objects(crop, pl, boss=use_boss)
+        d = dets[:, :2] if len(dets) else np.zeros((0, 2), np.float32)
+        # 「命 xx 符 xx」两行所在的带（BOSS_HUD_Y），只看左半边
+        return int(((d[:, 1] >= 54) & (d[:, 1] <= 88) & (d[:, 0] < 214)).sum())
+
+    with_mask = band_count(True)
+    without = band_count(False)
+    print('Boss HUD：boss=%s 血量 %.0f%%，HUD 带内残留 %d 颗（不挖文字带时 %d 颗）'
+          % (boss, hp * 100, with_mask, without))
+    return boss and with_mask < without
+
+
 def test_closed_loop(seconds=200, dump=None, verbose=False, seed=7):
     g = SimGame(seed=seed)
     scr = SimScreen(g)
     mou = SimMouse(g)
-    eng = Engine(cfg={'fps': 60, 'dry': False}, screen=scr, mouse=mou)
+    # pipeline 必须关掉：LiveFeed 会把 grab 挪到后台线程，而 SimScreen 每抓一帧
+    # 就推进一次模拟（渲染和时钟绑在一起），两个线程同时 grab 等于把时间线搅乱。
+    eng = Engine(cfg={'fps': 60, 'dry': False, 'pipeline': False},
+                 screen=scr, mouse=mou)
     eng.now = lambda: g.clock
     eng.sleep = lambda s: None
     eng.start()
@@ -100,7 +143,8 @@ def test_closed_loop(seconds=200, dump=None, verbose=False, seed=7):
             f = locate_field(img)
             if f is not None:
                 crop = crop_field(img, f)
-                dets, lasers, haz = detect_objects(crop, eng.player)
+                boss, _ = read_boss_hp(crop)
+                dets, lasers, haz = detect_objects(crop, eng.player, boss=boss)
                 vis = cv2.resize(crop, (FIELD_W * 2, FIELD_H * 2))
                 for x, y, r in dets:
                     cv2.circle(vis, (int(x * 2), int(y * 2)), max(3, int(r * 2)), (0, 255, 0), 1)
@@ -139,14 +183,17 @@ def main():
     for a in args:
         if a.replace('.', '', 1).isdigit():
             secs = float(a)
-    print('=== 1/3 场地定位 ===')
+    print('=== 1/4 场地定位 ===')
     ok1 = test_locate()
-    print('\n=== 2/3 子弹识别 ===')
+    print('\n=== 2/4 子弹识别 ===')
     ok2 = test_detect()
-    print('\n=== 3/3 闭环走位 ===')
+    print('\n=== 3/4 Boss HUD 掩码 ===')
+    ok_boss = test_boss_hud()
+    print('\n=== 4/4 闭环走位 ===')
     ok3, hits, t = test_closed_loop(secs, dump, seed=seed)
-    print('\n总结：定位%s，识别%s，闭环%s'
+    print('\n总结：定位%s，识别%s，Boss HUD%s，闭环%s'
           % ('通过' if ok1 else '有问题', '通过' if ok2 else '有问题',
+             '通过' if ok_boss else '有问题',
              '通过' if ok3 else '未通关（受击 %d 次，存活 %.0f 秒）' % (hits, t)))
 
 

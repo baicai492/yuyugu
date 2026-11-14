@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "鱼鱼谷 · 斗法托管",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "修仙试炼弹幕斗法的图像识别托管：前台看状态，后台由本地 Python 程序抓屏识别、模拟鼠标走位和放符卡。",
   "minimum_chrome_version": "111",
   "permissions": ["storage", "alarms", "nativeMessaging"],

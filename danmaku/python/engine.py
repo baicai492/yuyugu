@@ -17,17 +17,25 @@ from collections import deque
 import numpy as np
 
 from ai import Tracker, Dodger, clamp_player, PLAYER_SPEED
-from io_win import Screen, Mouse, cursor_pos
+from io_win import Screen, Mouse, cursor_pos, LiveFeed
 from vision import (Field, FIELD_W, FIELD_H,
                     locate_field, locate_field_full, crop_field,
                     detect_objects, laser_points,
                     read_boss_hp, frame_is_dark, CAL)
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 
-# 自机挖空区里「鲸鱼色」像素的判据。实测 whale-farm 雪碧图 BGR 均值
-# (158,96,105)、S 均值 116；敌弹里最低的 #ffe040 也有 S=191，
-# 所以用「中等饱和的蓝偏色」能把自机从满屏子弹里认出来。
+# 判受击：自机雪碧图连续消失多久算死了一次。
+#
+# 规则里死亡动画 0.8 秒完全不画自机（danmaku.js:244 的 if(!P.dead)），
+# 而复活后的 2.5 秒无敌期里雪碧图是按 20 Hz 闪烁的（每 50 毫秒亮/暗一次）。
+# 所以「消失」必须按**持续时间**判，不能按「连续几帧」：
+#   30 fps 下 6 帧只有 0.2 秒，闪烁就能骗过去；
+#   8 fps 下 0.8 秒的死亡刚好 6 帧，判据看起来又是对的。
+# 2026-11-15 线上那局只有 3 条命却报了 6 次受击，就是这么来的。
+HIT_ABSENT_SEC = 0.6
+
+
 def _whale_pixels(img, player, cal=CAL):
     """数自机区域里的「鲸鱼色」像素，并给出质心。返回 (像素数, (x,y) 或 None)。
 
@@ -62,12 +70,15 @@ class Engine:
             'dry': False,           # 只识别不动鼠标
             'monitor': 1,           # 0=全部显示器
             'reaction': 1.0,        # 0.5=更灵敏 2=更稳（放大安全余量）
+            'pipeline': True,       # 抓屏放后台线程（启动时决定；离线模拟必须关掉）
         }
         if cfg:
             self.cfg.update({k: v for k, v in cfg.items() if k in self.cfg})
 
         self.screen = screen or Screen(self.cfg['monitor'])
         self.mouse = mouse or Mouse(dry=self.cfg['dry'])
+        # 抓屏是最慢的一步（区域 657x866 实测 17ms），放后台和识别并行。
+        self.feed = LiveFeed(self.screen) if self.cfg['pipeline'] else None
         self.tracker = Tracker()
         self.dodger = Dodger(horizon=self.cfg['horizon'])
         self.dodger.bomb_clearance = self.cfg['bomb_clearance']
@@ -100,7 +111,7 @@ class Engine:
         self.las = 0
         self.haz = 0
         self._prev_enemy = 0
-        self._empty_player = 0
+        self._empty_since = None     # 自机开始「看不见」的时刻
         self._no_boss = 0
         self._no_bullets = 0
         self._seen_boss = False
@@ -111,6 +122,7 @@ class Engine:
         self._pending = None
         self._t_last = 0.0
         self._fps_ema = 0.0
+        self._haz_cache = np.zeros((0, 3), np.float32)
 
     # ---------------- 日志 / 状态 ----------------
     def log(self, msg, level='info'):
@@ -160,16 +172,20 @@ class Engine:
             self.t_end = 0.0
             self.frames = 0
             self._prev_enemy = 0
-            self._empty_player = 0
+            self._empty_since = None
             self._no_boss = 0
             self._no_bullets = 0
             self._seen_boss = False
             self._lost = 0
+            self._relost = 0
             self._last_bomb = 0.0
             self._hit_lock = 0.0
             self._pending = None
             self._t_last = self.now()
+            self._haz_cache = np.zeros((0, 3), np.float32)
             self.tracker.reset()
+        if self.feed is not None:
+            self.feed.arm()
         self.log('开始托管：等待斗法画面…')
 
     def stop(self, why=''):
@@ -181,6 +197,8 @@ class Engine:
             # 往前推，面板上看起来像「停了还在计时」。
             if self.t_start and not self.t_end:
                 self.t_end = self.now()
+        if self.feed is not None:
+            self.feed.disarm()
         self.log('停止托管' + ('（' + why + '）' if why else ''))
 
     def set_hint(self, rect):
@@ -217,6 +235,10 @@ class Engine:
     def shutdown(self):
         self._stop.set()
         self._thread and self._thread.join(timeout=2.0)
+        # 抓屏线程要在 Screen 之前停：它每一轮都拿着同一个 mss 实例在 grab，
+        # 先关 Screen 会让后台线程在 close 过的 mss 上继续调用。
+        if self.feed is not None:
+            self.feed.close()
         self.screen.close()
 
     # ---------------- 主循环 ----------------
@@ -271,8 +293,16 @@ class Engine:
             self.log('找到斗法场地：%.0fx%.0f @ (%.0f,%.0f)' % (field.w, field.h, field.x, field.y))
 
         # 2) 识别 + 跟踪
-        dets, lasers, hazards = detect_objects(crop, self.player)
+        #    先把 Boss 血条读出来：HUD 的位置跟着 Boss 在不在变（danmaku.js:266），
+        #    识别时要把对应的文字带挖掉，否则 Boss 在场时会平白多出几十颗「子弹」。
         boss, hp = read_boss_hp(crop)
+        want_haz = self.frames % 3 == 0
+        dets, lasers, hazards = detect_objects(crop, self.player, boss=boss,
+                                               want_hazards=want_haz)
+        if want_haz:
+            self._haz_cache = hazards
+        else:
+            hazards = self._haz_cache
         arr, total, own = self.tracker.update(dets, dt, self.player)
         enemy = len(arr)
         lpts = laser_points(lasers)
@@ -287,25 +317,25 @@ class Engine:
         if len(lpts):
             arr = np.concatenate([arr, lpts], axis=0) if len(arr) else lpts
 
-        # 3) 受击：自机区域空了。清屏的另外三种情况（放符卡、Boss 换阶段、
-        #    Boss 倒下）都能排除掉。死亡后有 0.8 秒看不见自机，这段时间
-        #    不能再重复判受击，否则一次死亡会连报七八次。
+        # 3) 受击：自机雪碧图在场上持续消失。
+        #
+        #    判据是「持续时间」而不是「连续几帧」，理由见 HIT_ABSENT_SEC。
+        #    雪碧图消失的三种情况：死亡动画（0.8 秒，完全不画）、复活后的无敌
+        #    闪烁（20 Hz，每次 50 毫秒）、Boss 换阶段的短暂清屏。只有第一种
+        #    长到能过 0.6 秒的阈值。
         whale, wpos = _whale_pixels(crop, self.player)
         if whale >= 120 and wpos is not None:
             dx = wpos[0] - self.player[0]
             dy = wpos[1] - self.player[1]
             if abs(dx) < 70 and abs(dy) < 70:      # 质心纠偏，防止推算漂移
-                self.player = (self.player[0] + dx * 0.35, self.player[1] + dy * 0.35)
-        self._empty_player = self._empty_player + 1 if whale < 25 else 0
-        phase_reset = boss and hp > 0.95 and self.hp < 0.5
-        bombed = now - self._last_bomb < 3.2
-        # 清屏 + 自机还看得见 = 不是受击（Boss 换阶段、符卡、结算都会清屏）
-        collapsed = self._prev_enemy >= 8 and enemy <= 2 and whale < 60
-        if now > self._hit_lock:
-            if self._empty_player >= 6 and not bombed:
+                self.player = (self.player[0] + dx * 0.5, self.player[1] + dy * 0.5)
+        if whale < 25:
+            if self._empty_since is None:
+                self._empty_since = now
+            elif now > self._hit_lock and now - self._empty_since >= HIT_ABSENT_SEC:
                 self._on_hit('自机被击中', now)
-            elif collapsed and not bombed and not phase_reset:
-                self._on_hit('子弹清屏（判定为受击）', now)
+        else:
+            self._empty_since = None
 
         # 4) 走位
         target, info = self.dodger.decide(self.player, arr)
@@ -345,28 +375,44 @@ class Engine:
             self.frames += 1
             self._prev_enemy = enemy
 
+    def _grab(self, rect):
+        """抓一帧：有后台抓屏线程就用它的最新帧，否则直接抓。"""
+        if self.feed is not None:
+            return self.feed.grab(rect)
+        return self.screen.grab(rect)
+
     def _grab_field(self):
         """抓一帧并把场地裁出来。返回 (Field, 识别图) 或 (None, None)。"""
-        if self.field is None:
-            img = self.screen.grab(None)          # 整屏找
+        # 先把 self.field 取到本地：UI 线程随时可能 start() 把它清成 None，
+        # 每处都重新读一次 self.field 就有在两次读之间变成 None 的窗口。
+        cur = self.field
+        if cur is None:
+            img = self._grab(None)                # 整屏找
+            if img is None:
+                return None, None
             f = locate_field_full(img, self.hint)
             if f is None:
                 return None, None
             return f, crop_field(img, f)
         pad = 10
-        x, y, w, h = self.field.rect(pad)
-        img = self.screen.grab((x, y, w, h))
+        x, y, w, h = cur.rect(pad)
+        img = self._grab((x, y, w, h))
+        if img is None:
+            return None, None
         # 在裁剪图里重新定位：窗口被拖动/缩放时自动跟上。
         # 单帧找不到就沿用上一帧的矩形（边框可能被自机/弹幕压住）；
         # 连着 12 帧都找不到说明窗口真的动了，清掉让下一帧整屏重找。
-        f2 = locate_field(img, {'x': pad, 'y': pad, 'w': self.field.w, 'h': self.field.h})
+        f2 = locate_field(img, {'x': pad, 'y': pad, 'w': cur.w, 'h': cur.h})
         if f2 is None:
             self._relost += 1
             if self._relost > 12:
+                # 这里绝不能先 self.field = None 再用 self.field.x：
+                # 2026-11-15 线上就是这么抛的
+                # 'NoneType' object has no attribute 'x'，那一帧识别/走位全跳过。
                 self._relost = 0
                 self.field = None
-            return self.field, crop_field(img, Field(self.field.x - x, self.field.y - y,
-                                                     self.field.w, self.field.h))
+                return None, None
+            return cur, crop_field(img, Field(cur.x - x, cur.y - y, cur.w, cur.h))
         self._relost = 0
         f2 = Field(f2.x + x, f2.y + y, f2.w, f2.h)
         return f2, crop_field(img, Field(f2.x - x, f2.y - y, f2.w, f2.h))
@@ -388,19 +434,25 @@ class Engine:
     def _drive(self, target):
         """把指针移到目标点。位置推算在下一次 _advance_player 里做。"""
         fx, fy = clamp_player(*target)
-        sx, sy = self.field.to_screen(fx, fy)
-        if not self.cfg['dry']:
-            self.mouse.move(sx, sy)
         self._pending = (fx, fy)
+        f = self.field
+        if f is None:              # 场地刚被 UI 线程清掉，这一帧不动鼠标
+            return
+        if not self.cfg['dry']:
+            self.mouse.move(*f.to_screen(fx, fy))
 
     def _on_hit(self, why, now=None):
         now = self.now() if now is None else now
         self.hits += 1
         self.bombs = max(self.bombs, 2)     # danmaku.js:225 复活后符卡补满到 2
         self.player = (FIELD_W / 2, FIELD_H - 50)
-        self._empty_player = 0
+        self._pending = None               # 别把死亡前的走位目标继续外推
+        self._empty_since = None
         self._prev_enemy = 0
-        self._hit_lock = now + 1.5          # 死亡动画 0.8 秒，别连着报
+        # 复活后 2.5 秒无敌（danmaku.js:166），这段时间里雪碧图 20 Hz 闪烁。
+        # 锁 3.2 秒：判受击本身要等 0.6 秒，加起来才盖得住无敌期，
+        # 否则闪烁会被当成第二次、第三次死亡。
+        self._hit_lock = now + 3.2
         self.tracker.reset()
         self.log('%s，自机回到中下方（第 %d 次）' % (why, self.hits), 'warn')
 

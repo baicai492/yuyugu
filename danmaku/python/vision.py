@@ -23,9 +23,16 @@ FIELD_W, FIELD_H = 384, 512
 CAL = 2                       # 识别分辨率倍数
 BORDER_BGR = (50, 119, 183)   # #b77732 场地边框
 
-# HUD 在左上角（danmaku.js:266-267），最上面 30 逻辑像素里没有可躲的东西：
-# 血条 8..12、名字 y=24，再往下才是场地。整条挖掉，省得把血条当子弹。
-HUD_H = 30
+# HUD 在左上角，但**位置随 Boss 在不在变**（danmaku.js:266 的 hy=boss?66:16）：
+#   · 没有 Boss：两行文字在 y=16 / y=31
+#   · 有 Boss：两行文字在 y=66 / y=81，另外 Boss 名字和倒计时在 y=24
+# 白字全都能过 WHITE_V/WHITE_S 阈值，不挖掉就会被当成一堆子弹，
+# 整局都在躲两行不存在的弹（2026-11-15 线上那局 Boss 血条 57% 时就是这状态）。
+HUD_TOP = 36                  # 逻辑像素：非 Boss 的两行 + Boss 名字/倒计时
+BOSS_HUD_Y = (54, 88)         # Boss 在场时 hy=66 / 81 两行的高度范围
+BOSS_HUD_X = 214              # 两行都是左对齐，214 逻辑像素足够宽
+SPELL_Y = (28, 50)            # 符卡名（右对齐、背景条 y=30..48、基线 43）
+SPELL_X = 204                 # 符卡名从右边往左最多占这么宽
 
 # 敌弹阈值。背景美术带两层压暗叠加（0.25 黑 + 0.28 深蓝），再亮的竹林
 # 也到不了 V=168 且 S=135；纯白弹（PAL.white #e0e0e0 白核）S 很低，走第二条。
@@ -171,13 +178,33 @@ def _player_mask_rect(player):
     return (px - 21, py - 33, px + 21, py + 21)
 
 
-def detect_objects(field_img, player=None, cal=CAL):
+def _mask_hud(m, cal, boss):
+    """把 HUD 文本带整条挖掉（见 HUD_TOP 上方的说明）。
+
+    Boss 在场时多挖两条：左上角两行数值（hy=66/81）和右上角的符卡名。
+    宁可少看见几颗顶部的子弹——那一带离自机还有一秒以上的飞行时间，
+    漏一两帧不影响走位；而把白字当子弹会让整局都在躲空气。
+    """
+    m[:HUD_TOP * cal, :] = 0
+    if not boss:
+        return
+    y0, y1 = BOSS_HUD_Y
+    m[y0 * cal:y1 * cal, :BOSS_HUD_X * cal] = 0
+    sy0, sy1 = SPELL_Y
+    m[sy0 * cal:sy1 * cal, SPELL_X * cal:] = 0
+
+
+def detect_objects(field_img, player=None, cal=CAL, boss=False, want_hazards=True):
     """识别一帧里的敌弹、激光和敌机。
 
     返回 (bullets, lasers, hazards)
       bullets: np.float32 (n,3)  [x, y, r]  逻辑坐标
       lasers:  list of dict      {x,y,dx,dy,len,w}  逻辑坐标
       hazards: np.float32 (m,3)  [x, y, r]  敌机外接圆，逻辑坐标
+
+    boss: 这一帧有没有 Boss 血条（HUD 位置跟着它变，见 _mask_hud）。
+    want_hazards: 敌机每 3 帧算一次就够（它们只有几十像素/秒），
+                  调用方可以在其余帧传 False 并复用上一次的结果。
     """
     hsv = cv2.cvtColor(field_img, cv2.COLOR_BGR2HSV)
 
@@ -194,7 +221,7 @@ def detect_objects(field_img, player=None, cal=CAL):
     edge = max(2, int(round(3 * cal)))
     pr = _player_mask_rect(player)
     for m in (wide, core):
-        m[:HUD_H * cal, :] = 0              # 顶部 HUD
+        _mask_hud(m, cal, boss)
         m[:edge, :] = 0                     # 场地棕边框（它本身也过阈值）
         m[-edge:, :] = 0
         m[:, :edge] = 0
@@ -249,14 +276,21 @@ def detect_objects(field_img, player=None, cal=CAL):
     #    单块看和弹群没区别，但整只敌机几乎**没有弹芯**（芯比 < 0.1，
     #    而弹群是 0.8+）。按 24 像素邻域把「大块无芯」的碎片并起来，
     #    就是一只敌机的外框。敌机撞人按 size*0.25 判（danmaku.js:177）。
-    core_cnt = np.bincount(lab[core > 0].ravel(), minlength=n).astype(np.float32)
-    frac = core_cnt / np.maximum(1.0, a)
-    plain = ((a >= 55) & (frac < 0.10) & (w >= 5) & (h >= 5) &
-             ~is_laser & (np.arange(n) != 0))
-    plain[big] = False
     hazards = []
-    if plain.any():
-        m = np.isin(lab, np.nonzero(plain)[0]).astype(np.uint8)
+    if want_hazards:
+        core_cnt = np.bincount(lab[core > 0].ravel(), minlength=n).astype(np.float32)
+        frac = core_cnt / np.maximum(1.0, a)
+        plain = ((a >= 55) & (frac < 0.10) & (w >= 5) & (h >= 5) &
+                 ~is_laser & (np.arange(n) != 0))
+        plain[big] = False
+    else:
+        plain = None
+    if plain is not None and plain.any():
+        # np.isin 在 768x1024 的 int32 标签图上是先排序再查找（实测 2.9ms）；
+        # 换成「标签 → 0/1 查表」只要 1.9ms，等价且不依赖实现细节。
+        lut = np.zeros(n, np.uint8)
+        lut[np.nonzero(plain)[0]] = 1
+        m = lut[lab]
         k = 25                                  # 合并半径（识别坐标像素）
         m = cv2.dilate(m, np.ones((k, k), np.uint8))
         hn, _hl, hst, _hc = cv2.connectedComponentsWithStats(m, 8, cv2.CV_32S)
